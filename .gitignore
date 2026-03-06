@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# Excel / Data files
+*.xlsx
+*.csv
+
+# Logs
+*.log
+task_log.txt
+
+# PyCharm
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

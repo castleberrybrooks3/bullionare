@@ -1,0 +1,154 @@
+/* ====== Layout ====== */
+.dashboard {
+  display: flex;
+  height: calc(100vh - 60px); /* leave space for Navbar */
+  background-color: #0E1424;
+  color: #ffffff;
+  font-family: "Segoe UI", sans-serif;
+  min-height: 100vh;
+}
+
+/* ====== Sidebar ====== */
+.sidebar {
+  background-color: #111126;
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  border-right: 1px solid #2c2c3c;
+  position: relative;
+  transition: width 0.2s ease;
+}
+
+.sidebar.collapsed {
+  width: 60px !important;
+}
+
+.sidebar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.sidebar-title {
+  font-size: 1.5rem;
+  color: #19C37D; /* brand green */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.collapse-btn {
+  background: none;
+  border: none;
+  color: #19C37D;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+/* ====== Sidebar Nav ====== */
+.sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 20px;
+}
+
+.sidebar-item {
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-item:hover {
+  background-color: #22223a;
+}
+
+.sidebar-item.active {
+  background-color: #19C37D;
+  color: #111126;
+  font-weight: bold;
+}
+
+/* ====== Resizer ====== */
+.resizer {
+  width: 4px;
+  cursor: ew-resize;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  background-color: transparent;
+}
+
+/* ====== Main Content ====== */
+.main-content {
+  flex: 1;
+  overflow: auto;
+  transition: margin 0.2s ease;
+  /* Keep padding consistent with your old Dashboard */
+  padding: 40px;
+  background-color: #0E1424;
+}
+
+/* ====== Scrollbar Styling (Optional) ====== */
+.main-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.main-content::-webkit-scrollbar-thumb {
+  background-color: #2c2c3c;
+  border-radius: 4px;
+}
+
+.main-content::-webkit-scrollbar-track {
+  background-color: #111126;
+}
+
+/* ====== StockTable Horizontal Scroll ====== */
+.stock-table-wrapper {
+  overflow-x: auto;   /* enables horizontal scrolling */
+  max-width: 100%;
+}
+
+.stock-table-wrapper::-webkit-scrollbar {
+  height: 8px;
+}
+
+.stock-table-wrapper::-webkit-scrollbar-thumb {
+  background-color: #2c2c3c;
+  border-radius: 4px;
+}
+
+.stock-table-wrapper::-webkit-scrollbar-track {
+  background-color: #111126;
+}
+.sidebar-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px;
+  cursor: pointer;
+}
+
+.dropdown-arrow {
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.sector-list {
+  margin-left: 15px;
+}
+
+.sector-item {
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sector-item:hover {
+  background-color: rgb(25, 195, 125);
+}

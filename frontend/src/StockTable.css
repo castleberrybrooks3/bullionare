@@ -1,0 +1,255 @@
+/* ====================== DARK DASHBOARD BASE ====================== */
+.stock-table-container {
+  padding: 30px;
+  background-color: #0d1327; /* deep dark */
+  color: #ffffff; /* all text white */
+  min-height: 100vh;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+.stock-table-container h2 {
+  font-weight: 700;
+  margin-bottom: 20px;
+  color: #ffffff;
+}
+
+/* ====================== TOOLBAR ====================== */
+.toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.search-input {
+  padding: 8px 12px;
+  font-size: 14px;
+  background-color: #ffffff;
+  border: 1px solid #1f2a44;
+  color: #000000;
+  border-radius: 6px;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: #19c37d;
+  box-shadow: 0 0 5px rgba(25,195,125,0.4);
+}
+
+.refresh-button {
+  background-color: #19c37d;
+  border: none;
+  color: #ffffff;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.refresh-button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 10px rgba(25,195,125,0.3);
+}
+
+/* ====================== AG GRID WRAPPER ====================== */
+.stock-table-wrapper {
+  background-color: #121c2f;
+  border-radius: 12px;
+  overflow: hidden;
+  max-height: 75vh;
+  box-shadow: 0 4px 15px rgb(255, 255, 255);
+}
+
+/* ====================== AG GRID DARK STYLING ====================== */
+.ag-theme-alpine {
+  font-size: 13px;
+  color: #ffffff;
+  border: none;
+  background-color: #121c2f;
+}
+
+/* Header row */
+.ag-theme-alpine .ag-header {
+  background-color: #121c2f;
+  color: #ffffff;
+  font-weight: 600;
+  font-size: 14px;
+  border-bottom: none;
+}
+
+.ag-theme-alpine .ag-header-cell-label {
+  justify-content: center;
+  text-transform: uppercase;
+}
+
+/* Rows */
+.ag-theme-alpine .ag-row:nth-child(even) {
+  background-color: #0f172a;
+}
+.ag-theme-alpine .ag-row:nth-child(odd) {
+  background-color: #121c2f;
+}
+
+.ag-theme-alpine .ag-row:hover {
+  background-color: #1e293b;
+  transition: background-color 0.2s;
+}
+
+/* Watchlist highlight */
+.ag-theme-alpine .watchlist-row {
+  background-color: #0ea5e9 !important; /* bright blue highlight */
+  font-weight: 600;
+  color: #fdfdfd !important;
+}
+
+/* Cells */
+.ag-theme-alpine .ag-cell {
+  text-align: center;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: none; /* remove Excel grid lines */
+  color: #ffffff;
+}
+
+/* Stars column */
+.ag-cell.column-border span {
+  display: inline-block;
+  width: 100%;
+  text-align: center;
+  cursor: pointer;
+  transition: transform 0.2s, text-shadow 0.3s;
+}
+
+.ag-cell.column-border span:hover {
+  transform: scale(1.3);
+  text-shadow: 0 0 10px #19c37d;
+}
+
+/* Numeric columns */
+.ag-theme-alpine .ag-cell.numeric {
+  text-align: right;
+  color: #ffffff;
+}
+
+/* Positive / negative numbers */
+.ag-theme-alpine .ag-cell.positive {
+  color: #10b981;
+  font-weight: 500;
+  text-align: right;
+}
+.ag-theme-alpine .ag-cell.negative {
+  color: #ef4444;
+  font-weight: 500;
+  text-align: right;
+}
+
+/* Filter popups */
+.ag-theme-alpine .ag-menu,
+.ag-theme-alpine .ag-filter-wrapper {
+  background-color: #ffffff !important;
+  color: #000000 !important;
+  border-radius: 10px !important;
+  box-shadow: none;
+  padding: 10px !important;
+}
+
+.ag-theme-alpine .ag-input-field-input {
+  background-color: #ffffff !important;
+  color: #000000 !important;  /* ← make text black */
+  border-radius: 6px !important;
+  border: 1px solid #374151 !important;
+}
+
+.ag-theme-alpine .ag-standard-button {
+  background-color: #19c37d !important;
+  color: #ffffff !important;
+  border-radius: 6px !important;
+}
+
+.ag-number-field-input-wrapper::before,
+.ag-input-wrapper::before {
+  display: none !important;
+  content: none !important;
+}
+.ag-number-field-input {
+  padding-left: 8px !important;
+}
+
+/* Loading text */
+.loading-text {
+  padding: 20px;
+  color: #9ca3af;
+}
+
+/* Header text white */
+.ag-theme-alpine .ag-header-cell-label {
+  color: #ffffff !important;
+}
+
+/* Filter hamburger icon */
+.ag-theme-alpine .ag-header-cell .ag-header-icon {
+  filter: invert(100%) !important; /* invert black to white */
+}
+
+/* Sort arrows */
+.ag-theme-alpine .ag-header-cell .ag-sort-order {
+  filter: invert(100%) !important;
+}
+
+/* Optional: hover state */
+.ag-theme-alpine .ag-header-cell:hover .ag-header-icon {
+  filter: invert(100%) !important;
+}
+
+/* Watchlist empty space background */
+.ag-theme-alpine.ag-watchlist .ag-body-viewport {
+  background-color: #0f172a; /* same blue as your watchlist rows */
+}
+
+/* Ensure filter inputs remain editable */
+.ag-theme-alpine .ag-input-field-input {
+  pointer-events: auto !important;
+  user-select: text !important;
+}
+
+.ag-theme-alpine .ag-input-field-input:focus {
+  outline: none !important;
+  box-shadow: none !important;
+  border: 1px solid #374151 !important;
+}
+
+.dashboard-header {
+  text-align: center;
+  margin-top: -90px;   /* 👈 pulls it upward */
+  margin-bottom: -20px;
+}
+
+.dashboard-title {
+  font-family: 'Anton', sans-serif;
+  font-size: 72px;   /* smaller than homepage */
+  font-weight: 700;
+  letter-spacing: 3px;
+  margin: 0;
+  color: white;
+}
+
+.dashboard-subtitle {
+  font-size: 16px;
+  letter-spacing: 3px;
+  margin-top: 10px;
+  color: #94a3b8;
+}
+
+/* Positive numbers in green */
+.ag-theme-alpine .positive {
+  color: #10b981 !important; /* green */
+  font-weight: 500;
+  text-align: right;
+}
+
+/* Negative numbers in red */
+.ag-theme-alpine .negative {
+  color: #ef4444 !important; /* red */
+  font-weight: 500;
+  text-align: right;
+}

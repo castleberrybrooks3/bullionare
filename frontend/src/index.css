@@ -1,0 +1,45 @@
+/* NAVBAR LOGO */
+.logo {
+  font-family: 'Anton', sans-serif;
+  font-size: 3.5rem;
+  letter-spacing: 3px;
+  height: 100px;
+  width: auto;
+}
+
+/* HOMEPAGE TITLE (BULLIONARE) */
+.home-title {
+  font-family: 'Anton', sans-serif;
+  font-size: 3.5rem;
+  letter-spacing: 3px;
+  position: relative;
+  top: -40px; /* adjust this number to move the title */
+}
+
+/* DASHBOARD TITLE */
+.dashboard-title {
+  font-family: 'Anton', sans-serif;
+  font-size: 2rem;
+  letter-spacing: 2px;
+}
+
+/* DEFAULT PAGE STYLES */
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto',
+    'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans',
+    'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+.dashboard-title {
+  font-family: 'Anton', sans-serif;
+  font-size: 100px;   /* change this to whatever size you want */
+  letter-spacing: 2px;
+  margin-top: 20px;
+}

@@ -1,0 +1,29 @@
+.navbar {
+  background-color: #0E1424;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 40px;   /* controls navbar size */
+  color: #F3F4F6;
+}
+
+.logo {
+  height: 100px;   /* change this to resize */
+  width: auto;    /* keeps proportions correct */
+}
+
+.navbar-logo {
+  height: 60px;
+  width: auto;
+  margin-left: 35px;
+}
+
+.nav-links a {
+  margin-left: 30px;
+  text-decoration: none;
+  color: #F3F4F6;
+}
+
+.nav-links a:hover {
+  color: #19C37D;
+}

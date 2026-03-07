@@ -16,7 +16,7 @@ ModuleRegistry.registerModules([AllCommunityModule]);
   const [typedQuery, setTypedQuery] = useState(""); // updates immediately as user types
   const [searchQuery, setSearchQuery] = useState(""); // updates after debounce
 
-  const displayedCountRef = useRef(0);
+  const [displayedCount, setDisplayedCount] = useState(0);
   const [starModalOpen, setStarModalOpen] = useState(false);
   const [modalTicker, setModalTicker] = useState(null);
   const [modalSelectedLists, setModalSelectedLists] = useState([]);
@@ -399,10 +399,10 @@ const exportToCsv = () => {
 )}
 
       {view !== "Watchlist" && (
-        <div style={{ marginBottom: "10px", fontSize: "14px", color: "#ffffff" }}>
-            Currently showing {rowData.length} tickers
-        </div>
-      )}
+  <div style={{ marginBottom: "10px", fontSize: "14px", color: "#ffffff" }}>
+    Currently showing {displayedCount} tickers
+  </div>
+)}
 {view === "Watchlist" && (
   <div style={{ marginBottom: "10px" }}>
     <button onClick={exportToCsv}>
@@ -441,13 +441,13 @@ const exportToCsv = () => {
   rowHeight={30}
           onGridReady={(params) => {
   gridRef.current = params.api;
-  displayedCountRef.current = params.api.getDisplayedRowCount();
+  setDisplayedCount(params.api.getDisplayedRowCount());
 }}
-          onFirstDataRendered={(params) => {
-  displayedCountRef.current = params.api.getDisplayedRowCount();
+onFirstDataRendered={(params) => {
+  setDisplayedCount(params.api.getDisplayedRowCount());
 }}
-            onFilterChanged={(params) => {
-  displayedCountRef.current = params.api.getDisplayedRowCount();
+onFilterChanged={(params) => {
+  setDisplayedCount(params.api.getDisplayedRowCount());
 }}
         />
       </div>

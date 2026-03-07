@@ -6,8 +6,12 @@ import math
 
 app = FastAPI()
 
-# Allow frontend on localhost:3000
-origins = ["http://localhost:3000"]
+# Allow frontend on localhost for dev AND production front end
+origins = [
+    "http://localhost:3000",
+    "https://bullionareiq.com",
+    "https://www.bullionareiq.com"
+]
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,7 +43,7 @@ def get_stocks():
                 if isinstance(value, float) and (math.isinf(value) or math.isnan(value)):
                     value = None
 
-                # Map database column Ticker -> ticker for frontend
+                # Keep same keys for frontend
                 cleaned_row[key] = value
 
             result.append(cleaned_row)

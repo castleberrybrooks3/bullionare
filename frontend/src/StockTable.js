@@ -42,15 +42,19 @@ const [activeList, setActiveList] = useState("Default");
   ];
 
   const fetchStocks = async () => {
-    try {
-      const res = await fetch("http://127.0.0.1:8000/stocks");
-      const data = await res.json();
-      setStocks(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error(err);
-      setStocks([]);
-    }
-  };
+  try {
+    const API_BASE =
+      process.env.NODE_ENV === "development"
+        ? "http://localhost:8000" // local dev
+        : "https://bullionare.onrender.com"; // your Render backend
+    const res = await fetch(`${API_BASE}/stocks`);
+    const data = await res.json();
+    setStocks(Array.isArray(data) ? data : []);
+  } catch (err) {
+    console.error(err);
+    setStocks([]);
+  }
+};
 
   useEffect(() => {
     fetchStocks();
@@ -396,7 +400,7 @@ const exportToCsv = () => {
 
       {view !== "Watchlist" && (
         <div style={{ marginBottom: "10px", fontSize: "14px", color: "#ffffff" }}>
-          Currently showing {displayedCountRef.current} tickers
+            Currently showing {rowData.length} tickers
         </div>
       )}
 {view === "Watchlist" && (

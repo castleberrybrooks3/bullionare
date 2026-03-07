@@ -218,22 +218,22 @@ const [activeList, setActiveList] = useState("Default");
   };
 
   if (processedStocks.some((row) => !isNaN(cleanNumber(row[col])))) {
-    columnDef.filter = "agNumberColumnFilter";
-    columnDef.filterParams = {
-      filterOptions: ["greaterThan", "lessThan", "inRange"],
-      suppressAndOrCondition: true,
-      buttons: ["reset"],
-      debounceMs: 200,
-    };
-    columnDef.cellClass = "numeric";
-  } else {
-    columnDef.filter = "agTextColumnFilter";
-    columnDef.filterParams = {
-      buttons: ["reset"],
-      debounceMs: 200,
-      suppressAndOrCondition: true,
-    };
-  }
+  columnDef.filter = "agNumberColumnFilter";
+  columnDef.filterParams = {
+    filterOptions: ["greaterThan", "lessThan", "inRange"],
+    suppressAndOrCondition: true,
+    buttons: ["apply", "reset"], // only apply when pressed
+    debounceMs: 0,               // stop auto-updating
+  };
+  columnDef.cellClass = "numeric";
+} else {
+  columnDef.filter = "agTextColumnFilter";
+  columnDef.filterParams = {
+    buttons: ["apply", "reset"], // now text filters inside headers also use Apply
+    debounceMs: 0,
+    suppressAndOrCondition: true,
+  };
+}
 
   cols.push(columnDef);
 });

@@ -20,15 +20,28 @@ ModuleRegistry.registerModules([AllCommunityModule]);
   const [starModalOpen, setStarModalOpen] = useState(false);
   const [modalTicker, setModalTicker] = useState(null);
   const [modalSelectedLists, setModalSelectedLists] = useState([]);
+  const [notification, setNotification] = useState(null);
+  const [loading, setLoading] = useState(true);
 
   const [watchlists, setWatchlists] = useState(() => {
   const saved = localStorage.getItem("watchlists");
-  return saved ? JSON.parse(saved) : { Default: [] };
+  try {
+    const parsed = saved ? JSON.parse(saved) : null;
+    return parsed && Object.keys(parsed).length ? parsed : { Default: [] };
+  } catch {
+    return { Default: [] }; // fallback if localStorage is corrupted
+  }
 });
 
-const [activeList, setActiveList] = useState("Default");
+const [activeList, setActiveList] = useState(() =>
+  localStorage.getItem("activeList") || "Default"
+);
 
-  const gridRef = useRef(null);
+useEffect(() => {
+  localStorage.setItem("activeList", activeList);
+}, [activeList]);
+
+  const gridRef = useRef({ api: null });
 
   const rangeOnlyColumns = [
     "Current Price",
@@ -42,6 +55,7 @@ const [activeList, setActiveList] = useState("Default");
   ];
 
   const fetchStocks = async () => {
+  setLoading(true); // start loading
   try {
     const API_BASE =
       process.env.NODE_ENV === "development"
@@ -53,6 +67,8 @@ const [activeList, setActiveList] = useState("Default");
   } catch (err) {
     console.error(err);
     setStocks([]);
+  } finally {
+    setLoading(false); // stop loading
   }
 };
 
@@ -106,57 +122,84 @@ const [activeList, setActiveList] = useState("Default");
 };
 
   const parseMarketCap = (val) => {
-    if (!val) return null;
+  if (!val) return null;
 
-    const suffix = val.slice(-1).toUpperCase();
-    let num = parseFloat(val);
-    if (isNaN(num)) return null;
+  if (typeof val === "number") return val;
 
-    switch (suffix) {
-      case "T":
-        return num * 1_000_000_000_000;
-      case "B":
-        return num * 1_000_000_000;
-      case "M":
-        return num * 1_000_000;
-      default:
-        return num;
-    }
-  };
+  const str = val.toString().toUpperCase().trim();
 
-  // === DEFINE COLUMNS HERE AT TOP LEVEL OF COMPONENT ===
-  const columnDefsRef = useRef(null);
+  if (str.endsWith("T")) return parseFloat(str) * 1e12;
+  if (str.endsWith("B")) return parseFloat(str) * 1e9;
+  if (str.endsWith("M")) return parseFloat(str) * 1e6;
+
+  return parseFloat(str);
+};
 
   const columns = useMemo(() => {
-  if (columnDefsRef.current) return columnDefsRef.current;
   if (!processedStocks.length) return [];
 
   const cols = [
     {
-      headerName: "★",
-      field: "star",
-      width: 60,
-      pinned: "left",
-      sortable: false,
-      filter: false,
-      cellStyle: { textAlign: "center", fontSize: "18px" },
-      cellRenderer: (params) => {
-        const ticker = params.data?.Ticker;
-        if (!ticker) return "☆";
-        return (
-          <span
-            onClick={() => openStarModal(ticker)}
-            style={{ cursor: "pointer" }}
-          >
-            {Object.values(watchlists).some((list) => list.includes(ticker))
-              ? "★"
-              : "☆"}
-          </span>
-        );
-      },
-      cellClass: "column-border",
-      headerClass: "column-border",
-    },
+  headerName: "★",
+  colId: "star",
+  field: "star",
+  width: 60,
+  pinned: "left",
+  sortable: false,
+  filter: false,
+  cellStyle: { textAlign: "center", fontSize: "18px" },
+  cellClass: "column-border",
+  headerClass: "column-border",
+
+  cellRenderer: (params) => {
+    const ticker = params.data?.Ticker;
+    if (!ticker) return "☆";
+
+    const inAnyWatchlist = Object.values(watchlists).some(list =>
+      list.includes(ticker)
+    );
+
+    return (
+      <span
+        style={{ cursor: "pointer" }}
+        onClick={() => {
+          const isInActiveList = watchlists[activeList]?.includes(ticker);
+
+          if (view === "Watchlist" && isInActiveList) {
+            // REMOVE instantly in Watchlist view
+            const updated = { ...watchlists };
+            updated[activeList] = updated[activeList].filter(t => t !== ticker);
+            setWatchlists(updated);
+            localStorage.setItem("watchlists", JSON.stringify(updated));
+
+            setNotification(`${ticker} removed from watchlist`);
+            setTimeout(() => setNotification(null), 1500);
+
+            if (gridRef.current?.api) {
+              gridRef.current.api.refreshClientSideRowModel("everything");
+              gridRef.current.api.redrawRows();
+            }
+
+            return; // STOP modal from opening
+          }
+
+          // OPEN modal for Stocks view or Watchlist tickers not in active list
+          setModalTicker(ticker);
+          const selected = Object.keys(watchlists).filter(listName =>
+            watchlists[listName]?.includes(ticker)
+          );
+          setModalSelectedLists(selected);
+          setStarModalOpen(true);
+        }}
+      >
+        {inAnyWatchlist ? "★" : "☆"}
+      </span>
+    );
+  },
+
+  cellClass: "column-border",
+  headerClass: "column-border",
+},
     {
       field: "Ticker",
       headerName: "Ticker",
@@ -180,92 +223,119 @@ const [activeList, setActiveList] = useState("Default");
   if (col === "Ticker" || col === "star") return;
 
   const columnDef = {
-    headerName: col,
-    field: col,
-    sortable: true,
-    flex: 1,
-    minWidth: 110,
-    headerClass: "column-border",
-    cellClass: "column-border",
+  headerName: col,
+  field: col,
 
-    valueFormatter: (params) => {
-  const val = params.value;
+  valueGetter: (params) => {
+    if (col === "Market Cap") {
+      return parseMarketCap(params.data["Market Cap"]);
+    }
+    return params.data[col];
+  },
 
-  if (col === "Market Cap" && val != null) {
-    if (val >= 1_000_000_000_000) return (val / 1_000_000_000_000).toFixed(2) + "T";
-    if (val >= 1_000_000_000) return (val / 1_000_000_000).toFixed(2) + "B";
-    if (val >= 1_000_000) return (val / 1_000_000).toFixed(2) + "M";
-    return val;
+  sortable: true,
+  flex: 1,
+  minWidth: 130,
+  headerClass: "column-border",
+  cellClass: "column-border",
+
+  valueFormatter: (params) => {
+    const val = params.value;
+
+    if (col === "Market Cap" && val != null) {
+      if (val >= 1_000_000_000_000) return (val / 1_000_000_000_000).toFixed(2) + "T";
+      if (val >= 1_000_000_000) return (val / 1_000_000_000).toFixed(2) + "B";
+      if (val >= 1_000_000) return (val / 1_000_000).toFixed(2) + "M";
+      return val;
+    }
+
+    if (["Upside %", "Downside %"].includes(col)) {
+      return val != null ? `${val.toFixed(2)}%` : "";
+    }
+
+    if (["P/E (TTM)", "Mean Target", "Risk-Reward Score"].includes(col)) {
+      return val != null ? val.toFixed(2) : "";
+    }
+
+    if (col === "Dividend") {
+      return val != null ? `${val.toFixed(2)}%` : "";
+    }
+
+    return val ?? "";
   }
+};
 
-  // Percent columns
-  if (["Upside %", "Downside %"].includes(col)) {
-    return val != null ? `${val.toFixed(2)}%` : "";
-  }
+  if (col === "Market Cap") {
 
-  // Decimal numeric columns
-  if (["P/E (TTM)", "Mean Target", "Risk-Reward Score"].includes(col)) {
-    return val != null ? val.toFixed(2) : "";
-  }
-
-  // Dividend stays percent
-  if (col === "Dividend") {
-    return val != null ? `${val.toFixed(2)}%` : "";
-  }
-
-  return val ?? "";
-}
-  };
-
-  if (processedStocks.some((row) => !isNaN(cleanNumber(row[col])))) {
   columnDef.filter = "agNumberColumnFilter";
+
+  columnDef.filterParams = {
+  filterOptions: ["greaterThan", "lessThan", "inRange"],
+  buttons: ["apply", "reset"],
+  suppressAndOrCondition: true,
+
+  allowedCharPattern: "\\d\\.MBTmbt",
+
+  numberParser: function(text) {
+    if (!text) return null;
+
+    const str = text.toString().replace(/,/g,"").toUpperCase().trim();
+
+    if (str.endsWith("T")) return parseFloat(str) * 1e12;
+    if (str.endsWith("B")) return parseFloat(str) * 1e9;
+    if (str.endsWith("M")) return parseFloat(str) * 1e6;
+
+    return parseFloat(str);
+  }
+};
+
+  columnDef.cellClass = "numeric";
+
+} else if (processedStocks.some(row => !isNaN(cleanNumber(row[col])))) {
+
+  columnDef.filter = "agNumberColumnFilter";
+
   columnDef.filterParams = {
     filterOptions: ["greaterThan", "lessThan", "inRange"],
     suppressAndOrCondition: true,
-    buttons: ["apply", "reset"], // only apply when pressed
-    debounceMs: 0,               // stop auto-updating
+    buttons: ["apply", "reset"]
   };
+
   columnDef.cellClass = "numeric";
+
 } else {
+
   columnDef.filter = "agTextColumnFilter";
+
   columnDef.filterParams = {
-    buttons: ["apply", "reset"], // now text filters inside headers also use Apply
-    debounceMs: 0,
-    suppressAndOrCondition: true,
+    buttons: ["apply", "reset"],
+    suppressAndOrCondition: true
   };
+
 }
 
   cols.push(columnDef);
 });
-
-  columnDefsRef.current = cols;
   return cols;
-}, [processedStocks]);
+}, [processedStocks, watchlists, activeList, view]);
 
   const rowData = useMemo(() => {
   let base =
     view === "Watchlist"
       ? processedStocks.filter((s) =>
-          watchlists[activeList]?.includes(s.Ticker)
+          (watchlists[activeList] ?? []).includes(s.Ticker)
         )
       : processedStocks;
 
-  // Only apply sector filter when viewing Stocks
   if (view === "Stocks" && selectedSector) {
     base = base.filter(
       (stock) => stock.Sector?.toLowerCase() === selectedSector.toLowerCase()
     );
   }
 
-  // Search filter
-  if (searchQuery) {
-    base = base.filter((stock) =>
-      stock.Ticker?.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-  }
-
   return base;
-}, [processedStocks, watchlists, view, searchQuery, activeList, selectedSector]);
+}, [processedStocks, watchlists, view, activeList, selectedSector]);
+
   const defaultColDef = useMemo(
     () => ({
       resizable: true,
@@ -273,6 +343,16 @@ const [activeList, setActiveList] = useState("Default");
       minWidth: 100,
     }),
   );
+const clearAllFilters = () => {
+  if (!gridRef.current?.api) return;
+
+  gridRef.current.api.setFilterModel(null);
+  gridRef.current.api.onFilterChanged();
+
+  setTypedQuery("");
+  setSearchQuery("");
+};
+
 const exportToCsv = () => {
   if (!gridRef.current) return;
 
@@ -312,6 +392,12 @@ const exportToCsv = () => {
 };
   return (
   <div className="stock-table-container">
+
+  {notification && (
+  <div className="notification-toast">
+    {notification}
+  </div>
+)}
 
     {view !== "Watchlist" && (
   <div className="dashboard-header">
@@ -359,9 +445,43 @@ const exportToCsv = () => {
         setActiveList(name);
       }}
     >
-      New List
+      New
     </button>
+{/* Rename Watchlist */}
+<button
+  style={{
+    padding: "4px 8px",
+    backgroundColor: "#3b82f6",
+    color: "#fff",
+    border: "none",
+    cursor: "pointer",
+  }}
+  onClick={() => {
 
+    if (activeList === "Default") {
+      alert("Default watchlist cannot be renamed.");
+      return;
+    }
+
+    const newName = prompt("Enter new watchlist name:", activeList);
+
+    if (!newName || watchlists[newName]) {
+      alert("Invalid or duplicate watchlist name.");
+      return;
+    }
+
+    const updated = { ...watchlists };
+
+    updated[newName] = updated[activeList]; // copy tickers
+    delete updated[activeList];             // remove old name
+
+    setWatchlists(updated);
+    localStorage.setItem("watchlists", JSON.stringify(updated));
+    setActiveList(newName);
+  }}
+>
+  Rename
+</button>
     {/* Delete Watchlist */}
     <button
       style={{
@@ -392,7 +512,7 @@ const exportToCsv = () => {
         setActiveList("Default");
       }}
     >
-      Delete List
+      Delete
     </button>
 
   </div>
@@ -411,47 +531,60 @@ const exportToCsv = () => {
   </div>
 )}
       <div style={{ marginBottom: "15px" }}>
-        <input
-          type="text"
-          placeholder="Search ticker..."
-          value={typedQuery}
-          onChange={(e) => setTypedQuery(e.target.value)} // updates typedQuery immediately
-          className="search-input"
-        />
-        <button onClick={fetchStocks} style={{ marginLeft: "10px" }}>
-          Refresh
-        </button>
-      </div>
+  <input
+    type="text"
+    placeholder="Search ticker..."
+    value={typedQuery}
+    onChange={(e) => setTypedQuery(e.target.value)}
+    className="search-input"
+  />
 
-      <div
-        className={`ag-theme-alpine ${view === "Watchlist" ? "ag-watchlist" : ""}`}
-        style={{ width: "100%", height: "700px" }}
-      >
-        <AgGridReact
-            ref={gridRef}
-  rowData={rowData}
-  columnDefs={columns}
-  defaultColDef={defaultColDef}
-  immutableData={true}
-  getRowId={(params) => params.data.Ticker}
-  suppressScrollOnNewData={true}
-            rowBuffer={0}
-  animateRows={true}
-  rowSelection="multiple"
-  rowHeight={30}
-          onGridReady={(params) => {
-  gridRef.current = params.api;
-  setDisplayedCount(params.api.getDisplayedRowCount());
-}}
-onFirstDataRendered={(params) => {
-  setDisplayedCount(params.api.getDisplayedRowCount());
-}}
-onFilterChanged={(params) => {
-  setDisplayedCount(params.api.getDisplayedRowCount());
-}}
-        />
-      </div>
-      {/* Modal for selecting watchlists when star is clicked */}
+  <button onClick={fetchStocks} style={{ marginLeft: "10px" }}>
+    Refresh
+  </button>
+
+  <button onClick={clearAllFilters} style={{ marginLeft: "10px" }}>
+    Clear Filters
+  </button>
+</div>
+
+{/* Loading / Grid */}
+{loading ? (
+  <div className="loading-container">
+    <div className="spinner"></div>
+    Loading stocks...
+  </div>
+) : (
+  <div
+    className={`ag-theme-alpine ${view === "Watchlist" ? "ag-watchlist" : ""}`}
+    style={{ width: "100%", height: "700px" }}
+  >
+    <AgGridReact
+      ref={gridRef}
+      headerHeight={70}
+      rowData={rowData}
+      columnDefs={columns}
+      defaultColDef={defaultColDef}
+      immutableData={true}
+      getRowId={(params) => params.data.Ticker}
+      suppressScrollOnNewData={true}
+      rowBuffer={0}
+      animateRows={true}
+      rowSelection="multiple"
+      rowHeight={30}
+      onGridReady={(params) => {
+        gridRef.current.api = params.api;
+        setDisplayedCount(params.api.getDisplayedRowCount());
+      }}
+      onFirstDataRendered={(params) => {
+        setDisplayedCount(params.api.getDisplayedRowCount());
+      }}
+      onFilterChanged={(params) => {
+        setDisplayedCount(params.api.getDisplayedRowCount());
+      }}
+    />
+  </div>
+)}
 {starModalOpen && (
   <div
     style={{
@@ -510,24 +643,25 @@ onFilterChanged={(params) => {
 
         <button
   onClick={() => {
-    const updated = {};
-
-    // Loop through all lists and build fresh arrays
-    Object.keys(watchlists).forEach((listName) => {
-      if (modalSelectedLists.includes(listName)) {
-        // include this ticker
-        updated[listName] = [...watchlists[listName], modalTicker].filter(
-          (v, i, a) => a.indexOf(v) === i
-        ); // remove duplicates just in case
-      } else {
-        // remove this ticker
-        updated[listName] = watchlists[listName].filter((t) => t !== modalTicker);
-      }
-    });
-
-    setWatchlists(updated);
-    localStorage.setItem("watchlists", JSON.stringify(updated));
+    const updated = { ...watchlists }; // clone first
+Object.keys(updated).forEach((listName) => {
+  if (modalSelectedLists.includes(listName)) {
+    updated[listName] = [...new Set([...(updated[listName] ?? []), modalTicker])];
+  } else {
+    updated[listName] = (updated[listName] ?? []).filter(t => t !== modalTicker);
+  }
+});
+setWatchlists(updated);
+localStorage.setItem("watchlists", JSON.stringify(updated));
     setStarModalOpen(false);
+
+    if (gridRef.current?.api) {
+  gridRef.current.api.refreshClientSideRowModel("everything");
+  gridRef.current.api.redrawRows();
+}
+
+    setNotification(`${modalTicker} watchlists updated ✓`);
+    setTimeout(() => setNotification(null), 2000);
   }}
 >
   Save

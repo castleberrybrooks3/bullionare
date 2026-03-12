@@ -1,0 +1,19 @@
+.about-page {
+  background-color: #111126;
+  min-height: 100vh;
+  padding: 80px 20px;
+  color: white;
+}
+
+.about-container {
+  max-width: 900px;
+  margin: auto;
+  background: #132d5a;
+  padding: 50px;
+  border-radius: 10px;
+}
+.about-section {
+  margin-top: 50px;
+  padding-top: 40px;
+  border-top: 1px solid rgba(255,255,255,0.1);
+}

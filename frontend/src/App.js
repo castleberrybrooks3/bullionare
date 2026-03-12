@@ -1,18 +1,22 @@
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
-import Footer from "./components/Footer"; // 👈 add this
+import About from "./pages/About";
+import Footer from "./components/Footer";
 
 function App() {
   return (
     <Router>
-      <div className="app-wrapper"> {/* 👈 wrapper */}
-        <Routes>
-          <Route path="/" element={<Landing />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-        </Routes>
+      <div className="app-wrapper">
+        <main className="page-content">
+          <Routes>
+            <Route path="/" element={<Landing />} />
+            <Route path="/dashboard" element={<Dashboard />} />
+            <Route path="/about" element={<About />} />
+          </Routes>
+        </main>
 
-        <Footer /> {/* 👈 this goes OUTSIDE Routes */}
+        <Footer />
       </div>
     </Router>
   );

@@ -1,7 +1,6 @@
 /* ====== Layout ====== */
 .dashboard {
   display: flex;
-  height: calc(100vh - 60px); /* leave space for Navbar */
   background-color: #0E1424;
   color: #ffffff;
   font-family: "Segoe UI", sans-serif;

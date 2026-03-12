@@ -43,3 +43,17 @@ code {
   letter-spacing: 2px;
   margin-top: 20px;
 }
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+.app-wrapper {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.page-content {
+  flex: 1;
+}

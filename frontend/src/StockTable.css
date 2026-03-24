@@ -299,3 +299,37 @@
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
+/* TOP SCROLLBAR */
+
+.top-scrollbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 14px;
+  margin-bottom: 2px;
+}
+
+.top-scroll-content {
+  width: 5000px; /* large enough for full grid width */
+  height: 1px;
+}
+
+/* style it to match your UI */
+
+.top-scrollbar::-webkit-scrollbar {
+  height: 8px;
+}
+
+.top-scrollbar::-webkit-scrollbar-thumb {
+  background: #19c37d;
+  border-radius: 10px;
+}
+.top-scrollbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  height: 16px;
+  margin-bottom: 4px;
+}
+
+.top-scroll-content {
+  height: 1px;
+}

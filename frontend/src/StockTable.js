@@ -4,11 +4,12 @@ import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-alpine.css";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "./StockTable.css";
+import { useLocation, useNavigate } from "react-router-dom";
 
 /* ✅ Correct for your AG Grid version */
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-  const StockTable = ({ view, selectedSector }) => {
+const StockTable = ({ view, selectedSector }) => {
   const [stocks, setStocks] = useState([]);
   const [processedStocks, setProcessedStocks] = useState([]);
 
@@ -41,7 +42,16 @@ useEffect(() => {
   localStorage.setItem("activeList", activeList);
 }, [activeList]);
 
-  const gridRef = useRef({ api: null });
+  const gridRef = useRef(null);
+
+  const location = useLocation();
+  const navigate = useNavigate();
+    const params = new URLSearchParams(location.search);
+
+    const tickerFilter = params.get("ticker");
+    const tickersParam = params.get("tickers");
+    const industry = params.get("industry");   // NEW
+    const selectedTickers = tickersParam ? tickersParam.split(",") : null;
 
   const rangeOnlyColumns = [
     "Current Price",
@@ -83,6 +93,46 @@ useEffect(() => {
 
   return () => clearTimeout(handler); // cleanup on new keystroke
 }, [typedQuery]);
+
+/* TOP SCROLLBAR SYNC */
+useEffect(() => {
+  const setupScrollSync = () => {
+    const topScroll = document.querySelector(".top-scrollbar");
+    const topContent = document.querySelector(".top-scroll-content");
+    const gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
+    const gridCenter = document.querySelector(".ag-center-cols-container");
+
+    if (!topScroll || !topContent || !gridViewport || !gridCenter) return;
+
+    // Set the fake scrollbar width to match grid content
+    topContent.style.width = gridCenter.scrollWidth + "px";
+
+    const syncTop = () => {
+      const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
+      const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
+
+      const ratio = topScroll.scrollLeft / maxTop;
+
+      gridViewport.scrollLeft = ratio * maxGrid;
+    };
+
+    const syncBottom = () => {
+      const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
+      const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
+
+      const ratio = gridViewport.scrollLeft / maxGrid;
+
+      topScroll.scrollLeft = ratio * maxTop;
+    };
+
+    topScroll.addEventListener("scroll", syncTop);
+    gridViewport.addEventListener("scroll", syncBottom);
+  };
+
+  const timer = setTimeout(setupScrollSync, 200);
+
+  return () => clearTimeout(timer);
+}, [processedStocks]);
 
   useEffect(() => {
     const data = stocks
@@ -333,8 +383,24 @@ useEffect(() => {
     );
   }
 
-  return base;
-}, [processedStocks, watchlists, view, activeList, selectedSector]);
+  if (selectedTickers) {
+  base = base.filter(stock =>
+    selectedTickers.includes(stock.Ticker)
+  );
+} else if (tickerFilter) {
+  base = base.filter(
+    stock => stock.Ticker?.toUpperCase() === tickerFilter.toUpperCase()
+  );
+}
+
+return base;
+}, [processedStocks, watchlists, view, activeList, selectedSector, tickerFilter, selectedTickers]);
+
+useEffect(() => {
+  if (gridRef.current?.api) {
+    setDisplayedCount(gridRef.current.api.getDisplayedRowCount());
+  }
+}, [rowData]);
 
   const defaultColDef = useMemo(
     () => ({
@@ -354,7 +420,7 @@ const clearAllFilters = () => {
 };
 
 const exportToCsv = () => {
-  if (!gridRef.current) return;
+  if (!gridRef.current?.api) return;
 
   const now = new Date();
 
@@ -381,7 +447,7 @@ const exportToCsv = () => {
       ? `my_watchlist_${safeTimestamp}.csv`
       : `market_analytics_${safeTimestamp}.csv`;
 
-  gridRef.current.exportDataAsCsv({
+  gridRef.current.api.exportDataAsCsv({
     fileName: fileName,
     prependContent: [
       [{ data: { value: "Bullionare Analytics Export" } }],
@@ -393,285 +459,258 @@ const exportToCsv = () => {
   return (
   <div className="stock-table-container">
 
-  {notification && (
-  <div className="notification-toast">
-    {notification}
-  </div>
-)}
+    {notification && (
+      <div className="notification-toast">
+        {notification}
+      </div>
+    )}
 
     {view !== "Watchlist" && (
-  <div className="dashboard-header">
-    <h1 className="dashboard-title">
-      BECOME A BULLIONARE
-    </h1>
-    <p className="dashboard-subtitle"></p>
-  </div>
-)}
+      <div className="dashboard-header">
+        <h1 className="dashboard-title">BECOME A BULLIONARE</h1>
+        <p className="dashboard-subtitle"></p>
+      </div>
+    )}
 
-    <h2>{view === "Watchlist" ? "Your Watchlist" : "Market Analytics"}</h2>
-
-      {view === "Watchlist" && (
-  <div style={{ marginBottom: "15px", display: "flex", gap: "10px", alignItems: "center" }}>
-
-    {/* Watchlist Selector */}
-    <select
-      value={activeList}
-      onChange={(e) => setActiveList(e.target.value)}
-      style={{ padding: "4px 8px" }}
-    >
-      {Object.keys(watchlists).map((listName) => (
-        <option key={listName} value={listName}>
-          {listName}
-        </option>
-      ))}
-    </select>
-
-    {/* Create New Watchlist */}
-    <button
-      style={{
-        padding: "4px 8px",
-        backgroundColor: "#19C37D",
-        color: "#fff",
-        border: "none",
-        cursor: "pointer",
-      }}
-      onClick={() => {
-        const name = prompt("Enter new watchlist name:");
-        if (!name || watchlists[name]) return;
-
-        const updated = { ...watchlists, [name]: [] };
-        setWatchlists(updated);
-        localStorage.setItem("watchlists", JSON.stringify(updated));
-        setActiveList(name);
-      }}
-    >
-      New
-    </button>
-{/* Rename Watchlist */}
-<button
-  style={{
-    padding: "4px 8px",
-    backgroundColor: "#3b82f6",
-    color: "#fff",
-    border: "none",
-    cursor: "pointer",
-  }}
-  onClick={() => {
-
-    if (activeList === "Default") {
-      alert("Default watchlist cannot be renamed.");
-      return;
-    }
-
-    const newName = prompt("Enter new watchlist name:", activeList);
-
-    if (!newName || watchlists[newName]) {
-      alert("Invalid or duplicate watchlist name.");
-      return;
-    }
-
-    const updated = { ...watchlists };
-
-    updated[newName] = updated[activeList]; // copy tickers
-    delete updated[activeList];             // remove old name
-
-    setWatchlists(updated);
-    localStorage.setItem("watchlists", JSON.stringify(updated));
-    setActiveList(newName);
-  }}
->
-  Rename
-</button>
-    {/* Delete Watchlist */}
-    <button
-      style={{
-        padding: "4px 8px",
-        backgroundColor: "#ff4d4f",
-        color: "#fff",
-        border: "none",
-        cursor: "pointer",
-      }}
-      onClick={() => {
-        if (activeList === "Default") {
-          alert("Cannot delete the Default watchlist.");
-          return;
-        }
-
-        const confirmDelete = window.confirm(
-          `Are you sure you want to delete the "${activeList}" watchlist?`
-        );
-        if (!confirmDelete) return;
-
-        const updated = { ...watchlists };
-        delete updated[activeList];
-
-        setWatchlists(updated);
-        localStorage.setItem("watchlists", JSON.stringify(updated));
-
-        // Switch back to Default after deletion
-        setActiveList("Default");
-      }}
-    >
-      Delete
-    </button>
-
-  </div>
-)}
-
-      {view !== "Watchlist" && (
-  <div style={{ marginBottom: "10px", fontSize: "14px", color: "#ffffff" }}>
-    Currently showing {displayedCount} tickers
-  </div>
-)}
-{view === "Watchlist" && (
+    {selectedTickers ? (
   <div style={{ marginBottom: "10px" }}>
-    <button onClick={exportToCsv}>
-      Export Watchlist CSV
+    <h2>{industry ? `${industry} Comparison` : "Industry Comparison"}</h2>
+
+    <button
+      onClick={() => navigate("/dashboard")}
+      style={{
+        marginTop: "6px",
+        padding: "6px 12px",
+        backgroundColor: "#19C37D",
+        border: "none",
+        borderRadius: "4px",
+        cursor: "pointer",
+        fontWeight: "bold"
+      }}
+    >
+      Return to Full Market
     </button>
-  </div>
-)}
-      <div style={{ marginBottom: "15px" }}>
-  <input
-    type="text"
-    placeholder="Search ticker..."
-    value={typedQuery}
-    onChange={(e) => setTypedQuery(e.target.value)}
-    className="search-input"
-  />
-
-  <button onClick={fetchStocks} style={{ marginLeft: "10px" }}>
-    Refresh
-  </button>
-
-  <button onClick={clearAllFilters} style={{ marginLeft: "10px" }}>
-    Clear Filters
-  </button>
-</div>
-
-{/* Loading / Grid */}
-{loading ? (
-  <div className="loading-container">
-    <div className="spinner"></div>
-    Loading stocks...
   </div>
 ) : (
-  <div
-    className={`ag-theme-alpine ${view === "Watchlist" ? "ag-watchlist" : ""}`}
-    style={{ width: "100%", height: "700px" }}
-  >
-    <AgGridReact
-      ref={gridRef}
-      headerHeight={70}
-      rowData={rowData}
-      columnDefs={columns}
-      defaultColDef={defaultColDef}
-      immutableData={true}
-      getRowId={(params) => params.data.Ticker}
-      suppressScrollOnNewData={true}
-      rowBuffer={0}
-      animateRows={true}
-      rowSelection="multiple"
-      rowHeight={30}
-      onGridReady={(params) => {
-        gridRef.current.api = params.api;
-        setDisplayedCount(params.api.getDisplayedRowCount());
-      }}
-      onFirstDataRendered={(params) => {
-        setDisplayedCount(params.api.getDisplayedRowCount());
-      }}
-      onFilterChanged={(params) => {
-        setDisplayedCount(params.api.getDisplayedRowCount());
-      }}
-    />
-  </div>
+  <h2>{view === "Watchlist" ? "Your Watchlist" : "Market Analytics"}</h2>
 )}
-{starModalOpen && (
-  <div
-    style={{
-      position: "fixed",
-      top: 0,
-      left: 0,
-      width: "100vw",
-      height: "100vh",
-      backgroundColor: "rgba(0,0,0,0.5)",
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      zIndex: 1000,
-    }}
-  >
-    <div
-      style={{
-        backgroundColor: "#fff",
-        padding: "20px",
-        borderRadius: "8px",
-        width: "300px",
-      }}
-    >
-      <h3 style={{ color: "#000" }}>
-        Select Watchlists for {modalTicker}
-      </h3>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginTop: "10px" }}>
-        {Object.keys(watchlists).map((listName) => (
-  <label key={listName} style={{ color: "#000" }}>
-    <input
-      type="checkbox"
-      checked={modalSelectedLists.includes(listName)}
-      onChange={(e) => {
-        setModalSelectedLists((prev) => {
-          if (e.target.checked) {
-            return [...prev, listName];
-          } else {
-            return prev.filter((l) => l !== listName);
-          }
-        });
-      }}
-    />{" "}
-    {listName}
-  </label>
-))}
-      </div>
+    {view === "Watchlist" && (
+      <div style={{ marginBottom: "15px", display: "flex", gap: "10px", alignItems: "center" }}>
 
-      <div style={{ marginTop: "15px", display: "flex", justifyContent: "flex-end", gap: "10px" }}>
-        <button
-          onClick={() => setStarModalOpen(false)}
+        {/* Watchlist Selector */}
+        <select
+          value={activeList}
+          onChange={(e) => setActiveList(e.target.value)}
           style={{ padding: "4px 8px" }}
         >
-          Cancel
+          {Object.keys(watchlists).map((listName) => (
+            <option key={listName} value={listName}>
+              {listName}
+            </option>
+          ))}
+        </select>
+
+        {/* Create New Watchlist */}
+        <button
+          style={{ padding: "4px 8px", backgroundColor: "#19C37D", color: "#fff", border: "none", cursor: "pointer" }}
+          onClick={() => {
+            const name = prompt("Enter new watchlist name:");
+            if (!name || watchlists[name]) return;
+            const updated = { ...watchlists, [name]: [] };
+            setWatchlists(updated);
+            localStorage.setItem("watchlists", JSON.stringify(updated));
+            setActiveList(name);
+          }}
+        >
+          New
         </button>
 
+        {/* Rename Watchlist */}
         <button
-  onClick={() => {
-    const updated = { ...watchlists }; // clone first
-Object.keys(updated).forEach((listName) => {
-  if (modalSelectedLists.includes(listName)) {
-    updated[listName] = [...new Set([...(updated[listName] ?? []), modalTicker])];
-  } else {
-    updated[listName] = (updated[listName] ?? []).filter(t => t !== modalTicker);
-  }
-});
-setWatchlists(updated);
-localStorage.setItem("watchlists", JSON.stringify(updated));
-    setStarModalOpen(false);
+          style={{ padding: "4px 8px", backgroundColor: "#3b82f6", color: "#fff", border: "none", cursor: "pointer" }}
+          onClick={() => {
+            if (activeList === "Default") {
+              alert("Default watchlist cannot be renamed.");
+              return;
+            }
+            const newName = prompt("Enter new watchlist name:", activeList);
+            if (!newName || watchlists[newName]) {
+              alert("Invalid or duplicate watchlist name.");
+              return;
+            }
+            const updated = { ...watchlists };
+            updated[newName] = updated[activeList];
+            delete updated[activeList];
+            setWatchlists(updated);
+            localStorage.setItem("watchlists", JSON.stringify(updated));
+            setActiveList(newName);
+          }}
+        >
+          Rename
+        </button>
 
-    if (gridRef.current?.api) {
-  gridRef.current.api.refreshClientSideRowModel("everything");
-  gridRef.current.api.redrawRows();
-}
-
-    setNotification(`${modalTicker} watchlists updated ✓`);
-    setTimeout(() => setNotification(null), 2000);
-  }}
->
-  Save
-</button>
+        {/* Delete Watchlist */}
+        <button
+          style={{ padding: "4px 8px", backgroundColor: "#ff4d4f", color: "#fff", border: "none", cursor: "pointer" }}
+          onClick={() => {
+            if (activeList === "Default") {
+              alert("Cannot delete the Default watchlist.");
+              return;
+            }
+            const confirmDelete = window.confirm(
+              `Are you sure you want to delete the "${activeList}" watchlist?`
+            );
+            if (!confirmDelete) return;
+            const updated = { ...watchlists };
+            delete updated[activeList];
+            setWatchlists(updated);
+            localStorage.setItem("watchlists", JSON.stringify(updated));
+            setActiveList("Default");
+          }}
+        >
+          Delete
+        </button>
       </div>
-    </div>
-  </div>
-)}
-    </div>
-  );
-};
+    )}
 
+    {view !== "Watchlist" && (
+      <div style={{ marginBottom: "10px", fontSize: "14px", color: "#ffffff" }}>
+        Currently showing {displayedCount} tickers
+      </div>
+    )}
+
+    {view === "Watchlist" && (
+      <div style={{ marginBottom: "10px" }}>
+        <button onClick={exportToCsv}>Export Watchlist CSV</button>
+      </div>
+    )}
+
+    <div style={{ marginBottom: "15px" }}>
+      <input
+        type="text"
+        placeholder="Search ticker..."
+        value={typedQuery}
+        onChange={(e) => {
+          setTypedQuery(e.target.value);
+          if (gridRef.current?.api) {
+            gridRef.current.api.setGridOption("quickFilterText", e.target.value);
+          }
+        }}
+        className="search-input"
+      />
+      <button onClick={fetchStocks} style={{ marginLeft: "10px" }}>Refresh</button>
+      <button onClick={clearAllFilters} style={{ marginLeft: "10px" }}>Clear Filters</button>
+    </div>
+
+    {/* Loading / Grid */}
+    {loading ? (
+      <div className="loading-container">
+        <div className="spinner"></div>
+        Loading stocks...
+      </div>
+    ) : (
+      <div>
+        {/* TOP SCROLLBAR */}
+        <div className="top-scrollbar">
+          <div className="top-scroll-content"></div>
+        </div>
+
+        <div
+          className={`ag-theme-alpine ${view === "Watchlist" ? "ag-watchlist" : ""}`}
+          style={{ width: "100%", height: "700px" }}
+        >
+          <AgGridReact
+            ref={gridRef}
+            suppressFieldDotNotation={true}
+            headerHeight={70}
+            rowData={rowData}
+            columnDefs={columns}
+            defaultColDef={defaultColDef}
+            immutableData={true}
+            getRowId={(params) => params.data.Ticker}
+            suppressScrollOnNewData={true}
+            rowBuffer={0}
+            animateRows={true}
+            rowSelection="multiple"
+            rowHeight={30}
+            onGridReady={(params) => {
+            gridRef.current = params;
+            setDisplayedCount(params.api.getDisplayedRowCount());
+            }}
+            onFirstDataRendered={(params) => setDisplayedCount(params.api.getDisplayedRowCount())}
+            onFilterChanged={(params) => setDisplayedCount(params.api.getDisplayedRowCount())}
+          />
+        </div>
+
+        {starModalOpen && (
+          <div
+            style={{
+              position: "fixed",
+              top: 0,
+              left: 0,
+              width: "100vw",
+              height: "100vh",
+              backgroundColor: "rgba(0,0,0,0.5)",
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              zIndex: 1000,
+            }}
+          >
+            <div style={{ backgroundColor: "#fff", padding: "20px", borderRadius: "8px", width: "300px" }}>
+              <h3 style={{ color: "#000" }}>Select Watchlists for {modalTicker}</h3>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginTop: "10px" }}>
+                {Object.keys(watchlists).map((listName) => (
+                  <label key={listName} style={{ color: "#000" }}>
+                    <input
+                      type="checkbox"
+                      checked={modalSelectedLists.includes(listName)}
+                      onChange={(e) => {
+                        setModalSelectedLists((prev) => {
+                          if (e.target.checked) return [...prev, listName];
+                          else return prev.filter((l) => l !== listName);
+                        });
+                      }}
+                    />{" "}
+                    {listName}
+                  </label>
+                ))}
+              </div>
+
+              <div style={{ marginTop: "15px", display: "flex", justifyContent: "flex-end", gap: "10px" }}>
+                <button onClick={() => setStarModalOpen(false)} style={{ padding: "4px 8px" }}>Cancel</button>
+                <button
+                  onClick={() => {
+                    const updated = { ...watchlists };
+                    Object.keys(updated).forEach((listName) => {
+                      if (modalSelectedLists.includes(listName)) {
+                        updated[listName] = [...new Set([...(updated[listName] ?? []), modalTicker])];
+                      } else {
+                        updated[listName] = (updated[listName] ?? []).filter(t => t !== modalTicker);
+                      }
+                    });
+                    setWatchlists(updated);
+                    localStorage.setItem("watchlists", JSON.stringify(updated));
+                    setStarModalOpen(false);
+                    if (gridRef.current?.api) {
+                      gridRef.current.api.refreshClientSideRowModel("everything");
+                      gridRef.current.api.redrawRows();
+                    }
+                    setNotification(`${modalTicker} watchlists updated ✓`);
+                    setTimeout(() => setNotification(null), 2000);
+                  }}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )}
+  </div>
+);
+}
 export default StockTable;

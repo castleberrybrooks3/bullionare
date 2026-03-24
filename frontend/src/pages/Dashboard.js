@@ -1,7 +1,11 @@
 import React, { useState, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import StockTable from "../StockTable";
+import DependencyMap from "../DependencyMap";
 import "./Dashboard.css";
+import SupplyChain from "../SupplyChain";
+import HiddenPairs from "../HiddenPairs";
 
 export default function Dashboard() {
   const [activeMenu, setActiveMenu] = useState("Stocks");
@@ -11,6 +15,7 @@ export default function Dashboard() {
   const sidebarRef = useRef(null);
   const isResizing = useRef(false);
   const [sectorOpen, setSectorOpen] = useState(false);
+  const navigate = useNavigate();
 
   const startResizing = (e) => {
     isResizing.current = true;
@@ -58,9 +63,10 @@ export default function Dashboard() {
   <div
     className={`sidebar-main ${activeMenu === "Stocks" ? "active" : ""}`}
     onClick={() => {
-      setActiveMenu("Stocks");
-      setSelectedSector(null);
-      setSectorOpen(false);
+    navigate("/dashboard"); // clears ?tickers
+    setActiveMenu("Stocks");
+    setSelectedSector(null);
+    setSectorOpen(false);
     }}
     style={{
       backgroundColor: activeMenu === "Stocks" ? "#19C37D" : "transparent", // green bubble
@@ -121,9 +127,10 @@ export default function Dashboard() {
           key={sector}
           className="sector-item"
           onClick={() => {
-            setActiveMenu("Stocks");
-            setSelectedSector(sector);
-          }}
+          navigate("/dashboard"); // clears ticker filter
+          setActiveMenu("Stocks");
+          setSelectedSector(sector);
+        }}
         >
           {sector}
         </div>
@@ -134,11 +141,33 @@ export default function Dashboard() {
   {/* WATCHLIST */}
   <div
     className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
-    onClick={() => setActiveMenu("Watchlist")}
+    onClick={() => {
+    navigate("/dashboard");
+    setActiveMenu("Watchlist");
+    }}
   >
     Watchlist
   </div>
 
+    {/* DEPENDENCY MAP */}
+    <div
+        className={`sidebar-item ${activeMenu === "DependencyMap" ? "active" : ""}`}
+        onClick={() => setActiveMenu("DependencyMap")}
+    >
+        Dependency Map
+    </div>
+    <div
+  className={`sidebar-item ${activeMenu === "SupplyChain" ? "active" : ""}`}
+  onClick={() => setActiveMenu("SupplyChain")}
+>
+  Supply Chain
+</div>
+<div
+  className={`sidebar-item ${activeMenu === "HiddenPairs" ? "active" : ""}`}
+  onClick={() => setActiveMenu("HiddenPairs")}
+>
+  Hidden Pairs
+</div>
 </nav>
 
           {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
@@ -150,7 +179,15 @@ export default function Dashboard() {
           style={{ backgroundColor: "#0E1424", padding: "40px" }}
         >
           {/* ✅ ONLY CHANGE IS HERE */}
-          <StockTable view={activeMenu} selectedSector={selectedSector} />
+          {activeMenu === "DependencyMap" ? (
+  <DependencyMap />
+) : activeMenu === "SupplyChain" ? (
+  <SupplyChain />
+  ) : activeMenu === "HiddenPairs" ? (
+  <HiddenPairs />
+) : (
+  <StockTable view={activeMenu} selectedSector={selectedSector} />
+)}
         </main>
       </div>
     </>

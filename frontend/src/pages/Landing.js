@@ -27,7 +27,7 @@ export default function Landing() {
       <div className="hero-content">
 
         <img src={logo} alt="Bullionare Logo" className="hero-logo" />
-          <h1 className="home-title">BULLIONARE</h1>
+          <h1 className="home-title">BULLIONAIRE</h1>
 
         <h2 className="hero-subtitle">
           SEE WHAT OTHERS MISS <span></span>

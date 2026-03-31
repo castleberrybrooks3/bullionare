@@ -7,13 +7,13 @@ export default function Footer() {
     <footer className="app-footer">
       <div className="footer-content">
         <div className="footer-left">
-          © {new Date().getFullYear()} Bullionare
+          © {new Date().getFullYear()} Bullionaire
         </div>
 
         <div className="footer-center">
-          Bullionare provides market analytics for informational purposes only.
+          Bullionaire provides market analytics for informational purposes only.
           Nothing on this platform constitutes investment advice.
-          Bullionare is not a registered investment advisor, broker-dealer, or financial planner.
+          Bullionaire is not a registered investment advisor, broker-dealer, or financial planner.
         </div>
 
         <div className="footer-right">

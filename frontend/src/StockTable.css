@@ -333,3 +333,52 @@
 .top-scroll-content {
   height: 1px;
 }
+
+.watchlist-top-row {
+  position: relative;
+  padding-right: 240px;
+  margin-bottom: 10px;
+  min-height: 50px;   /* must be at least chart height */
+}
+
+.watchlist-controls-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;               /* controls the space between the 2 left rows */
+  min-width: 0;
+}
+
+.watchlist-controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.watchlist-search-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: 0;
+}
+
+.watchlist-search-row .search-input {
+  flex: 0 0 220px;
+}
+
+.watchlist-search-row button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.watchlist-analytics-side {
+  position: absolute;
+  right: 350px;
+  bottom: 0;          /* bottom lines up with search row */
+  width: 240px;
+  height: 200px;      /* fixed height so it doesn't get smushed */
+  display: flex;
+}

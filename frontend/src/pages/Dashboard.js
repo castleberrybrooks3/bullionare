@@ -58,117 +58,118 @@ export default function Dashboard() {
           </div>
 
           <nav className="sidebar-nav">
+            <div className="sidebar-main-container">
+              <div
+                className={`sidebar-main ${activeMenu === "Stocks" ? "active" : ""}`}
+                onClick={() => {
+                  navigate("/dashboard"); // clears ?tickers
+                  setActiveMenu("Stocks");
+                  setSelectedSector(null);
+                  setSectorOpen(false);
+                }}
+                style={{
+                  backgroundColor: activeMenu === "Stocks" ? "#19C37D" : "transparent",
+                  cursor: "pointer",
+                  padding: "8px 12px",
+                  borderRadius: "4px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  width: "100%",
+                  boxSizing: "border-box",
+                }}
+              >
+                <span
+                  style={{
+                    color: activeMenu === "Stocks" ? "#001f3f" : "#fff",
+                    fontWeight: "bold",
+                  }}
+                >
+                  Stocks
+                </span>
 
-  <div className="sidebar-main-container">
-  <div
-    className={`sidebar-main ${activeMenu === "Stocks" ? "active" : ""}`}
-    onClick={() => {
-    navigate("/dashboard"); // clears ?tickers
-    setActiveMenu("Stocks");
-    setSelectedSector(null);
-    setSectorOpen(false);
-    }}
-    style={{
-      backgroundColor: activeMenu === "Stocks" ? "#19C37D" : "transparent", // green bubble
-      cursor: "pointer",
-      padding: "8px 12px",
-      borderRadius: "4px",
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      width: "100%",
-      boxSizing: "border-box",
-    }}
-  >
-    <span
-      style={{
-        color: activeMenu === "Stocks" ? "#001f3f" : "#fff", // navy when active, light by default
-        fontWeight: "bold",
-      }}
-    >
-      Stocks
-    </span>
+                {!collapsed && (
+                  <span
+                    className="dropdown-arrow"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSectorOpen(!sectorOpen);
+                    }}
+                    style={{
+                      cursor: "pointer",
+                      fontSize: "30px",
+                    }}
+                  >
+                    {sectorOpen ? "▾" : "▸"}
+                  </span>
+                )}
+              </div>
+            </div>
 
-    {!collapsed && (
-      <span
-  className="dropdown-arrow"
-  onClick={(e) => {
-    e.stopPropagation();
-    setSectorOpen(!sectorOpen);
-  }}
-  style={{
-    cursor: "pointer",
-    fontSize: "30px"   // increase size
-  }}
->
-  {sectorOpen ? "▾" : "▸"}
-</span>
-    )}
-  </div>
-</div>
+            {/* SECTOR DROPDOWN */}
+            {sectorOpen && !collapsed && (
+              <div className="sector-list">
+                {[
+                  "Basic Materials",
+                  "Communication Services",
+                  "Consumer Cyclical",
+                  "Consumer Defensive",
+                  "Energy",
+                  "Financial Services",
+                  "Healthcare",
+                  "Industrials",
+                  "Real Estate",
+                  "Technology",
+                  "Utilities",
+                ].map((sector) => (
+                  <div
+                    key={sector}
+                    className="sector-item"
+                    onClick={() => {
+                      navigate("/dashboard");
+                      setActiveMenu("Stocks");
+                      setSelectedSector(sector);
+                    }}
+                  >
+                    {sector}
+                  </div>
+                ))}
+              </div>
+            )}
 
-  {/* SECTOR DROPDOWN */}
-  {sectorOpen && !collapsed && (
-    <div className="sector-list">
-      {[
-        "Basic Materials",
-        "Communication Services",
-        "Consumer Cyclical",
-        "Consumer Defensive",
-        "Energy",
-        "Financial Services",
-        "Healthcare",
-        "Industrials",
-        "Real Estate",
-        "Technology",
-        "Utilities",
-      ].map((sector) => (
-        <div
-          key={sector}
-          className="sector-item"
-          onClick={() => {
-          navigate("/dashboard"); // clears ticker filter
-          setActiveMenu("Stocks");
-          setSelectedSector(sector);
-        }}
-        >
-          {sector}
-        </div>
-      ))}
-    </div>
-  )}
+            {/* WATCHLIST */}
+            <div
+              className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
+              onClick={() => {
+                navigate("/dashboard");
+                setActiveMenu("Watchlist");
+              }}
+            >
+              Watchlist
+            </div>
 
-  {/* WATCHLIST */}
-  <div
-    className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
-    onClick={() => {
-    navigate("/dashboard");
-    setActiveMenu("Watchlist");
-    }}
-  >
-    Watchlist
-  </div>
+            {/* DEPENDENCY MAP */}
+            <div
+              className={`sidebar-item ${activeMenu === "DependencyMap" ? "active" : ""}`}
+              onClick={() => setActiveMenu("DependencyMap")}
+            >
+              Dependency Map
+            </div>
 
-    {/* DEPENDENCY MAP */}
-    <div
-        className={`sidebar-item ${activeMenu === "DependencyMap" ? "active" : ""}`}
-        onClick={() => setActiveMenu("DependencyMap")}
-    >
-        Dependency Map
-    </div>
-    <div
-  className={`sidebar-item ${activeMenu === "SupplyChain" ? "active" : ""}`}
-  onClick={() => setActiveMenu("SupplyChain")}
->
-  Supply Chain
-</div>
-<div
-  className={`sidebar-item ${activeMenu === "HiddenPairs" ? "active" : ""}`}
-  onClick={() => setActiveMenu("HiddenPairs")}
->
-  Hidden Pairs
-</div>
-</nav>
+            <div
+              className={`sidebar-item ${activeMenu === "SupplyChain" ? "active" : ""}`}
+              onClick={() => setActiveMenu("SupplyChain")}
+            >
+              Supply Chain
+            </div>
+
+            <div
+              className={`sidebar-item ${activeMenu === "HiddenPairs" ? "active" : ""}`}
+              onClick={() => setActiveMenu("HiddenPairs")}
+            >
+              Hidden Pairs
+            </div>
+          </nav>
 
           {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
         </aside>
@@ -178,12 +179,11 @@ export default function Dashboard() {
           className="main-content"
           style={{ backgroundColor: "#0E1424", padding: "40px" }}
         >
-          {/* ✅ ONLY CHANGE IS HERE */}
           {activeMenu === "DependencyMap" ? (
   <DependencyMap />
 ) : activeMenu === "SupplyChain" ? (
   <SupplyChain />
-  ) : activeMenu === "HiddenPairs" ? (
+) : activeMenu === "HiddenPairs" ? (
   <HiddenPairs />
 ) : (
   <StockTable view={activeMenu} selectedSector={selectedSector} />

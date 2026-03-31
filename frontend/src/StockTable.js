@@ -5,11 +5,12 @@ import "ag-grid-community/styles/ag-theme-alpine.css";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "./StockTable.css";
 import { useLocation, useNavigate } from "react-router-dom";
+import WatchlistAnalytics from "./components/WatchlistAnalytics";
 
 /* ✅ Correct for your AG Grid version */
 ModuleRegistry.registerModules([AllCommunityModule]);
 
-const StockTable = ({ view, selectedSector }) => {
+const StockTable = ({ view, selectedSector, showControls = true, showTable = true }) => {
   const [stocks, setStocks] = useState([]);
   const [processedStocks, setProcessedStocks] = useState([]);
 
@@ -73,7 +74,10 @@ useEffect(() => {
         : "https://bullionare.onrender.com"; // your Render backend
     const res = await fetch(`${API_BASE}/stocks`);
     const data = await res.json();
-    setStocks(Array.isArray(data) ? data : []);
+const cleanData = Array.isArray(data) ? data : [];
+setStocks(cleanData);
+
+localStorage.setItem("stocks", JSON.stringify(cleanData));
   } catch (err) {
     console.error(err);
     setStocks([]);
@@ -82,9 +86,11 @@ useEffect(() => {
   }
 };
 
-  useEffect(() => {
-    fetchStocks();
-  }, []);
+useEffect(() => {
+  if (!showTable) return; // 🔥 ONLY fetch once (bottom table)
+
+  fetchStocks();
+}, [showTable]);
 
   useEffect(() => {
   const handler = setTimeout(() => {
@@ -224,11 +230,6 @@ useEffect(() => {
 
             setNotification(`${ticker} removed from watchlist`);
             setTimeout(() => setNotification(null), 1500);
-
-            if (gridRef.current?.api) {
-              gridRef.current.api.refreshClientSideRowModel("everything");
-              gridRef.current.api.redrawRows();
-            }
 
             return; // STOP modal from opening
           }
@@ -370,6 +371,7 @@ useEffect(() => {
 }, [processedStocks, watchlists, activeList, view]);
 
   const rowData = useMemo(() => {
+  if (!processedStocks.length) return [];
   let base =
     view === "Watchlist"
       ? processedStocks.filter((s) =>
@@ -450,7 +452,7 @@ const exportToCsv = () => {
   gridRef.current.api.exportDataAsCsv({
     fileName: fileName,
     prependContent: [
-      [{ data: { value: "Bullionare Analytics Export" } }],
+      [{ data: { value: "Bullionaire Analytics Export" } }],
       [{ data: { value: `Generated: ${readableTimestamp}` } }],
       [],
     ],
@@ -458,6 +460,8 @@ const exportToCsv = () => {
 };
   return (
   <div className="stock-table-container">
+  {showControls && (
+  <>
 
     {notification && (
       <div className="notification-toast">
@@ -467,7 +471,7 @@ const exportToCsv = () => {
 
     {view !== "Watchlist" && (
       <div className="dashboard-header">
-        <h1 className="dashboard-title">BECOME A BULLIONARE</h1>
+        <h1 className="dashboard-title">BECOME A BULLIONAIRE</h1>
         <p className="dashboard-subtitle"></p>
       </div>
     )}
@@ -495,10 +499,10 @@ const exportToCsv = () => {
   <h2>{view === "Watchlist" ? "Your Watchlist" : "Market Analytics"}</h2>
 )}
 
-    {view === "Watchlist" && (
-      <div style={{ marginBottom: "15px", display: "flex", gap: "10px", alignItems: "center" }}>
-
-        {/* Watchlist Selector */}
+{view === "Watchlist" && (
+  <div className="watchlist-top-row">
+    <div className="watchlist-controls-left">
+      <div className="watchlist-controls-row">
         <select
           value={activeList}
           onChange={(e) => setActiveList(e.target.value)}
@@ -511,7 +515,6 @@ const exportToCsv = () => {
           ))}
         </select>
 
-        {/* Create New Watchlist */}
         <button
           style={{ padding: "4px 8px", backgroundColor: "#19C37D", color: "#fff", border: "none", cursor: "pointer" }}
           onClick={() => {
@@ -526,7 +529,6 @@ const exportToCsv = () => {
           New
         </button>
 
-        {/* Rename Watchlist */}
         <button
           style={{ padding: "4px 8px", backgroundColor: "#3b82f6", color: "#fff", border: "none", cursor: "pointer" }}
           onClick={() => {
@@ -550,7 +552,6 @@ const exportToCsv = () => {
           Rename
         </button>
 
-        {/* Delete Watchlist */}
         <button
           style={{ padding: "4px 8px", backgroundColor: "#ff4d4f", color: "#fff", border: "none", cursor: "pointer" }}
           onClick={() => {
@@ -571,38 +572,69 @@ const exportToCsv = () => {
         >
           Delete
         </button>
+
+        <button onClick={exportToCsv}>
+          Export Watchlist CSV
+        </button>
+      </div>
+
+      <div className="watchlist-search-row">
+        <input
+          type="text"
+          placeholder="Search ticker..."
+          value={typedQuery}
+          onChange={(e) => {
+            setTypedQuery(e.target.value);
+            if (gridRef.current?.api) {
+              gridRef.current.api.setGridOption("quickFilterText", e.target.value);
+            }
+          }}
+          className="search-input"
+        />
+        <button onClick={fetchStocks}>Refresh</button>
+        <button onClick={clearAllFilters}>Clear Filters</button>
+      </div>
+    </div>
+
+    {showTable && (
+      <div className="watchlist-analytics-side">
+        <WatchlistAnalytics
+        activeList={activeList}
+        watchlists={watchlists}
+        />
       </div>
     )}
-
+  </div>
+)}
     {view !== "Watchlist" && (
       <div style={{ marginBottom: "10px", fontSize: "14px", color: "#ffffff" }}>
         Currently showing {displayedCount} tickers
       </div>
     )}
 
-    {view === "Watchlist" && (
-      <div style={{ marginBottom: "10px" }}>
-        <button onClick={exportToCsv}>Export Watchlist CSV</button>
-      </div>
-    )}
+    {view !== "Watchlist" && (
+  <div style={{ marginBottom: "15px" }}>
+    <input
+      type="text"
+      placeholder="Search ticker..."
+      value={typedQuery}
+      onChange={(e) => {
+        setTypedQuery(e.target.value);
+        if (gridRef.current?.api) {
+          gridRef.current.api.setGridOption("quickFilterText", e.target.value);
+        }
+      }}
+      className="search-input"
+    />
+    <button onClick={fetchStocks} style={{ marginLeft: "10px" }}>Refresh</button>
+    <button onClick={clearAllFilters} style={{ marginLeft: "10px" }}>Clear Filters</button>
+  </div>
+)}
+  </>
+)}
 
-    <div style={{ marginBottom: "15px" }}>
-      <input
-        type="text"
-        placeholder="Search ticker..."
-        value={typedQuery}
-        onChange={(e) => {
-          setTypedQuery(e.target.value);
-          if (gridRef.current?.api) {
-            gridRef.current.api.setGridOption("quickFilterText", e.target.value);
-          }
-        }}
-        className="search-input"
-      />
-      <button onClick={fetchStocks} style={{ marginLeft: "10px" }}>Refresh</button>
-      <button onClick={clearAllFilters} style={{ marginLeft: "10px" }}>Clear Filters</button>
-    </div>
-
+    {showTable && (
+  <>
     {/* Loading / Grid */}
     {loading ? (
       <div className="loading-container">
@@ -628,7 +660,7 @@ const exportToCsv = () => {
             columnDefs={columns}
             defaultColDef={defaultColDef}
             immutableData={true}
-            getRowId={(params) => params.data.Ticker}
+            getRowId={(params) => `${params.data.Ticker}_${activeList}`}
             suppressScrollOnNewData={true}
             rowBuffer={0}
             animateRows={true}
@@ -710,7 +742,10 @@ const exportToCsv = () => {
         )}
       </div>
     )}
+  </>
+    )}
   </div>
 );
 }
+
 export default StockTable;

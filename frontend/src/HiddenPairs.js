@@ -28,17 +28,19 @@ export default function HiddenPairs() {
         >
           {categories.map((key) => (
             <div
-              key={key}
-              onClick={() => setSelectedCategory(key)}
-              style={{
-                padding: "25px",
-                background: "#1a2238",
-                borderRadius: "8px",
-                textAlign: "center",
-                cursor: "pointer",
-                fontWeight: "bold"
-              }}
-            >
+  key={key}
+  onClick={() => setSelectedCategory(key)}
+  className="hover-glow"
+  style={{
+    padding: "25px",
+    background: "#1a2238",
+    borderRadius: "8px",
+    textAlign: "center",
+    cursor: "pointer",
+    fontWeight: "bold",
+    border: "1px solid transparent"
+  }}
+>
               {hiddenPairsTree[key].name}
             </div>
           ))}
@@ -69,17 +71,19 @@ export default function HiddenPairs() {
           <div style={{ display: "flex", flexWrap: "wrap" }}>
             {hiddenPairsTree[selectedCategory].pairs.map((pair, i) => (
               <div
-                key={i}
-                onClick={() => handlePairClick(pair)}
-                style={{
-                  padding: "14px 18px",
-                  background: "#1a2238",
-                  borderRadius: "6px",
-                  margin: "8px",
-                  cursor: "pointer",
-                  minWidth: "180px"
-                }}
-              >
+  key={i}
+  onClick={() => handlePairClick(pair)}
+  className="hover-glow"
+  style={{
+    padding: "14px 18px",
+    background: "#1a2238",
+    borderRadius: "6px",
+    margin: "8px",
+    cursor: "pointer",
+    minWidth: "180px",
+    border: "1px solid transparent"
+  }}
+>
                 {/* Pair */}
                 <div style={{ fontWeight: "bold" }}>
                   {pair.tickers[0]} ↔ {pair.tickers[1]}

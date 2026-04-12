@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import Navbar from "../components/Navbar";
 import StockTable from "../StockTable";
@@ -6,6 +6,8 @@ import DependencyMap from "../DependencyMap";
 import "./Dashboard.css";
 import SupplyChain from "../SupplyChain";
 import HiddenPairs from "../HiddenPairs";
+import MarketOutlook from "../MarketOutlook";
+import Feedback from "../Feedback";
 
 export default function Dashboard() {
   const [activeMenu, setActiveMenu] = useState("Stocks");
@@ -15,7 +17,47 @@ export default function Dashboard() {
   const sidebarRef = useRef(null);
   const isResizing = useRef(false);
   const [sectorOpen, setSectorOpen] = useState(false);
+  const [sectorPerformance, setSectorPerformance] = useState({});
   const navigate = useNavigate();
+
+  const API_BASE =
+    process.env.NODE_ENV === "development"
+      ? "http://localhost:8000"
+      : "https://bullionare.onrender.com";
+
+  const sectorList = [
+    "Basic Materials",
+    "Communication Services",
+    "Consumer Cyclical",
+    "Consumer Defensive",
+    "Energy",
+    "Financial Services",
+    "Healthcare",
+    "Industrials",
+    "Real Estate",
+    "Technology",
+    "Utilities",
+  ];
+
+  useEffect(() => {
+    const fetchSectorPerformance = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/sector-performance`);
+        const data = await res.json();
+
+        if (data && typeof data === "object") {
+          setSectorPerformance(data);
+        } else {
+          setSectorPerformance({});
+        }
+      } catch (err) {
+        console.error("Failed to load sector performance", err);
+        setSectorPerformance({});
+      }
+    };
+
+    fetchSectorPerformance();
+  }, [API_BASE]);
 
   const startResizing = (e) => {
     isResizing.current = true;
@@ -41,7 +83,6 @@ export default function Dashboard() {
     <>
       <Navbar />
       <div className="dashboard">
-        {/* Sidebar */}
         <aside
           className={`sidebar ${collapsed ? "collapsed" : ""}`}
           style={{ width: collapsed ? 60 : sidebarWidth }}
@@ -62,7 +103,7 @@ export default function Dashboard() {
               <div
                 className={`sidebar-main ${activeMenu === "Stocks" ? "active" : ""}`}
                 onClick={() => {
-                  navigate("/dashboard"); // clears ?tickers
+                  navigate("/dashboard");
                   setActiveMenu("Stocks");
                   setSelectedSector(null);
                   setSectorOpen(false);
@@ -106,88 +147,138 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* SECTOR DROPDOWN */}
             {sectorOpen && !collapsed && (
               <div className="sector-list">
-                {[
-                  "Basic Materials",
-                  "Communication Services",
-                  "Consumer Cyclical",
-                  "Consumer Defensive",
-                  "Energy",
-                  "Financial Services",
-                  "Healthcare",
-                  "Industrials",
-                  "Real Estate",
-                  "Technology",
-                  "Utilities",
-                ].map((sector) => (
-                  <div
-                    key={sector}
-                    className="sector-item"
-                    onClick={() => {
-                      navigate("/dashboard");
-                      setActiveMenu("Stocks");
-                      setSelectedSector(sector);
-                    }}
-                  >
-                    {sector}
-                  </div>
-                ))}
+                {sectorList.map((sector) => {
+                  const change = sectorPerformance[sector];
+                  const hasValue = typeof change === "number" && !Number.isNaN(change);
+
+                  return (
+                    <div
+                      key={sector}
+                      className="sector-item"
+                      onClick={() => {
+                        navigate("/dashboard");
+                        setActiveMenu("Stocks");
+                        setSelectedSector(sector);
+                      }}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "10px",
+                      }}
+                    >
+                      <span>{sector}</span>
+
+                      <span
+                        style={{
+                          color: !hasValue
+                            ? "#9ca3af"
+                            : change > 0
+                            ? "#16a34a"
+                            : change < 0
+                            ? "#dc2626"
+                            : "#ffffff",
+                          fontWeight: 600,
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {hasValue ? `${change > 0 ? "+" : ""}${change.toFixed(2)}%` : "--"}
+                      </span>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
-            {/* WATCHLIST */}
             <div
-              className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
+              className={`sidebar-item ${activeMenu === "MarketOutlook" ? "active" : ""}`}
               onClick={() => {
                 navigate("/dashboard");
-                setActiveMenu("Watchlist");
+                setActiveMenu("MarketOutlook");
+                setSectorOpen(false);
               }}
             >
-              Watchlist
+              Market Outlook
             </div>
 
-            {/* DEPENDENCY MAP */}
             <div
               className={`sidebar-item ${activeMenu === "DependencyMap" ? "active" : ""}`}
-              onClick={() => setActiveMenu("DependencyMap")}
+              onClick={() => {
+                setActiveMenu("DependencyMap");
+                setSectorOpen(false);
+              }}
             >
               Dependency Map
             </div>
 
             <div
               className={`sidebar-item ${activeMenu === "SupplyChain" ? "active" : ""}`}
-              onClick={() => setActiveMenu("SupplyChain")}
+              onClick={() => {
+                setActiveMenu("SupplyChain");
+                setSectorOpen(false);
+              }}
             >
               Supply Chain
             </div>
 
             <div
               className={`sidebar-item ${activeMenu === "HiddenPairs" ? "active" : ""}`}
-              onClick={() => setActiveMenu("HiddenPairs")}
+              onClick={() => {
+                setActiveMenu("HiddenPairs");
+                setSectorOpen(false);
+              }}
             >
               Hidden Pairs
+            </div>
+
+            <div
+              className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
+              onClick={() => {
+                navigate("/dashboard");
+                setActiveMenu("Watchlist");
+                setSectorOpen(false);
+              }}
+            >
+              Watchlist
+            </div>
+
+            <div
+              className={`sidebar-item ${activeMenu === "Feedback" ? "active" : ""}`}
+              onClick={() => {
+                navigate("/dashboard");
+                setActiveMenu("Feedback");
+                setSectorOpen(false);
+              }}
+            >
+              Feedback
             </div>
           </nav>
 
           {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
         </aside>
 
-        {/* Main Content */}
         <main
           className="main-content"
           style={{ backgroundColor: "#0E1424", padding: "40px" }}
         >
           {activeMenu === "DependencyMap" ? (
-  <DependencyMap />
-) : activeMenu === "SupplyChain" ? (
-  <SupplyChain />
-) : activeMenu === "HiddenPairs" ? (
-  <HiddenPairs />
-) : (
-  <StockTable view={activeMenu} selectedSector={selectedSector} />
-)}
+            <DependencyMap />
+          ) : activeMenu === "SupplyChain" ? (
+            <SupplyChain />
+          ) : activeMenu === "HiddenPairs" ? (
+            <HiddenPairs />
+          ) : activeMenu === "MarketOutlook" ? (
+            <MarketOutlook />
+          ) : activeMenu === "Feedback" ? (
+            <Feedback />
+          ) : (
+            <StockTable
+              view={activeMenu}
+              selectedSector={selectedSector}
+            />
+          )}
         </main>
       </div>
     </>

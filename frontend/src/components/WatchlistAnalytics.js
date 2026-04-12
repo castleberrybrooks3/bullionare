@@ -2,27 +2,72 @@ import React, { useMemo } from "react";
 import { Pie } from "react-chartjs-2";
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from "chart.js";
 
+const SECTOR_COLORS = {
+  Technology: "#60a5fa",              // medium blue
+  Healthcare: "#ef4444",              // same red family as site
+  "Financial Services": "#22c55e",    // same green family as site
+  Financials: "#22c55e",
+  "Consumer Cyclical": "#fbbf24",     // amber
+  "Consumer Defensive": "#a78bfa",    // violet
+  Industrials: "#94a3b8",             // slate
+  Energy: "#fb923c",                  // orange
+  Utilities: "#22d3ee",               // cyan
+  "Communication Services": "#f472b6",// pink
+  Materials: "#a3e635",               // lime
+  "Basic Materials": "#a3e635",
+  "Real Estate": "#34d399",           // emerald/green-teal
+};
+
+const getSectorColor = (sector) => {
+  return SECTOR_COLORS[sector] || "#9ca3af";
+};
+
 ChartJS.register(ArcElement, Tooltip, Legend);
 
-export default function WatchlistAnalytics({ activeList, watchlists }) {
+let cachedStocksRaw = null;
+let cachedStockMap = null;
+
+const getCachedStockMap = () => {
+  const stocksRaw = localStorage.getItem("stocks") || "[]";
+
+  if (stocksRaw === cachedStocksRaw && cachedStockMap) {
+    return cachedStockMap;
+  }
+
+  cachedStocksRaw = stocksRaw;
+
+  try {
+    const allStocks = JSON.parse(stocksRaw);
+    cachedStockMap = Object.fromEntries(
+      allStocks.map((stock) => [stock.Ticker, stock])
+    );
+  } catch (error) {
+    console.error("Failed to parse cached stocks from localStorage", error);
+    cachedStockMap = {};
+  }
+
+  return cachedStockMap;
+};
+
+function WatchlistAnalytics({ activeList, watchlists }) {
   const { chartData, avgBeta } = useMemo(() => {
-    const allStocks = JSON.parse(localStorage.getItem("stocks") || "[]");
+    const stockMap = getCachedStockMap();
     const tickers = watchlists?.[activeList] || [];
 
     const breakdown = {};
     const betaValues = [];
 
     tickers.forEach((ticker) => {
-      const stock = allStocks.find((s) => s.Ticker === ticker);
+      const stock = stockMap[ticker];
       if (!stock) return;
 
       const sector = stock.Sector || "Unknown";
       breakdown[sector] = (breakdown[sector] || 0) + 1;
 
       const rawBeta = Number(stock.Beta);
-if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
-  betaValues.push(rawBeta);
-}
+      if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
+        betaValues.push(rawBeta);
+      }
     });
 
     const labels = Object.keys(breakdown);
@@ -38,19 +83,7 @@ if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
                 data: counts.map((count) =>
                   Number(((count / total) * 100).toFixed(1))
                 ),
-                backgroundColor: [
-                  "#4dc9f6",
-                  "#f67019",
-                  "#f53794",
-                  "#537bc4",
-                  "#acc236",
-                  "#166a8f",
-                  "#00a950",
-                  "#58595b",
-                  "#8549ba",
-                  "#e6194b",
-                  "#ffe119",
-                ],
+                backgroundColor: labels.map((sector) => getSectorColor(sector)),
                 borderWidth: 0,
               },
             ],
@@ -74,7 +107,9 @@ if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
       },
       tooltip: {
         callbacks: {
-          label: (context) => `${context.label}: ${context.formattedValue}%`,
+          label: (context) => {
+            return `${context.label}: ${context.formattedValue}%`;
+          },
         },
       },
     },
@@ -90,40 +125,44 @@ if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
   return (
     <div
   style={{
-    width: "650px",
-    minWidth: "650px",
-    height: "380px",
-    minHeight: "380px",
-    flexShrink: 0,
+    width: "100%",
+    maxWidth: "650px",
+    minWidth: 0,
+    height: "220px",
+    minHeight: "220px",
     display: "flex",
+    flexWrap: "nowrap",
     flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "flex-start",
+    alignItems: "flex-end",
+    justifyContent: "center",
     gap: "20px",
+    boxSizing: "border-box",
+    marginTop: "-12px",
   }}
 >
       {/* PIE CHART */}
       <div
-        style={{
-          flex: "1",
-          height: "100%",
-          minHeight: 0,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "flex-start",
-          paddingTop: "10px",
-        }}
-      >
+  style={{
+    flex: "1 1 220px",
+    minWidth: "220px",
+    minHeight: 0,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    paddingTop: "0px",
+  }}
+>
         {chartData ? (
           <div
   style={{
     width: "200px",
+    maxWidth: "100%",
     height: "200px",
-    marginTop: "-200px",
+    marginTop: "0px",
   }}
 >
-  <Pie data={chartData} options={options} />
-</div>
+            <Pie data={chartData} options={options} />
+          </div>
         ) : (
           <div
             style={{
@@ -139,18 +178,19 @@ if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
 
       {/* BETA / VOLATILITY BAR */}
       <div
-        style={{
-          width: "260px",
-          height: "100%",
-          display: "flex",
-          flexDirection: "column",
-          marginRight: "80px",
-          justifyContent: "flex-start",
-          paddingTop: "60px",
-          paddingLeft: "0px",
-          boxSizing: "border-box",
-        }}
-      >
+  style={{
+    flex: "1 1 260px",
+    minWidth: "240px",
+    maxWidth: "320px",
+    display: "flex",
+    flexDirection: "column",
+    marginRight: "0px",
+    justifyContent: "flex-end",
+    paddingTop: "0px",
+    paddingLeft: "0px",
+    boxSizing: "border-box",
+  }}
+>
         <div
           style={{
             color: "white",
@@ -229,3 +269,5 @@ if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
     </div>
   );
 }
+
+export default React.memo(WatchlistAnalytics);

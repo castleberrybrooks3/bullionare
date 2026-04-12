@@ -12,13 +12,14 @@ const companies = Object.keys(supplyChainTree);
 const nodeBaseStyle = {
   background: "#1a2238",
   color: "white",
-  border: "1px solid #2a3655",
+  border: "1px solid transparent",
   borderRadius: "12px",
   padding: "10px 14px",
   minWidth: 170,
   textAlign: "center",
   boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
   cursor: "pointer",
+  transition: "all 0.2s ease",
 };
 
 const rootNodeStyle = {
@@ -307,7 +308,7 @@ export default function SupplyChain() {
 
   return (
     <div style={{ color: "white", padding: "20px" }}>
-      <h1>40 DOW & Mega Cap Supply Chains</h1>
+      <h1>DOW & Mega Cap Supply Chains</h1>
 
       {!selectedCompany ? (
         <>
@@ -341,17 +342,19 @@ export default function SupplyChain() {
           >
             {filteredCompanies.map((ticker) => (
               <div
-                key={ticker}
-                onClick={() => setSelectedCompany(ticker)}
-                style={{
-                  padding: "20px",
-                  background: "#1a2238",
-                  borderRadius: "8px",
-                  textAlign: "center",
-                  cursor: "pointer",
-                  fontWeight: "bold",
-                }}
-              >
+  key={ticker}
+  onClick={() => setSelectedCompany(ticker)}
+  className="hover-glow"
+  style={{
+    padding: "20px",
+    background: "#1a2238",
+    borderRadius: "8px",
+    textAlign: "center",
+    cursor: "pointer",
+    fontWeight: "bold",
+    border: "1px solid transparent",
+  }}
+>
                 {supplyChainTree[ticker].name || ticker}
               </div>
             ))}

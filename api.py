@@ -136,6 +136,64 @@ def fetch_chart_data(ticker: str, range_key: str):
 
     config = range_map.get(range_key, range_map["1D"])
 
+    # Special handling for 1D so weekends/market holidays still show
+    if range_key == "1D":
+        for days_back in range(0, 5):
+            target_date = (datetime.now() - timedelta(days=days_back)).date().isoformat()
+
+            data = get_polygon_json(
+                f"/v2/aggs/ticker/{ticker}/range/5/minute/{target_date}/{target_date}",
+                {
+                    "adjusted": "true",
+                    "sort": "asc",
+                    "limit": 5000,
+                },
+                timeout=25,
+            )
+
+            if not data or not data.get("results"):
+                continue
+
+            points = []
+            for bar in data["results"]:
+                timestamp = bar.get("t")
+                open_price = bar.get("o")
+                high_price = bar.get("h")
+                low_price = bar.get("l")
+                close_price = bar.get("c")
+                volume = bar.get("v")
+
+                if (
+                    timestamp is None
+                    or open_price is None
+                    or high_price is None
+                    or low_price is None
+                    or close_price is None
+                ):
+                    continue
+
+                points.append({
+                    "time": timestamp,
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "volume": volume,
+                })
+
+            if points:
+                return {
+                    "ticker": ticker,
+                    "range": range_key,
+                    "points": points,
+                }
+
+        return {
+            "ticker": ticker,
+            "range": range_key,
+            "points": [],
+        }
+
     end_date = datetime.now().date()
     start_date = end_date - timedelta(days=config["days"])
 

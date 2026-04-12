@@ -10,7 +10,8 @@ API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 if not API_KEY:
     raise ValueError("POLYGON_API_KEY is missing or empty.")
 
-DB_FILE = "stocks.db"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_FILE = os.path.join(BASE_DIR, "stocks.db")
 BASE_URL = "https://api.polygon.io"
 MAX_WORKERS = 8
 

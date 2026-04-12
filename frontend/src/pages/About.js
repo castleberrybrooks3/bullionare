@@ -1,9 +1,17 @@
 import "./About.css";
+import { useNavigate } from "react-router-dom";
 
 export default function About() {
+const navigate = useNavigate();
   return (
     <div className="about-page">
       <div className="about-container">
+      <button
+  className="back-button"
+  onClick={() => navigate(-1)}
+>
+  ← Back
+</button>
         <h1>About Bullionaire</h1>
         <p>
           Bullionaire is a financial intelligence platform built for modern investors designed to help identify high-conviction opportunities using advanced data analysis and real-time market insights. We specialize in simplicity and navigating markets efficiently.

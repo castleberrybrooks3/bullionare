@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import sqlite3
+from db import get_db_connection_dict
 import os
 import math
 import json
@@ -25,9 +25,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "stocks.db")
-
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 POLYGON_BASE_URL = "https://api.polygon.io"
 polygon_session = requests.Session()
@@ -37,13 +34,7 @@ polygon_session = requests.Session()
 # DB HELPERS
 # =========================================================
 
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def clean_row(row: sqlite3.Row):
+def clean_row(row):
     return dict(row)
 
 
@@ -58,10 +49,10 @@ def parse_json_field(value):
 
 def add_min_max_filter(where_clauses, params, column_sql, min_val, max_val):
     if min_val is not None:
-        where_clauses.append(f"{column_sql} >= ?")
+        where_clauses.append(f"{column_sql} >= %s")
         params.append(min_val)
     if max_val is not None:
-        where_clauses.append(f"{column_sql} <= ?")
+        where_clauses.append(f"{column_sql} <= %s")
         params.append(max_val)
 
 def get_polygon_json(path: str, params: Optional[dict] = None, timeout: int = 20):
@@ -339,21 +330,21 @@ def build_where_clause(
 
     if search:
         search_term = f"%{search.strip()}%"
-        where_clauses.append('(LOWER("Company Name") LIKE LOWER(?) OR UPPER("Ticker") LIKE UPPER(?))')
+        where_clauses.append('(LOWER("Company Name") LIKE LOWER(%s) OR UPPER("Ticker") LIKE UPPER(%s))')
         params.extend([search_term, search_term])
 
     if sector:
-        where_clauses.append('LOWER("Sector") = LOWER(?)')
+        where_clauses.append('LOWER("Sector") = LOWER(%s)')
         params.append(sector.strip())
 
     if security_type:
-        where_clauses.append('UPPER("Type") = UPPER(?)')
+        where_clauses.append('UPPER("Type") = UPPER(%s)')
         params.append(security_type.strip())
 
     if tickers:
         ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
         if ticker_list:
-            placeholders = ",".join(["?"] * len(ticker_list))
+            placeholders = ",".join(["%s"] * len(ticker_list))
             where_clauses.append(f'UPPER("Ticker") IN ({placeholders})')
             params.extend(ticker_list)
 
@@ -368,7 +359,7 @@ def build_where_clause(
 
     add_min_max_filter(where_clauses, params, 'CAST("Beta" AS REAL)', min_beta, max_beta)
     add_min_max_filter(where_clauses, params, 'CAST("EBITDA" AS REAL)', min_ebitda, max_ebitda)
-    add_min_max_filter(where_clauses, params, 'CAST("Short % of Float" AS REAL)', min_short_float, max_short_float)
+    add_min_max_filter(where_clauses, params, 'CAST("Short %% of Float" AS REAL)', min_short_float, max_short_float)
     add_min_max_filter(where_clauses, params, 'CAST("Gross Profit" AS REAL)', min_gross_profit, max_gross_profit)
     add_min_max_filter(where_clauses, params, 'CAST("Analyst Upside" AS REAL)', min_upside, max_upside)
     add_min_max_filter(where_clauses, params, 'CAST("Analyst Downside" AS REAL)', min_downside, max_downside)
@@ -380,7 +371,7 @@ def build_where_clause(
     add_min_max_filter(where_clauses, params, 'CAST("Day High" AS REAL)', min_day_high, max_day_high)
     add_min_max_filter(where_clauses, params, 'CAST("Day Low" AS REAL)', min_day_low, max_day_low)
     add_min_max_filter(where_clauses, params, 'CAST("Day Volume" AS REAL)', min_day_volume, max_day_volume)
-    add_min_max_filter(where_clauses, params, 'CAST("Today Change %" AS REAL)', min_today_change, max_today_change)
+    add_min_max_filter(where_clauses, params, 'CAST("Today Change %%" AS REAL)', min_today_change, max_today_change)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Signal" AS REAL)', min_macd_signal, max_macd_signal)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Histogram" AS REAL)', min_macd_histogram, max_macd_histogram)
     add_min_max_filter(where_clauses, params, 'CAST("Latest Dividend Amount" AS REAL)', min_latest_dividend,
@@ -411,7 +402,7 @@ STOCK_LIST_COLUMNS = """
     "Day High",
     "Day Low",
     "Day Volume",
-    "Today Change %",
+    "Today Change %%",
     "Market Cap",
     "EPS (TTM)",
     "P/E (TTM)",
@@ -423,7 +414,7 @@ STOCK_LIST_COLUMNS = """
     "SMA 20",
     "Beta",
     "EBITDA",
-    "Short % of Float",
+    "Short %% of Float",
     "Gross Profit",
     "Analyst Upside",
     "Analyst Downside",
@@ -444,216 +435,29 @@ STOCK_LIST_COLUMNS = """
 # =========================================================
 # ROUTES
 # =========================================================
-
 @app.get("/stocks")
 def get_stocks(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=1000),
-
-    search: Optional[str] = None,
-    sector: Optional[str] = None,
-    security_type: Optional[str] = None,
-    tickers: Optional[str] = None,
-
-    min_price: Optional[float] = None,
-    max_price: Optional[float] = None,
-
-    min_market_cap: Optional[float] = None,
-    max_market_cap: Optional[float] = None,
-
-    min_eps: Optional[float] = None,
-    max_eps: Optional[float] = None,
-
-    min_pe: Optional[float] = None,
-    max_pe: Optional[float] = None,
-
-    min_dividend: Optional[float] = None,
-    max_dividend: Optional[float] = None,
-
-    min_rsi: Optional[float] = None,
-    max_rsi: Optional[float] = None,
-
-    min_macd: Optional[float] = None,
-    max_macd: Optional[float] = None,
-
-    min_sma20: Optional[float] = None,
-    max_sma20: Optional[float] = None,
-
-    min_beta: Optional[float] = None,
-    max_beta: Optional[float] = None,
-
-    min_ebitda: Optional[float] = None,
-    max_ebitda: Optional[float] = None,
-
-    min_short_float: Optional[float] = None,
-    max_short_float: Optional[float] = None,
-
-    min_gross_profit: Optional[float] = None,
-    max_gross_profit: Optional[float] = None,
-
-    min_upside: Optional[float] = None,
-    max_upside: Optional[float] = None,
-
-    min_downside: Optional[float] = None,
-    max_downside: Optional[float] = None,
-
-    min_mean_target: Optional[float] = None,
-    max_mean_target: Optional[float] = None,
-
-    min_analysts: Optional[int] = None,
-    max_analysts: Optional[int] = None,
-
-        min_previous_close: Optional[float] = None,
-        max_previous_close: Optional[float] = None,
-
-        min_day_open: Optional[float] = None,
-        max_day_open: Optional[float] = None,
-
-        min_day_high: Optional[float] = None,
-        max_day_high: Optional[float] = None,
-
-        min_day_low: Optional[float] = None,
-        max_day_low: Optional[float] = None,
-
-        min_day_volume: Optional[float] = None,
-        max_day_volume: Optional[float] = None,
-
-        min_today_change: Optional[float] = None,
-        max_today_change: Optional[float] = None,
-
-        min_macd_signal: Optional[float] = None,
-        max_macd_signal: Optional[float] = None,
-
-        min_macd_histogram: Optional[float] = None,
-        max_macd_histogram: Optional[float] = None,
-
-        min_latest_dividend: Optional[float] = None,
-        max_latest_dividend: Optional[float] = None,
-
-        min_dividend_frequency: Optional[float] = None,
-        max_dividend_frequency: Optional[float] = None,
-
     sort_by: str = Query("Market Cap"),
     sort_order: str = Query("desc"),
 ):
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
-        where_sql, params = build_where_clause(
-            search=search,
-            sector=sector,
-            security_type=security_type,
-            tickers=tickers,
-            min_price=min_price,
-            max_price=max_price,
-            min_market_cap=min_market_cap,
-            max_market_cap=max_market_cap,
-            min_eps=min_eps,
-            max_eps=max_eps,
-            min_pe=min_pe,
-            max_pe=max_pe,
-            min_dividend=min_dividend,
-            max_dividend=max_dividend,
-            min_rsi=min_rsi,
-            max_rsi=max_rsi,
-            min_macd=min_macd,
-            max_macd=max_macd,
-            min_sma20=min_sma20,
-            max_sma20=max_sma20,
-            min_beta=min_beta,
-            max_beta=max_beta,
-            min_ebitda=min_ebitda,
-            max_ebitda=max_ebitda,
-            min_short_float=min_short_float,
-            max_short_float=max_short_float,
-            min_gross_profit=min_gross_profit,
-            max_gross_profit=max_gross_profit,
-            min_upside=min_upside,
-            max_upside=max_upside,
-            min_downside=min_downside,
-            max_downside=max_downside,
-            min_mean_target=min_mean_target,
-            max_mean_target=max_mean_target,
-            min_analysts=min_analysts,
-            max_analysts=max_analysts,
-            min_previous_close=min_previous_close,
-            max_previous_close=max_previous_close,
-            min_day_open=min_day_open,
-            max_day_open=max_day_open,
-            min_day_high=min_day_high,
-            max_day_high=max_day_high,
-            min_day_low=min_day_low,
-            max_day_low=max_day_low,
-            min_day_volume=min_day_volume,
-            max_day_volume=max_day_volume,
-            min_today_change=min_today_change,
-            max_today_change=max_today_change,
-            min_macd_signal=min_macd_signal,
-            max_macd_signal=max_macd_signal,
-            min_macd_histogram=min_macd_histogram,
-            max_macd_histogram=max_macd_histogram,
-            min_latest_dividend=min_latest_dividend,
-            max_latest_dividend=max_latest_dividend,
-            min_dividend_frequency=min_dividend_frequency,
-            max_dividend_frequency=max_dividend_frequency,
-        )
-
-        allowed_sort_columns = {
-            "Ticker": '"Ticker"',
-            "Type": '"Type"',
-            "Sector": '"Sector"',
-            "Current Price": 'CAST("Current Price" AS REAL)',
-            "Previous Close": 'CAST("Previous Close" AS REAL)',
-            "Day Open": 'CAST("Day Open" AS REAL)',
-            "Day High": 'CAST("Day High" AS REAL)',
-            "Day Low": 'CAST("Day Low" AS REAL)',
-            "Day Volume": 'CAST("Day Volume" AS REAL)',
-            "Today Change %": 'CAST("Today Change %" AS REAL)',
-            "Market Cap": 'CAST("Market Cap" AS REAL)',
-            "EPS (TTM)": 'CAST("EPS (TTM)" AS REAL)',
-            "P/E (TTM)": 'CAST("P/E (TTM)" AS REAL)',
-            "Dividend Yield": 'CAST("Dividend Yield" AS REAL)',
-            "RSI": 'CAST("RSI" AS REAL)',
-            "MACD": 'CAST("MACD" AS REAL)',
-            "MACD Signal": 'CAST("MACD Signal" AS REAL)',
-            "MACD Histogram": 'CAST("MACD Histogram" AS REAL)',
-            "SMA 20": 'CAST("SMA 20" AS REAL)',
-            "Beta": 'CAST("Beta" AS REAL)',
-            "EBITDA": 'CAST("EBITDA" AS REAL)',
-            "Short % of Float": 'CAST("Short % of Float" AS REAL)',
-            "Gross Profit": 'CAST("Gross Profit" AS REAL)',
-            "Analyst Upside": 'CAST("Analyst Upside" AS REAL)',
-            "Analyst Downside": 'CAST("Analyst Downside" AS REAL)',
-            "Mean Target": 'CAST("Mean Target" AS REAL)',
-            "Number of Analysts": 'CAST("Number of Analysts" AS REAL)',
-            "Latest Dividend Amount": 'CAST("Latest Dividend Amount" AS REAL)',
-            "Last Updated": '"Last Updated"',
-        }
-
-        sort_sql = allowed_sort_columns.get(sort_by, 'CAST("Market Cap" AS REAL)')
-        order_sql = "ASC" if sort_order.lower() == "asc" else "DESC"
-
-        count_query = f"""
-            SELECT COUNT(*) AS total
-            FROM stocks
-            {where_sql}
-        """
-        cursor.execute(count_query, params)
+        cursor.execute('SELECT COUNT(*) AS total FROM stocks')
         total = cursor.fetchone()["total"]
 
-        total_pages = math.ceil(total / page_size) if total > 0 else 1
         offset = (page - 1) * page_size
 
         data_query = f"""
             SELECT {STOCK_LIST_COLUMNS}
             FROM stocks
-            {where_sql}
-            ORDER BY {sort_sql} {order_sql}, "Ticker" ASC
-            LIMIT ? OFFSET ?
+            ORDER BY "Ticker" ASC
+            LIMIT %s OFFSET %s
         """
-        data_params = params + [page_size, offset]
-        cursor.execute(data_query, data_params)
+        cursor.execute(data_query, [page_size, offset])
         rows = cursor.fetchall()
 
         conn.close()
@@ -663,9 +467,9 @@ def get_stocks(
             "total": total,
             "page": page,
             "page_size": page_size,
-            "total_pages": total_pages,
+            "total_pages": 1,
             "sort_by": sort_by,
-            "sort_order": order_sql.lower(),
+            "sort_order": sort_order,
         }
 
     except Exception as e:
@@ -703,7 +507,7 @@ def get_stock_chart(ticker: str, range: str = Query("1D")):
 @app.get("/stocks/{ticker}")
 def get_stock_detail(ticker: str):
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -719,7 +523,7 @@ def get_stock_detail(ticker: str):
                 s."Day High",
                 s."Day Low",
                 s."Day Volume",
-                s."Today Change %",
+                s."Today Change %%",
                 s."Market Cap",
                 s."EPS (TTM)",
                 s."P/E (TTM)",
@@ -731,7 +535,7 @@ def get_stock_detail(ticker: str):
                 s."SMA 20",
                 s."Beta",
                 s."EBITDA",
-                s."Short % of Float",
+                s."Short %% of Float",
                 s."Gross Profit",
                 s."Analyst Upside",
                 s."Analyst Downside",
@@ -750,7 +554,7 @@ def get_stock_detail(ticker: str):
             FROM stocks s
             LEFT JOIN stock_details d
                 ON s."Ticker" = d."Ticker"
-            WHERE s."Ticker" = ?
+            WHERE s."Ticker" = %s
             LIMIT 1
         """, (ticker.upper(),))
 
@@ -771,7 +575,7 @@ def get_stock_detail(ticker: str):
 @app.get("/stocks/{ticker}/financials")
 def get_stock_financials(ticker: str):
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -782,7 +586,7 @@ def get_stock_financials(ticker: str):
                 d."Cash Flow JSON",
                 d."Financials Last Updated"
             FROM stock_details d
-            WHERE d."Ticker" = ?
+            WHERE d."Ticker" = %s
             LIMIT 1
         """, (ticker.upper(),))
 
@@ -808,7 +612,7 @@ def get_stock_financials(ticker: str):
 @app.get("/sectors")
 def get_sectors():
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -831,7 +635,7 @@ def get_sectors():
 @app.get("/security-types")
 def get_security_types():
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
@@ -854,18 +658,18 @@ def get_security_types():
 @app.get("/sector-performance")
 def get_sector_performance():
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
             SELECT
                 "Sector",
-                AVG(CAST("Today Change %" AS REAL)) AS avg_change
+                AVG(CAST("Today Change %%" AS REAL)) AS avg_change
             FROM stocks
             WHERE "Sector" IS NOT NULL
               AND TRIM("Sector") != ''
-              AND "Today Change %" IS NOT NULL
-              AND TRIM("Today Change %") != ''
+              AND "Today Change %%" IS NOT NULL
+              AND TRIM("Today Change %%") != ''
               AND UPPER("Type") = 'CS'
               AND "Sector" IN (
                   'Basic Materials',
@@ -899,15 +703,15 @@ def get_sector_performance():
 @app.get("/market-breadth")
 def get_market_breadth():
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT CAST("Today Change %" AS REAL) AS change_pct
+            SELECT CAST("Today Change %%" AS REAL) AS change_pct
             FROM stocks
             WHERE UPPER("Type") = 'CS'
-              AND "Today Change %" IS NOT NULL
-              AND TRIM("Today Change %") != ''
+              AND "Today Change %%" IS NOT NULL
+              AND TRIM("Today Change %%") != ''
         """)
 
         rows = cursor.fetchall()
@@ -972,14 +776,14 @@ def get_market_breadth():
 @app.get("/market-summary")
 def get_market_summary():
     try:
-        conn = get_db_connection()
+        conn = get_db_connection_dict()
         cursor = conn.cursor()
 
         cursor.execute("""
             SELECT
                 "Ticker",
                 CAST("Current Price" AS REAL) AS price,
-                CAST("Today Change %" AS REAL) AS change
+                CAST("Today Change %%" AS REAL) AS change
             FROM stocks
             WHERE "Ticker" IN ('SPY', 'QQQ', 'DIA', 'IBIT', 'USO', 'GLD', 'VIXY')
         """)

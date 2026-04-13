@@ -1,17 +1,21 @@
 import os
+import traceback
 import time
 import json
-import sqlite3
 import requests
-from datetime import datetime
+import psycopg2
+from datetime import datetime, UTC
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from psycopg2.extras import RealDictCursor, execute_values
 
 API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 if not API_KEY:
     raise ValueError("POLYGON_API_KEY is missing or empty.")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_FILE = os.path.join(BASE_DIR, "stocks.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is missing or empty.")
+
 BASE_URL = "https://api.polygon.io"
 MAX_WORKERS = 8
 
@@ -88,11 +92,25 @@ def paginate(path: str, params: dict | None = None, results_key: str = "results"
                 current_params[k] = v
 
 
+def get_conn():
+    db_url = DATABASE_URL
+    if "sslmode=" not in db_url:
+        separator = "&" if "?" in db_url else "?"
+        db_url = f"{db_url}{separator}sslmode=require"
+
+    conn = psycopg2.connect(
+        db_url,
+        cursor_factory=RealDictCursor,
+        connect_timeout=10
+    )
+    return conn
+
+
 # =========================================================
 # DB SETUP
 # =========================================================
 
-def ensure_tables(conn: sqlite3.Connection):
+def ensure_tables(conn):
     cursor = conn.cursor()
 
     cursor.execute("""
@@ -146,47 +164,62 @@ def ensure_tables(conn: sqlite3.Connection):
     conn.commit()
 
 
-def ensure_ticker_exists(conn: sqlite3.Connection, ticker: str):
-    conn.execute(
-        'INSERT OR IGNORE INTO stocks ("Ticker") VALUES (?)',
-        (ticker,)
+def ensure_tickers_batch(conn, tickers: list[str]):
+    if not tickers:
+        return
+
+    cursor = conn.cursor()
+
+    stock_rows = [(ticker,) for ticker in tickers]
+    detail_rows = [(ticker,) for ticker in tickers]
+
+    execute_values(
+        cursor,
+        'INSERT INTO stocks ("Ticker") VALUES %s ON CONFLICT ("Ticker") DO NOTHING',
+        stock_rows,
+        page_size=1000
     )
-    conn.execute(
-        'INSERT OR IGNORE INTO stock_details ("Ticker") VALUES (?)',
-        (ticker,)
+
+    execute_values(
+        cursor,
+        'INSERT INTO stock_details ("Ticker") VALUES %s ON CONFLICT ("Ticker") DO NOTHING',
+        detail_rows,
+        page_size=1000
     )
 
 
-def update_polygon_stock_row(conn: sqlite3.Connection, ticker: str, row: dict):
-    conn.execute("""
+def update_polygon_stock_row(conn, ticker: str, row: dict):
+    cursor = conn.cursor()
+
+    cursor.execute("""
         UPDATE stocks
         SET
-            "Type" = ?,
-            "Company Name" = ?,
-            "Description" = ?,
-            "Current Price" = ?,
-            "Previous Close" = ?,
-            "Day Open" = ?,
-            "Day High" = ?,
-            "Day Low" = ?,
-            "Day Volume" = ?,
-            "Today Change %" = ?,
-            "Market Cap" = ?,
-            "RSI" = ?,
-            "MACD" = ?,
-            "MACD Signal" = ?,
-            "MACD Histogram" = ?,
-            "SMA 20" = ?,
-            "Latest Dividend Amount" = ?,
-            "Latest Ex-Dividend Date" = ?,
-            "Latest Pay Date" = ?,
-            "Dividend Frequency" = ?,
-            "Latest 10-K Date" = ?,
-            "Latest 10-K URL" = ?,
-            "Latest 10-Q Date" = ?,
-            "Latest 10-Q URL" = ?,
-            "Last Updated" = ?
-        WHERE "Ticker" = ?
+            "Type" = %s,
+            "Company Name" = %s,
+            "Description" = %s,
+            "Current Price" = %s,
+            "Previous Close" = %s,
+            "Day Open" = %s,
+            "Day High" = %s,
+            "Day Low" = %s,
+            "Day Volume" = %s,
+            "Today Change %%" = %s,
+            "Market Cap" = %s,
+            "RSI" = %s,
+            "MACD" = %s,
+            "MACD Signal" = %s,
+            "MACD Histogram" = %s,
+            "SMA 20" = %s,
+            "Latest Dividend Amount" = %s,
+            "Latest Ex-Dividend Date" = %s,
+            "Latest Pay Date" = %s,
+            "Dividend Frequency" = %s,
+            "Latest 10-K Date" = %s,
+            "Latest 10-K URL" = %s,
+            "Latest 10-Q Date" = %s,
+            "Latest 10-Q URL" = %s,
+            "Last Updated" = %s
+        WHERE "Ticker" = %s
     """, (
         row.get("Type"),
         row.get("Company Name"),
@@ -217,15 +250,17 @@ def update_polygon_stock_row(conn: sqlite3.Connection, ticker: str, row: dict):
     ))
 
 
-def update_stock_details_row(conn: sqlite3.Connection, ticker: str, row: dict):
-    conn.execute("""
+def update_stock_details_row(conn, ticker: str, row: dict):
+    cursor = conn.cursor()
+
+    cursor.execute("""
         UPDATE stock_details
         SET
-            "Balance Sheet JSON" = ?,
-            "Income Statement JSON" = ?,
-            "Cash Flow JSON" = ?,
-            "Financials Last Updated" = ?
-        WHERE "Ticker" = ?
+            "Balance Sheet JSON" = %s,
+            "Income Statement JSON" = %s,
+            "Cash Flow JSON" = %s,
+            "Financials Last Updated" = %s
+        WHERE "Ticker" = %s
     """, (
         row.get("Balance Sheet JSON"),
         row.get("Income Statement JSON"),
@@ -233,6 +268,281 @@ def update_stock_details_row(conn: sqlite3.Connection, ticker: str, row: dict):
         row.get("Financials Last Updated"),
         ticker
     ))
+
+
+def fetch_existing_snapshot_fields(conn, tickers: list[str]):
+    if not tickers:
+        return {}
+
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            "Ticker",
+            "Type",
+            "Company Name",
+            "Description",
+            "Market Cap",
+            "RSI",
+            "MACD",
+            "MACD Signal",
+            "MACD Histogram",
+            "SMA 20",
+            "Latest Dividend Amount",
+            "Latest Ex-Dividend Date",
+            "Latest Pay Date",
+            "Dividend Frequency",
+            "Latest 10-K Date",
+            "Latest 10-K URL",
+            "Latest 10-Q Date",
+            "Latest 10-Q URL"
+        FROM stocks
+        WHERE "Ticker" = ANY(%s)
+    """, (tickers,))
+
+    rows = cursor.fetchall()
+    return {row["Ticker"]: row for row in rows}
+
+
+def fetch_existing_price_fields(conn, tickers: list[str]):
+    if not tickers:
+        return {}
+
+    cursor = conn.cursor()
+
+    if len(tickers) == 1:
+        cursor.execute("""
+            SELECT
+                "Ticker",
+                "Current Price",
+                "Previous Close",
+                "Day Open",
+                "Day High",
+                "Day Low",
+                "Day Volume",
+                "Today Change %%",
+                "Last Updated"
+            FROM stocks
+            WHERE "Ticker" = %s
+        """, (tickers[0],))
+    else:
+        cursor.execute("""
+            SELECT
+                "Ticker",
+                "Current Price",
+                "Previous Close",
+                "Day Open",
+                "Day High",
+                "Day Low",
+                "Day Volume",
+                "Today Change %%",
+                "Last Updated"
+            FROM stocks
+            WHERE "Ticker" = ANY(%s)
+        """, (tickers,))
+
+    rows = cursor.fetchall()
+    return {row["Ticker"]: row for row in rows}
+
+
+def update_snapshot_batch(conn, rows: list[dict]):
+    if not rows:
+        return
+
+    cursor = conn.cursor()
+
+    values = [
+        (
+            row["Ticker"],
+            row.get("Current Price"),
+            row.get("Previous Close"),
+            row.get("Day Open"),
+            row.get("Day High"),
+            row.get("Day Low"),
+            row.get("Day Volume"),
+            row.get("Today Change %"),
+            row.get("Last Updated"),
+        )
+        for row in rows
+    ]
+
+    execute_values(
+        cursor,
+        """
+        UPDATE stocks AS s
+        SET
+            "Current Price" = v."Current Price",
+            "Previous Close" = v."Previous Close",
+            "Day Open" = v."Day Open",
+            "Day High" = v."Day High",
+            "Day Low" = v."Day Low",
+            "Day Volume" = v."Day Volume",
+            "Today Change %%" = v."Today Change %%",
+            "Last Updated" = v."Last Updated"
+        FROM (
+            VALUES %s
+        ) AS v(
+            "Ticker",
+            "Current Price",
+            "Previous Close",
+            "Day Open",
+            "Day High",
+            "Day Low",
+            "Day Volume",
+            "Today Change %%",
+            "Last Updated"
+        )
+        WHERE s."Ticker" = v."Ticker"
+        """,
+        values,
+        page_size=1000
+    )
+
+
+def update_main_rows_batch(conn, rows: list[tuple[str, dict]]):
+    if not rows:
+        return
+
+    cursor = conn.cursor()
+
+    values = [
+        (
+            ticker,
+            row.get("Type"),
+            row.get("Company Name"),
+            row.get("Description"),
+            row.get("Current Price"),
+            row.get("Previous Close"),
+            row.get("Day Open"),
+            row.get("Day High"),
+            row.get("Day Low"),
+            row.get("Day Volume"),
+            row.get("Today Change %"),
+            row.get("Market Cap"),
+            row.get("RSI"),
+            row.get("MACD"),
+            row.get("MACD Signal"),
+            row.get("MACD Histogram"),
+            row.get("SMA 20"),
+            row.get("Latest Dividend Amount"),
+            row.get("Latest Ex-Dividend Date"),
+            row.get("Latest Pay Date"),
+            row.get("Dividend Frequency"),
+            row.get("Latest 10-K Date"),
+            row.get("Latest 10-K URL"),
+            row.get("Latest 10-Q Date"),
+            row.get("Latest 10-Q URL"),
+            row.get("Last Updated"),
+        )
+        for ticker, row in rows
+    ]
+
+    execute_values(
+        cursor,
+        """
+        UPDATE stocks AS s
+        SET
+            "Type" = v."Type",
+            "Company Name" = v."Company Name",
+            "Description" = v."Description",
+            "Current Price" = v."Current Price",
+            "Previous Close" = v."Previous Close",
+            "Day Open" = v."Day Open",
+            "Day High" = v."Day High",
+            "Day Low" = v."Day Low",
+            "Day Volume" = v."Day Volume",
+            "Today Change %%" = v."Today Change %%",
+            "Market Cap" = v."Market Cap",
+            "RSI" = v."RSI",
+            "MACD" = v."MACD",
+            "MACD Signal" = v."MACD Signal",
+            "MACD Histogram" = v."MACD Histogram",
+            "SMA 20" = v."SMA 20",
+            "Latest Dividend Amount" = v."Latest Dividend Amount",
+            "Latest Ex-Dividend Date" = v."Latest Ex-Dividend Date",
+            "Latest Pay Date" = v."Latest Pay Date",
+            "Dividend Frequency" = v."Dividend Frequency",
+            "Latest 10-K Date" = v."Latest 10-K Date",
+            "Latest 10-K URL" = v."Latest 10-K URL",
+            "Latest 10-Q Date" = v."Latest 10-Q Date",
+            "Latest 10-Q URL" = v."Latest 10-Q URL",
+            "Last Updated" = v."Last Updated"
+        FROM (
+            VALUES %s
+        ) AS v(
+            "Ticker",
+            "Type",
+            "Company Name",
+            "Description",
+            "Current Price",
+            "Previous Close",
+            "Day Open",
+            "Day High",
+            "Day Low",
+            "Day Volume",
+            "Today Change %%",
+            "Market Cap",
+            "RSI",
+            "MACD",
+            "MACD Signal",
+            "MACD Histogram",
+            "SMA 20",
+            "Latest Dividend Amount",
+            "Latest Ex-Dividend Date",
+            "Latest Pay Date",
+            "Dividend Frequency",
+            "Latest 10-K Date",
+            "Latest 10-K URL",
+            "Latest 10-Q Date",
+            "Latest 10-Q URL",
+            "Last Updated"
+        )
+        WHERE s."Ticker" = v."Ticker"
+        """,
+        values,
+        page_size=250
+    )
+
+
+def update_detail_rows_batch(conn, rows: list[tuple[str, dict]]):
+    if not rows:
+        return
+
+    cursor = conn.cursor()
+
+    values = [
+        (
+            ticker,
+            row.get("Balance Sheet JSON"),
+            row.get("Income Statement JSON"),
+            row.get("Cash Flow JSON"),
+            row.get("Financials Last Updated"),
+        )
+        for ticker, row in rows
+    ]
+
+    execute_values(
+        cursor,
+        """
+        UPDATE stock_details AS d
+        SET
+            "Balance Sheet JSON" = v."Balance Sheet JSON",
+            "Income Statement JSON" = v."Income Statement JSON",
+            "Cash Flow JSON" = v."Cash Flow JSON",
+            "Financials Last Updated" = v."Financials Last Updated"
+        FROM (
+            VALUES %s
+        ) AS v(
+            "Ticker",
+            "Balance Sheet JSON",
+            "Income Statement JSON",
+            "Cash Flow JSON",
+            "Financials Last Updated"
+        )
+        WHERE d."Ticker" = v."Ticker"
+        """,
+        values,
+        page_size=250
+    )
 
 
 # =========================================================
@@ -305,7 +615,7 @@ def fetch_full_market_snapshot():
             "Day Low": day.get("l"),
             "Day Volume": day.get("v"),
             "Today Change %": row.get("todaysChangePerc"),
-            "Last Updated": datetime.utcnow().isoformat(timespec="seconds"),
+            "Last Updated": datetime.now(UTC).isoformat(timespec="seconds"),
         }
 
     print(f"Snapshot rows fetched: {len(snapshot_map)}")
@@ -474,7 +784,7 @@ def fetch_statement_data(ticker: str):
         "Balance Sheet JSON": balance_sheet,
         "Income Statement JSON": income_statement,
         "Cash Flow JSON": cash_flow,
-        "Financials Last Updated": datetime.utcnow().isoformat(timespec="seconds"),
+        "Financials Last Updated": datetime.now(UTC).isoformat(timespec="seconds"),
     }
 
 
@@ -493,7 +803,7 @@ def fetch_ticker_bundle(ticker: str):
             stock_row.update(block)
 
     if stock_row:
-        stock_row["Last Updated"] = datetime.utcnow().isoformat(timespec="seconds")
+        stock_row["Last Updated"] = datetime.now(UTC).isoformat(timespec="seconds")
 
     if statement_data:
         details_row.update(statement_data)
@@ -505,16 +815,21 @@ def fetch_ticker_bundle(ticker: str):
 # CLEANUP
 # =========================================================
 
-def clean_database(conn: sqlite3.Connection):
-    conn.execute("""
+def clean_database(conn):
+    cursor = conn.cursor()
+
+    cursor.execute("""
         DELETE FROM stock_details
         WHERE "Ticker" NOT IN (SELECT "Ticker" FROM stocks)
     """)
 
     conn.commit()
 
-    count = conn.execute('SELECT COUNT(*) FROM stocks').fetchone()[0]
-    priced = conn.execute('SELECT COUNT(*) FROM stocks WHERE "Current Price" IS NOT NULL').fetchone()[0]
+    cursor.execute('SELECT COUNT(*) AS count FROM stocks')
+    count = cursor.fetchone()["count"]
+
+    cursor.execute('SELECT COUNT(*) AS count FROM stocks WHERE "Current Price" IS NOT NULL')
+    priced = cursor.fetchone()["count"]
 
     print(f"Final kept universe: {count} tickers")
     print(f"Tickers with price data: {priced}")
@@ -527,10 +842,7 @@ def clean_database(conn: sqlite3.Connection):
 def main():
     start_time = time.time()
 
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-
+    conn = get_conn()
     ensure_tables(conn)
 
     tickers = fetch_all_polygon_tickers()
@@ -540,25 +852,41 @@ def main():
 
     print(f"Found {len(tickers)} Polygon tickers to process")
 
-    for i, ticker in enumerate(tickers, start=1):
-        ensure_ticker_exists(conn, ticker)
+    # -----------------------------------------------------
+    # Batch ensure ticker universe exists
+    # -----------------------------------------------------
+    for i in range(0, len(tickers), 1000):
+        batch = tickers[i:i + 1000]
+        ensure_tickers_batch(conn, batch)
+        conn.commit()
 
-        if i % 2000 == 0:
-            conn.commit()
-            print(f"Ensured {i} tickers in DB...")
+        if i == 0:
+            for j, ticker in enumerate(batch[:5], start=1):
+                print(f"Inserted ticker {j}: {ticker}")
 
-    conn.commit()
+        print(f"Ensured {min(i + 1000, len(tickers))} tickers in DB...")
 
+    # -----------------------------------------------------
+    # Snapshot phase
+    # -----------------------------------------------------
     snapshot_map = fetch_full_market_snapshot()
 
     snapshot_updates = 0
-    for i, ticker in enumerate(tickers, start=1):
-        snapshot_data = snapshot_map.get(ticker)
-        if snapshot_data:
+
+    for i in range(0, len(tickers), 1000):
+        batch = tickers[i:i + 1000]
+        existing_map = fetch_existing_snapshot_fields(conn, batch)
+        snapshot_batch = []
+
+        for ticker in batch:
+            snapshot_data = snapshot_map.get(ticker)
+            if not snapshot_data:
+                continue
+
+            existing = existing_map.get(ticker)
+
             current_row = {
-                "Type": None,
-                "Company Name": None,
-                "Description": None,
+                "Ticker": ticker,
                 "Current Price": snapshot_data.get("Current Price"),
                 "Previous Close": snapshot_data.get("Previous Close"),
                 "Day Open": snapshot_data.get("Day Open"),
@@ -566,130 +894,86 @@ def main():
                 "Day Low": snapshot_data.get("Day Low"),
                 "Day Volume": snapshot_data.get("Day Volume"),
                 "Today Change %": snapshot_data.get("Today Change %"),
-                "Market Cap": None,
-                "RSI": None,
-                "MACD": None,
-                "MACD Signal": None,
-                "MACD Histogram": None,
-                "SMA 20": None,
-                "Latest Dividend Amount": None,
-                "Latest Ex-Dividend Date": None,
-                "Latest Pay Date": None,
-                "Dividend Frequency": None,
-                "Latest 10-K Date": None,
-                "Latest 10-K URL": None,
-                "Latest 10-Q Date": None,
-                "Latest 10-Q URL": None,
                 "Last Updated": snapshot_data.get("Last Updated"),
             }
 
-            cursor = conn.execute("""
-                SELECT
-                    "Type",
-                    "Company Name",
-                    "Description",
-                    "Market Cap",
-                    "RSI",
-                    "MACD",
-                    "MACD Signal",
-                    "MACD Histogram",
-                    "SMA 20",
-                    "Latest Dividend Amount",
-                    "Latest Ex-Dividend Date",
-                    "Latest Pay Date",
-                    "Dividend Frequency",
-                    "Latest 10-K Date",
-                    "Latest 10-K URL",
-                    "Latest 10-Q Date",
-                    "Latest 10-Q URL"
-                FROM stocks
-                WHERE "Ticker" = ?
-            """, (ticker,))
-            existing = cursor.fetchone()
-
             if existing:
-                current_row["Type"] = existing[0]
-                current_row["Company Name"] = existing[1]
-                current_row["Description"] = existing[2]
-                current_row["Market Cap"] = existing[3]
-                current_row["RSI"] = existing[4]
-                current_row["MACD"] = existing[5]
-                current_row["MACD Signal"] = existing[6]
-                current_row["MACD Histogram"] = existing[7]
-                current_row["SMA 20"] = existing[8]
-                current_row["Latest Dividend Amount"] = existing[9]
-                current_row["Latest Ex-Dividend Date"] = existing[10]
-                current_row["Latest Pay Date"] = existing[11]
-                current_row["Dividend Frequency"] = existing[12]
-                current_row["Latest 10-K Date"] = existing[13]
-                current_row["Latest 10-K URL"] = existing[14]
-                current_row["Latest 10-Q Date"] = existing[15]
-                current_row["Latest 10-Q URL"] = existing[16]
+                pass
 
-            update_polygon_stock_row(conn, ticker, current_row)
+            snapshot_batch.append(current_row)
             snapshot_updates += 1
 
-        if i % 2000 == 0:
-            conn.commit()
-            print(f"Applied snapshot data through {i} tickers...")
+        update_snapshot_batch(conn, snapshot_batch)
+        conn.commit()
+        print(f"Applied snapshot data through {min(i + 1000, len(tickers))} tickers...")
 
-    conn.commit()
     print(f"Snapshot-updated rows: {snapshot_updates}")
 
+    # -----------------------------------------------------
+    # Detailed enrichment phase
+    # -----------------------------------------------------
     updated_main_rows = 0
     updated_detail_rows = 0
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_ticker_bundle, ticker): ticker for ticker in tickers}
 
+        main_row_buffer = []
+        detail_row_buffer = []
+        price_cache = {}
+
         for i, future in enumerate(as_completed(futures), start=1):
-            ticker = futures[future]
+            fallback_ticker = futures[future]
 
             try:
                 ticker, stock_row, details_row = future.result()
 
                 if stock_row:
-                    cursor = conn.execute("""
-                        SELECT
-                            "Current Price",
-                            "Previous Close",
-                            "Day Open",
-                            "Day High",
-                            "Day Low",
-                            "Day Volume",
-                            "Today Change %",
-                            "Last Updated"
-                        FROM stocks
-                        WHERE "Ticker" = ?
-                    """, (ticker,))
-                    existing = cursor.fetchone()
+                    if ticker not in price_cache:
+                        fetched = fetch_existing_price_fields(conn, [ticker])
+                        if ticker in fetched:
+                            price_cache[ticker] = fetched[ticker]
+
+                    existing = price_cache.get(ticker)
 
                     if existing:
-                        stock_row.setdefault("Current Price", existing[0])
-                        stock_row.setdefault("Previous Close", existing[1])
-                        stock_row.setdefault("Day Open", existing[2])
-                        stock_row.setdefault("Day High", existing[3])
-                        stock_row.setdefault("Day Low", existing[4])
-                        stock_row.setdefault("Day Volume", existing[5])
-                        stock_row.setdefault("Today Change %", existing[6])
-                        stock_row["Last Updated"] = datetime.utcnow().isoformat(timespec="seconds")
+                        stock_row.setdefault("Current Price", existing["Current Price"])
+                        stock_row.setdefault("Previous Close", existing["Previous Close"])
+                        stock_row.setdefault("Day Open", existing["Day Open"])
+                        stock_row.setdefault("Day High", existing["Day High"])
+                        stock_row.setdefault("Day Low", existing["Day Low"])
+                        stock_row.setdefault("Day Volume", existing["Day Volume"])
+                        stock_row.setdefault("Today Change %", existing["Today Change %"])
+                        stock_row["Last Updated"] = datetime.now(UTC).isoformat(timespec="seconds")
 
-                    update_polygon_stock_row(conn, ticker, stock_row)
+                    main_row_buffer.append((ticker, stock_row))
                     updated_main_rows += 1
 
                 if details_row:
-                    update_stock_details_row(conn, ticker, details_row)
+                    detail_row_buffer.append((ticker, details_row))
                     updated_detail_rows += 1
 
             except Exception as e:
-                print(f"[BUNDLE ERROR] {ticker}: {e}")
+                print(f"[BUNDLE ERROR] {fallback_ticker}: {type(e).__name__}: {e}")
+                traceback.print_exc()
 
-            if i % 100 == 0:
+            if i % 250 == 0:
+                update_main_rows_batch(conn, main_row_buffer)
+                update_detail_rows_batch(conn, detail_row_buffer)
                 conn.commit()
+
+                main_row_buffer = []
+                detail_row_buffer = []
+
                 print(f"Committed through {i} detailed tickers...")
 
-    conn.commit()
+        update_main_rows_batch(conn, main_row_buffer)
+        update_detail_rows_batch(conn, detail_row_buffer)
+        conn.commit()
 
+    # -----------------------------------------------------
+    # Cleanup
+    # -----------------------------------------------------
     clean_database(conn)
     conn.close()
 

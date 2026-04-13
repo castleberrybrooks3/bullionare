@@ -1,12 +1,17 @@
+import os
 import time
 import math
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import requests
 import yfinance as yf
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import random
 
-DB_FILE = "stocks.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is missing or empty.")
+
 MAX_WORKERS = 1
 SLEEP_BETWEEN_TICKERS = 1.0
 SLEEP_BETWEEN_BATCHES = 5.0
@@ -17,15 +22,28 @@ SLEEP_BETWEEN_BATCHES = 5.0
 # =========================================================
 
 def get_conn():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
+    db_url = DATABASE_URL
+    if "sslmode=" not in db_url:
+        separator = "&" if "?" in db_url else "?"
+        db_url = f"{db_url}{separator}sslmode=require"
+
+    conn = psycopg2.connect(
+        db_url,
+        cursor_factory=RealDictCursor,
+        connect_timeout=10
+    )
     return conn
 
 
 def ensure_yahoo_columns(conn):
     cursor = conn.cursor()
-    existing_cols = {row[1] for row in cursor.execute('PRAGMA table_info(stocks)').fetchall()}
+
+    cursor.execute("""
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = 'stocks'
+    """)
+    existing_cols = {row["column_name"] for row in cursor.fetchall()}
 
     needed = {
         "Beta": "REAL",
@@ -40,6 +58,8 @@ def ensure_yahoo_columns(conn):
         "Number of Analysts": "INTEGER",
         "Sector": "TEXT",
         "Dividend Yield": "REAL",
+        "Yahoo Failed": "BOOLEAN DEFAULT FALSE",
+        "Yahoo Attempted": "BOOLEAN DEFAULT FALSE",
     }
 
     for col_name, col_type in needed.items():
@@ -54,34 +74,36 @@ def fetch_tickers_from_db(conn):
     cursor.execute("""
         SELECT "Ticker"
         FROM stocks
-        WHERE "Ticker" IS NOT NULL
+        WHERE COALESCE("Yahoo Attempted", FALSE) = FALSE
+          AND "Ticker" IS NOT NULL
           AND TRIM("Ticker") != ''
         ORDER BY "Ticker" ASC
+        LIMIT 300
     """)
     rows = cursor.fetchall()
-    return [row[0] for row in rows]
+    return [row["Ticker"] for row in rows]
 
 
 def update_yahoo_row(conn, ticker, row):
     """
     Only updates Yahoo-owned columns. Nothing else.
     """
-    conn.execute("""
+    conn.cursor().execute("""
         UPDATE stocks
         SET
-            "Beta" = ?,
-            "EPS (TTM)" = ?,
-            "P/E (TTM)" = ?,
-            "EBITDA" = ?,
-            "Short % of Float" = ?,
-            "Gross Profit" = ?,
-            "Analyst Upside" = ?,
-            "Analyst Downside" = ?,
-            "Mean Target" = ?,
-            "Number of Analysts" = ?,
-            "Sector" = ?,
-            "Dividend Yield" = ?
-        WHERE "Ticker" = ?
+            "Beta" = %s,
+            "EPS (TTM)" = %s,
+            "P/E (TTM)" = %s,
+            "EBITDA" = %s,
+            "Short %% of Float" = %s,
+            "Gross Profit" = %s,
+            "Analyst Upside" = %s,
+            "Analyst Downside" = %s,
+            "Mean Target" = %s,
+            "Number of Analysts" = %s,
+            "Sector" = %s,
+            "Dividend Yield" = %s
+        WHERE "Ticker" = %s
     """, (
         row.get("Beta"),
         row.get("EPS (TTM)"),
@@ -99,6 +121,19 @@ def update_yahoo_row(conn, ticker, row):
     ))
 
 
+def mark_yahoo_failed(conn, ticker):
+    conn.cursor().execute("""
+        UPDATE stocks
+        SET "Yahoo Failed" = TRUE
+        WHERE "Ticker" = %s
+    """, (ticker,))
+
+def mark_yahoo_attempted(conn, ticker):
+    conn.cursor().execute("""
+        UPDATE stocks
+        SET "Yahoo Attempted" = TRUE
+        WHERE "Ticker" = %s
+    """, (ticker,))
 # =========================================================
 # YAHOO FETCH LOGIC
 # =========================================================
@@ -328,6 +363,10 @@ def fetch_yahoo_data_for_ticker(ticker):
             "Dividend Yield": dividend_yield,
         }
 
+        # Treat all-null rows as failures so they get marked and skipped
+        if all(value is None for value in row.values()):
+            return ticker, None
+
         return ticker, row
 
     except requests.exceptions.RequestException as e:
@@ -336,58 +375,72 @@ def fetch_yahoo_data_for_ticker(ticker):
     except Exception as e:
         print(f"[YAHOO ERROR] {ticker}: {e}")
         return ticker, None
-
-
 # =========================================================
 # MAIN
 # =========================================================
-
 def main():
     start = time.time()
 
     conn = get_conn()
     ensure_yahoo_columns(conn)
 
-    tickers = fetch_tickers_from_db(conn)
-    print(f"Found {len(tickers)} tickers in DB to enrich from Yahoo")
+    total_updated = 0
 
-    if not tickers:
-        conn.close()
-        raise ValueError("No tickers found in stocks table.")
+    while True:
+        tickers = fetch_tickers_from_db(conn)
 
-    updated = 0
-    processed = 0
+        if not tickers:
+            print("No more tickers left to process.")
+            break
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(fetch_yahoo_data_for_ticker, ticker): ticker for ticker in tickers}
+        print(f"Processing batch of {len(tickers)} tickers...")
 
-        for i, future in enumerate(as_completed(futures), start=1):
-            ticker = futures[future]
+        updated = 0
+        processed = 0
 
-            try:
-                ticker, row = future.result()
-                processed += 1
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(fetch_yahoo_data_for_ticker, ticker): ticker for ticker in tickers}
 
-                if row:
-                    update_yahoo_row(conn, ticker, row)
-                    updated += 1
+            for i, future in enumerate(as_completed(futures), start=1):
+                ticker = futures[future]
 
-            except Exception as e:
-                print(f"[FUTURE ERROR] {ticker}: {e}")
+                try:
+                    ticker, row = future.result()
+                    processed += 1
 
-            time.sleep(SLEEP_BETWEEN_TICKERS)
+                    if row:
+                        update_yahoo_row(conn, ticker, row)
+                        updated += 1
+                    else:
+                        mark_yahoo_failed(conn, ticker)
 
-            if i % 50 == 0:
-                conn.commit()
-                print(f"Committed through {i} tickers...")
-                time.sleep(SLEEP_BETWEEN_BATCHES)
+                    mark_yahoo_attempted(conn, ticker)
 
-    conn.commit()
+                except Exception as e:
+                    print(f"[FUTURE ERROR] {ticker}: {e}")
+                    mark_yahoo_failed(conn, ticker)
+                    mark_yahoo_attempted(conn, ticker)
+
+                time.sleep(random.uniform(0.8, 1.4))
+
+                if i % 50 == 0:
+                    conn.commit()
+                    print(f"Committed through {i} tickers...")
+                    time.sleep(SLEEP_BETWEEN_BATCHES)
+
+        conn.commit()
+
+        total_updated += updated
+
+        print(f"Batch complete. Updated: {updated}")
+        print("Cooling down before next batch...")
+
+        time.sleep(random.uniform(45, 75))
+
     conn.close()
 
     elapsed_minutes = (time.time() - start) / 60
-    print(f"Done. Processed: {processed}")
-    print(f"Done. Updated Yahoo rows: {updated}")
+    print(f"Done. Total updated: {total_updated}")
     print(f"Total runtime: {elapsed_minutes:.2f} minutes")
 
 

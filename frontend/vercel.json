@@ -1,9 +1,1 @@
-{
-  "redirects": [
-    {
-      "source": "/(.*)",
-      "destination": "https://bullionaireiq.com/$1",
-      "permanent": true
-    }
-  ]
-}
+{}

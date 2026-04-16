@@ -440,6 +440,90 @@ STOCK_LIST_COLUMNS = """
 def get_stocks(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=1000),
+
+    search: Optional[str] = None,
+    sector: Optional[str] = None,
+    security_type: Optional[str] = None,
+    tickers: Optional[str] = None,
+
+    min_price: Optional[float] = None,
+    max_price: Optional[float] = None,
+
+    min_market_cap: Optional[float] = None,
+    max_market_cap: Optional[float] = None,
+
+    min_eps: Optional[float] = None,
+    max_eps: Optional[float] = None,
+
+    min_pe: Optional[float] = None,
+    max_pe: Optional[float] = None,
+
+    min_dividend: Optional[float] = None,
+    max_dividend: Optional[float] = None,
+
+    min_rsi: Optional[float] = None,
+    max_rsi: Optional[float] = None,
+
+    min_macd: Optional[float] = None,
+    max_macd: Optional[float] = None,
+
+    min_sma20: Optional[float] = None,
+    max_sma20: Optional[float] = None,
+
+    min_beta: Optional[float] = None,
+    max_beta: Optional[float] = None,
+
+    min_ebitda: Optional[float] = None,
+    max_ebitda: Optional[float] = None,
+
+    min_short_float: Optional[float] = None,
+    max_short_float: Optional[float] = None,
+
+    min_gross_profit: Optional[float] = None,
+    max_gross_profit: Optional[float] = None,
+
+    min_upside: Optional[float] = None,
+    max_upside: Optional[float] = None,
+
+    min_downside: Optional[float] = None,
+    max_downside: Optional[float] = None,
+
+    min_mean_target: Optional[float] = None,
+    max_mean_target: Optional[float] = None,
+
+    min_analysts: Optional[int] = None,
+    max_analysts: Optional[int] = None,
+
+    min_previous_close: Optional[float] = None,
+    max_previous_close: Optional[float] = None,
+
+    min_day_open: Optional[float] = None,
+    max_day_open: Optional[float] = None,
+
+    min_day_high: Optional[float] = None,
+    max_day_high: Optional[float] = None,
+
+    min_day_low: Optional[float] = None,
+    max_day_low: Optional[float] = None,
+
+    min_day_volume: Optional[float] = None,
+    max_day_volume: Optional[float] = None,
+
+    min_today_change: Optional[float] = None,
+    max_today_change: Optional[float] = None,
+
+    min_macd_signal: Optional[float] = None,
+    max_macd_signal: Optional[float] = None,
+
+    min_macd_histogram: Optional[float] = None,
+    max_macd_histogram: Optional[float] = None,
+
+    min_latest_dividend: Optional[float] = None,
+    max_latest_dividend: Optional[float] = None,
+
+    min_dividend_frequency: Optional[float] = None,
+    max_dividend_frequency: Optional[float] = None,
+
     sort_by: str = Query("Market Cap"),
     sort_order: str = Query("desc"),
 ):
@@ -447,7 +531,134 @@ def get_stocks(
         conn = get_db_connection_dict()
         cursor = conn.cursor()
 
-        cursor.execute('SELECT COUNT(*) AS total FROM stocks')
+        where_sql, params = build_where_clause(
+            search=search,
+            sector=sector,
+            security_type=security_type,
+            tickers=tickers,
+
+            min_price=min_price,
+            max_price=max_price,
+
+            min_market_cap=min_market_cap,
+            max_market_cap=max_market_cap,
+
+            min_eps=min_eps,
+            max_eps=max_eps,
+
+            min_pe=min_pe,
+            max_pe=max_pe,
+
+            min_dividend=min_dividend,
+            max_dividend=max_dividend,
+
+            min_rsi=min_rsi,
+            max_rsi=max_rsi,
+
+            min_macd=min_macd,
+            max_macd=max_macd,
+
+            min_sma20=min_sma20,
+            max_sma20=max_sma20,
+
+            min_beta=min_beta,
+            max_beta=max_beta,
+
+            min_ebitda=min_ebitda,
+            max_ebitda=max_ebitda,
+
+            min_short_float=min_short_float,
+            max_short_float=max_short_float,
+
+            min_gross_profit=min_gross_profit,
+            max_gross_profit=max_gross_profit,
+
+            min_upside=min_upside,
+            max_upside=max_upside,
+
+            min_downside=min_downside,
+            max_downside=max_downside,
+
+            min_mean_target=min_mean_target,
+            max_mean_target=max_mean_target,
+
+            min_analysts=min_analysts,
+            max_analysts=max_analysts,
+
+            min_previous_close=min_previous_close,
+            max_previous_close=max_previous_close,
+
+            min_day_open=min_day_open,
+            max_day_open=max_day_open,
+
+            min_day_high=min_day_high,
+            max_day_high=max_day_high,
+
+            min_day_low=min_day_low,
+            max_day_low=max_day_low,
+
+            min_day_volume=min_day_volume,
+            max_day_volume=max_day_volume,
+
+            min_today_change=min_today_change,
+            max_today_change=max_today_change,
+
+            min_macd_signal=min_macd_signal,
+            max_macd_signal=max_macd_signal,
+
+            min_macd_histogram=min_macd_histogram,
+            max_macd_histogram=max_macd_histogram,
+
+            min_latest_dividend=min_latest_dividend,
+            max_latest_dividend=max_latest_dividend,
+
+            min_dividend_frequency=min_dividend_frequency,
+            max_dividend_frequency=max_dividend_frequency,
+        )
+
+        sortable_columns = {
+            "Ticker": '"Ticker"',
+            "Company Name": '"Company Name"',
+            "Type": '"Type"',
+            "Sector": '"Sector"',
+            "Current Price": 'CAST("Current Price" AS REAL)',
+            "Previous Close": 'CAST("Previous Close" AS REAL)',
+            "Day Open": 'CAST("Day Open" AS REAL)',
+            "Day High": 'CAST("Day High" AS REAL)',
+            "Day Low": 'CAST("Day Low" AS REAL)',
+            "Day Volume": 'CAST("Day Volume" AS REAL)',
+            "Today Change %": 'CAST("Today Change %%" AS REAL)',
+            "Market Cap": 'CAST("Market Cap" AS REAL)',
+            "EPS (TTM)": 'CAST("EPS (TTM)" AS REAL)',
+            "P/E (TTM)": 'CAST("P/E (TTM)" AS REAL)',
+            "Dividend Yield": 'CAST("Dividend Yield" AS REAL)',
+            "RSI": 'CAST("RSI" AS REAL)',
+            "MACD": 'CAST("MACD" AS REAL)',
+            "MACD Signal": 'CAST("MACD Signal" AS REAL)',
+            "MACD Histogram": 'CAST("MACD Histogram" AS REAL)',
+            "SMA 20": 'CAST("SMA 20" AS REAL)',
+            "Beta": 'CAST("Beta" AS REAL)',
+            "EBITDA": 'CAST("EBITDA" AS REAL)',
+            "Short % of Float": 'CAST("Short %% of Float" AS REAL)',
+            "Gross Profit": 'CAST("Gross Profit" AS REAL)',
+            "Analyst Upside": 'CAST("Analyst Upside" AS REAL)',
+            "Analyst Downside": 'CAST("Analyst Downside" AS REAL)',
+            "Mean Target": 'CAST("Mean Target" AS REAL)',
+            "Number of Analysts": 'CAST("Number of Analysts" AS REAL)',
+            "Latest Dividend Amount": 'CAST("Latest Dividend Amount" AS REAL)',
+            "Dividend Frequency": 'CAST("Dividend Frequency" AS REAL)',
+            "Last Updated": '"Last Updated"',
+        }
+
+        order_sql = sortable_columns.get(sort_by, 'CAST("Market Cap" AS REAL)')
+        direction_sql = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+        count_query = f"""
+            SELECT COUNT(*) AS total
+            FROM stocks
+            {where_sql}
+        """
+        cursor.execute(count_query, params)
         total = cursor.fetchone()["total"]
 
         offset = (page - 1) * page_size
@@ -455,11 +666,14 @@ def get_stocks(
         data_query = f"""
             SELECT {STOCK_LIST_COLUMNS}
             FROM stocks
-            ORDER BY "Ticker" ASC
+            {where_sql}
+            ORDER BY {order_sql} {direction_sql} NULLS LAST, "Ticker" ASC
             LIMIT %s OFFSET %s
         """
-        cursor.execute(data_query, [page_size, offset])
+        cursor.execute(data_query, params + [page_size, offset])
         rows = cursor.fetchall()
+
+        total_pages = math.ceil(total / page_size) if total > 0 else 1
 
         conn.close()
 
@@ -468,7 +682,7 @@ def get_stocks(
             "total": total,
             "page": page,
             "page_size": page_size,
-            "total_pages": 1,
+            "total_pages": total_pages,
             "sort_by": sort_by,
             "sort_order": sort_order,
         }

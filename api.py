@@ -372,7 +372,7 @@ def build_where_clause(
     add_min_max_filter(where_clauses, params, 'CAST("Day High" AS REAL)', min_day_high, max_day_high)
     add_min_max_filter(where_clauses, params, 'CAST("Day Low" AS REAL)', min_day_low, max_day_low)
     add_min_max_filter(where_clauses, params, 'CAST("Day Volume" AS REAL)', min_day_volume, max_day_volume)
-    add_min_max_filter(where_clauses, params, 'CAST("Today Change %%" AS REAL)', min_today_change, max_today_change)
+    add_min_max_filter(where_clauses, params, 'CAST("Today Change %" AS REAL)', min_today_change, max_today_change)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Signal" AS REAL)', min_macd_signal, max_macd_signal)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Histogram" AS REAL)', min_macd_histogram, max_macd_histogram)
     add_min_max_filter(where_clauses, params, 'CAST("Latest Dividend Amount" AS REAL)', min_latest_dividend,
@@ -403,7 +403,7 @@ STOCK_LIST_COLUMNS = """
     "Day High",
     "Day Low",
     "Day Volume",
-    "Today Change %%",
+    "Today Change %",
     "Market Cap",
     "EPS (TTM)",
     "P/E (TTM)",
@@ -627,7 +627,7 @@ def get_stocks(
             "Day High": 'CAST("Day High" AS REAL)',
             "Day Low": 'CAST("Day Low" AS REAL)',
             "Day Volume": 'CAST("Day Volume" AS REAL)',
-            "Today Change %": 'CAST("Today Change %%" AS REAL)',
+            "Today Change %": 'CAST("Today Change %" AS REAL)',
             "Market Cap": 'CAST("Market Cap" AS REAL)',
             "EPS (TTM)": 'CAST("EPS (TTM)" AS REAL)',
             "P/E (TTM)": 'CAST("P/E (TTM)" AS REAL)',
@@ -738,7 +738,7 @@ def get_stock_detail(ticker: str):
                 s."Day High",
                 s."Day Low",
                 s."Day Volume",
-                s."Today Change %%",
+                s."Today Change %",
                 s."Market Cap",
                 s."EPS (TTM)",
                 s."P/E (TTM)",
@@ -879,12 +879,12 @@ def get_sector_performance():
         cursor.execute("""
             SELECT
                 "Sector",
-                AVG(CAST("Today Change %%" AS REAL)) AS avg_change
+                AVG(CAST("Today Change %" AS REAL)) AS avg_change
             FROM stocks
             WHERE "Sector" IS NOT NULL
               AND TRIM("Sector") != ''
-              AND "Today Change %%" IS NOT NULL
-              AND TRIM("Today Change %%") != ''
+              AND "Today Change %" IS NOT NULL
+              AND TRIM(CAST("Today Change %" AS TEXT)) != ''
               AND UPPER("Type") = 'CS'
               AND "Sector" IN (
                   'Basic Materials',
@@ -922,11 +922,11 @@ def get_market_breadth():
         cursor = conn.cursor()
 
         cursor.execute("""
-            SELECT CAST("Today Change %%" AS REAL) AS change_pct
+            SELECT CAST("Today Change %" AS REAL) AS change_pct
             FROM stocks
             WHERE UPPER("Type") = 'CS'
-              AND "Today Change %%" IS NOT NULL
-              AND TRIM("Today Change %%") != ''
+              AND "Today Change %" IS NOT NULL
+              AND TRIM(CAST("Today Change %" AS TEXT)) != ''
         """)
 
         rows = cursor.fetchall()
@@ -998,7 +998,7 @@ def get_market_summary():
             SELECT
                 "Ticker",
                 CAST("Current Price" AS REAL) AS price,
-                CAST("Today Change %%" AS REAL) AS change
+                CAST("Today Change %" AS REAL) AS change
             FROM stocks
             WHERE "Ticker" IN ('SPY', 'QQQ', 'DIA', 'IBIT', 'USO', 'GLD', 'VIXY')
         """)

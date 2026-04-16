@@ -88,9 +88,9 @@ const [selectedRangePopup, setSelectedRangePopup] = useState(null);
   const selectedTickers = tickersParam ? tickersParam.split(",") : null;
 
   const API_BASE =
-    process.env.NODE_ENV === "development"
-      ? "http://localhost:8000"
-      : "https://bullionare.onrender.com";
+  process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : process.env.REACT_APP_API_BASE;
 
   useEffect(() => {
   const fetchSecurityTypes = async () => {

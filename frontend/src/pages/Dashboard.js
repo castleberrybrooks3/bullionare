@@ -21,9 +21,9 @@ export default function Dashboard() {
   const navigate = useNavigate();
 
   const API_BASE =
-    process.env.NODE_ENV === "development"
-      ? "http://localhost:8000"
-      : "https://bullionare.onrender.com";
+  process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : process.env.REACT_APP_API_BASE;
 
   const sectorList = [
     "Basic Materials",

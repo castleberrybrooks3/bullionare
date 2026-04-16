@@ -10,9 +10,9 @@ export default function MarketOutlook() {
   const [loading, setLoading] = useState(true);
 
   const API_BASE =
-    process.env.NODE_ENV === "development"
-      ? "http://localhost:8000"
-      : "https://bullionare.onrender.com";
+  process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : process.env.REACT_APP_API_BASE;
 
   useEffect(() => {
     const fetchOutlookData = async () => {

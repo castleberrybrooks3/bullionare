@@ -13,6 +13,7 @@ app = FastAPI()
 
 origins = [
     "http://localhost:3000",
+    "https://bullionaireiq.com",
     "https://bullionareiq.com",
     "https://www.bullionareiq.com"
 ]

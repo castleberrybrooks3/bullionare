@@ -701,11 +701,7 @@ def get_stocks(
         }
 
     except Exception as e:
-        import traceback
-        return {
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }
+        return {"error": str(e)}
 @app.get("/stocks/sparklines")
 def get_stock_sparklines(tickers: str = Query(...)):
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]

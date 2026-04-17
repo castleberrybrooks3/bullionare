@@ -369,7 +369,7 @@ def build_where_clause(
 
     add_min_max_filter(where_clauses, params, 'CAST("Beta" AS REAL)', min_beta, max_beta)
     add_min_max_filter(where_clauses, params, 'CAST("EBITDA" AS REAL)', min_ebitda, max_ebitda)
-    add_min_max_filter(where_clauses, params, 'CAST("Short % of Float" AS REAL)', min_short_float, max_short_float)
+    add_min_max_filter(where_clauses, params, 'CAST("Short %% of Float" AS REAL)', min_short_float, max_short_float)
     add_min_max_filter(where_clauses, params, 'CAST("Gross Profit" AS REAL)', min_gross_profit, max_gross_profit)
     add_min_max_filter(where_clauses, params, 'CAST("Analyst Upside" AS REAL)', min_upside, max_upside)
     add_min_max_filter(where_clauses, params, 'CAST("Analyst Downside" AS REAL)', min_downside, max_downside)
@@ -381,7 +381,7 @@ def build_where_clause(
     add_min_max_filter(where_clauses, params, 'CAST("Day High" AS REAL)', min_day_high, max_day_high)
     add_min_max_filter(where_clauses, params, 'CAST("Day Low" AS REAL)', min_day_low, max_day_low)
     add_min_max_filter(where_clauses, params, 'CAST("Day Volume" AS REAL)', min_day_volume, max_day_volume)
-    add_min_max_filter(where_clauses, params, 'CAST("Today Change %" AS REAL)', min_today_change, max_today_change)
+    add_min_max_filter(where_clauses, params, 'CAST("Today Change %%" AS REAL)', min_today_change, max_today_change)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Signal" AS REAL)', min_macd_signal, max_macd_signal)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Histogram" AS REAL)', min_macd_histogram, max_macd_histogram)
     add_min_max_filter(where_clauses, params, 'CAST("Latest Dividend Amount" AS REAL)', min_latest_dividend,
@@ -412,7 +412,7 @@ STOCK_LIST_COLUMNS = """
     "Day High",
     "Day Low",
     "Day Volume",
-    "Today Change %",
+    "Today Change %%",
     "Market Cap",
     "EPS (TTM)",
     "P/E (TTM)",
@@ -424,7 +424,7 @@ STOCK_LIST_COLUMNS = """
     "SMA 20",
     "Beta",
     "EBITDA",
-    "Short % of Float",
+    "Short %% of Float",
     "Gross Profit",
     "Analyst Upside",
     "Analyst Downside",
@@ -636,7 +636,7 @@ def get_stocks(
             "Day High": 'CAST("Day High" AS REAL)',
             "Day Low": 'CAST("Day Low" AS REAL)',
             "Day Volume": 'CAST("Day Volume" AS REAL)',
-            "Today Change %": 'CAST("Today Change %" AS REAL)',
+            "Today Change %": 'CAST("Today Change %%" AS REAL)',
             "Market Cap": 'CAST("Market Cap" AS REAL)',
             "EPS (TTM)": 'CAST("EPS (TTM)" AS REAL)',
             "P/E (TTM)": 'CAST("P/E (TTM)" AS REAL)',
@@ -648,7 +648,7 @@ def get_stocks(
             "SMA 20": 'CAST("SMA 20" AS REAL)',
             "Beta": 'CAST("Beta" AS REAL)',
             "EBITDA": 'CAST("EBITDA" AS REAL)',
-            "Short % of Float": 'CAST("Short % of Float" AS REAL)',
+            "Short % of Float": 'CAST("Short %% of Float" AS REAL)',
             "Gross Profit": 'CAST("Gross Profit" AS REAL)',
             "Analyst Upside": 'CAST("Analyst Upside" AS REAL)',
             "Analyst Downside": 'CAST("Analyst Downside" AS REAL)',
@@ -684,10 +684,14 @@ def get_stocks(
 
         total_pages = math.ceil(total / page_size) if total > 0 else 1
 
+        safe_rows = []
+        for row in rows:
+            safe_rows.append({k: row[k] for k in row.keys()})
+
         conn.close()
 
         return {
-            "rows": [clean_row(row) for row in rows],
+            "rows": safe_rows,
             "total": total,
             "page": page,
             "page_size": page_size,
@@ -697,7 +701,11 @@ def get_stocks(
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        import traceback
+        return {
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }
 @app.get("/stocks/sparklines")
 def get_stock_sparklines(tickers: str = Query(...)):
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
@@ -747,7 +755,7 @@ def get_stock_detail(ticker: str):
                 s."Day High",
                 s."Day Low",
                 s."Day Volume",
-                s."Today Change %",
+                s."Today Change %%",
                 s."Market Cap",
                 s."EPS (TTM)",
                 s."P/E (TTM)",
@@ -759,7 +767,7 @@ def get_stock_detail(ticker: str):
                 s."SMA 20",
                 s."Beta",
                 s."EBITDA",
-                s."Short % of Float",
+                s."Short %% of Float",
                 s."Gross Profit",
                 s."Analyst Upside",
                 s."Analyst Downside",

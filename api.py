@@ -36,6 +36,15 @@ polygon_session = requests.Session()
 # =========================================================
 
 def clean_row(row):
+    if row is None:
+        return None
+
+    if isinstance(row, dict):
+        return row
+
+    if hasattr(row, "keys"):
+        return {key: row[key] for key in row.keys()}
+
     return dict(row)
 
 

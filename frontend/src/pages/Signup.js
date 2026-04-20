@@ -18,12 +18,10 @@ export default function Signup() {
   const [agreedToLegal, setAgreedToLegal] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
-  const [successMsg, setSuccessMsg] = useState("");
 
   const handleSignup = async (e) => {
     e.preventDefault();
     setErrorMsg("");
-    setSuccessMsg("");
 
     if (!accountType) {
       setErrorMsg("Please select an account type first.");
@@ -31,9 +29,7 @@ export default function Signup() {
     }
 
     if (!agreedToLegal) {
-      const msg = "You must agree to the Terms of Service and Privacy Policy.";
-      setErrorMsg(msg);
-      alert(msg);
+      setErrorMsg("You must agree to the Terms of Service and Privacy Policy.");
       return;
     }
 
@@ -67,13 +63,13 @@ export default function Signup() {
       return;
     }
 
-    alert("Account created. Please check your email and confirm your account before signing in.");
-
-    setSuccessMsg("Account created. Please check your email to confirm your account.");
-
-    setTimeout(() => {
-      navigate("/login", { state: { email } });
-    }, 1200);
+    navigate("/login", {
+      state: {
+        email,
+        confirmationMessage:
+          "Account created. Please check your email and confirm your account before signing in.",
+      },
+    });
   };
 
   return (
@@ -149,7 +145,6 @@ export default function Signup() {
         </form>
 
         {errorMsg && <p className="auth-error">{errorMsg}</p>}
-        {successMsg && <p className="auth-success">{successMsg}</p>}
 
         <div className="signup-footer">
           <p>

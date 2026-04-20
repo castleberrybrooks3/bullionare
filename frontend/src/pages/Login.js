@@ -12,18 +12,19 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+  const [infoMsg, setInfoMsg] = useState(location.state?.confirmationMessage || "");
 
-useEffect(() => {
-  const checkUser = async () => {
-    const { data } = await supabase.auth.getSession();
+  useEffect(() => {
+    const checkUser = async () => {
+      const { data } = await supabase.auth.getSession();
 
-    if (data.session) {
-      navigate("/dashboard");
-    }
-  };
+      if (data.session) {
+        navigate("/dashboard");
+      }
+    };
 
-  checkUser();
-}, [navigate]);
+    checkUser();
+  }, [navigate]);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -38,7 +39,11 @@ useEffect(() => {
     setLoading(false);
 
     if (error) {
-      setErrorMsg(error.message);
+      if (error.message.toLowerCase().includes("email not confirmed")) {
+        setErrorMsg("Please check your email and confirm your account before signing in.");
+      } else {
+        setErrorMsg(error.message);
+      }
       return;
     }
 
@@ -81,6 +86,7 @@ useEffect(() => {
           </button>
         </form>
 
+        {infoMsg && <p className="auth-success">{infoMsg}</p>}
         {errorMsg && <p className="auth-error">{errorMsg}</p>}
 
         <div className="login-footer">

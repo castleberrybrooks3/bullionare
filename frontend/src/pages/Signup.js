@@ -44,10 +44,11 @@ export default function Signup() {
 
     setLoading(true);
 
-    const { data, error } = await supabase.auth.signUp({
+    const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
+        emailRedirectTo: "https://bullionaireiq.com/login",
         data: {
           full_name: fullName,
           account_type: accountType,
@@ -66,15 +67,9 @@ export default function Signup() {
       return;
     }
 
-    if (data?.session) {
-      setSuccessMsg("Account created successfully. Redirecting...");
-      setTimeout(() => {
-        navigate("/dashboard");
-      }, 800);
-      return;
-    }
+    alert("Account created. Please check your email and confirm your account before signing in.");
 
-    setSuccessMsg("Account created successfully. Please sign in.");
+    setSuccessMsg("Account created. Please check your email to confirm your account.");
 
     setTimeout(() => {
       navigate("/login", { state: { email } });

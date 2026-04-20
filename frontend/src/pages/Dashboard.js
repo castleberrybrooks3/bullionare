@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { supabase } from "../lib/supabaseClient";
 import Navbar from "../components/Navbar";
 import StockTable from "../StockTable";
 import DependencyMap from "../DependencyMap";
@@ -19,6 +20,10 @@ export default function Dashboard() {
   const [sectorOpen, setSectorOpen] = useState(false);
   const [sectorPerformance, setSectorPerformance] = useState({});
   const navigate = useNavigate();
+  const handleSignOut = async () => {
+  await supabase.auth.signOut();
+  navigate("/login");
+};
 
   const API_BASE =
   process.env.NODE_ENV === "development"
@@ -255,31 +260,34 @@ export default function Dashboard() {
               Feedback
             </div>
           </nav>
-
-          {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
+        {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
         </aside>
 
         <main
-          className="main-content"
-          style={{ backgroundColor: "#0E1424", padding: "40px" }}
-        >
-          {activeMenu === "DependencyMap" ? (
-            <DependencyMap />
-          ) : activeMenu === "SupplyChain" ? (
-            <SupplyChain />
-          ) : activeMenu === "HiddenPairs" ? (
-            <HiddenPairs />
-          ) : activeMenu === "MarketOutlook" ? (
-            <MarketOutlook />
-          ) : activeMenu === "Feedback" ? (
-            <Feedback />
-          ) : (
-            <StockTable
-              view={activeMenu}
-              selectedSector={selectedSector}
-            />
-          )}
-        </main>
+  className="main-content"
+  style={{
+    backgroundColor: "#0E1424",
+    padding: "40px",
+    position: "relative",
+  }}
+>
+  {activeMenu === "DependencyMap" ? (
+    <DependencyMap />
+  ) : activeMenu === "SupplyChain" ? (
+    <SupplyChain />
+  ) : activeMenu === "HiddenPairs" ? (
+    <HiddenPairs />
+  ) : activeMenu === "MarketOutlook" ? (
+    <MarketOutlook />
+  ) : activeMenu === "Feedback" ? (
+    <Feedback />
+  ) : (
+    <StockTable
+      view={activeMenu}
+      selectedSector={selectedSector}
+    />
+  )}
+</main>
       </div>
     </>
   );

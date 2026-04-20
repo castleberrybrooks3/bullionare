@@ -8,7 +8,7 @@ export default function HiddenPairs() {
 
   const handlePairClick = (pair) => {
     const tickers = pair.tickers.join(",");
-    window.location.href = `/dashboard?tickers=${tickers}`;
+    window.location.assign(`/dashboard?tickers=${tickers}`);
   };
 
   return (
@@ -16,7 +16,6 @@ export default function HiddenPairs() {
       <h1>Convergence Trading or Tax Loss Harvesting</h1>
       <p>Find highly correlated and non-obvious stock relationships</p>
 
-      {/* CATEGORY GRID */}
       {!selectedCategory && (
         <div
           style={{
@@ -28,29 +27,27 @@ export default function HiddenPairs() {
         >
           {categories.map((key) => (
             <div
-  key={key}
-  onClick={() => setSelectedCategory(key)}
-  className="hover-glow"
-  style={{
-    padding: "25px",
-    background: "#1a2238",
-    borderRadius: "8px",
-    textAlign: "center",
-    cursor: "pointer",
-    fontWeight: "bold",
-    border: "1px solid transparent"
-  }}
->
+              key={key}
+              onClick={() => setSelectedCategory(key)}
+              className="hover-glow"
+              style={{
+                padding: "25px",
+                background: "#1a2238",
+                borderRadius: "8px",
+                textAlign: "center",
+                cursor: "pointer",
+                fontWeight: "bold",
+                border: "1px solid transparent"
+              }}
+            >
               {hiddenPairsTree[key].name}
             </div>
           ))}
         </div>
       )}
 
-      {/* PAIRS DISPLAY */}
       {selectedCategory && (
         <div style={{ marginTop: "40px" }}>
-          {/* Back Button */}
           <button
             onClick={() => setSelectedCategory(null)}
             style={{
@@ -71,30 +68,27 @@ export default function HiddenPairs() {
           <div style={{ display: "flex", flexWrap: "wrap" }}>
             {hiddenPairsTree[selectedCategory].pairs.map((pair, i) => (
               <div
-  key={i}
-  onClick={() => handlePairClick(pair)}
-  className="hover-glow"
-  style={{
-    padding: "14px 18px",
-    background: "#1a2238",
-    borderRadius: "6px",
-    margin: "8px",
-    cursor: "pointer",
-    minWidth: "180px",
-    border: "1px solid transparent"
-  }}
->
-                {/* Pair */}
+                key={i}
+                onClick={() => handlePairClick(pair)}
+                className="hover-glow"
+                style={{
+                  padding: "14px 18px",
+                  background: "#1a2238",
+                  borderRadius: "6px",
+                  margin: "8px",
+                  cursor: "pointer",
+                  minWidth: "180px",
+                  border: "1px solid transparent"
+                }}
+              >
                 <div style={{ fontWeight: "bold" }}>
                   {pair.tickers[0]} ↔ {pair.tickers[1]}
                 </div>
 
-                {/* Correlation */}
                 <div style={{ fontSize: "12px", opacity: 0.8 }}>
                   Correlation: {(pair.correlation * 100).toFixed(0)}%
                 </div>
 
-                {/* Relationship */}
                 <div style={{ fontSize: "11px", opacity: 0.6 }}>
                   {pair.relationship}
                 </div>

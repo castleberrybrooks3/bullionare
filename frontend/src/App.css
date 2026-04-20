@@ -40,3 +40,116 @@ html, body, #root {
   height: 100%;
   margin: 0;
 }
+
+.mobile-block {
+  height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0b0f19;
+  color: white;
+  text-align: center;
+  padding: 20px;
+}
+
+.mobile-block-card {
+  max-width: 420px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  padding: 30px;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+}
+
+.mobile-block-card h1 {
+  margin-bottom: 12px;
+}
+
+.mobile-block-card p {
+  color: #cbd5f5;
+}
+
+.mobile-block-actions {
+  margin-top: 20px;
+  display: flex;
+  justify-content: center;
+}
+
+.mobile-block-button {
+  border: none;
+  border-radius: 12px;
+  padding: 12px 18px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #2563eb;
+  color: #ffffff;
+  transition: opacity 0.2s ease;
+}
+
+.mobile-block-button:hover {
+  opacity: 0.9;
+}
+
+.mobile-block {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0b0f19;
+  color: white;
+  text-align: center;
+  padding: 20px;
+}
+
+.mobile-block-card {
+  max-width: 420px;
+  background: rgba(15, 23, 42, 0.95);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 16px;
+  padding: 30px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.mobile-block-card h1 {
+  margin: 0 0 12px;
+}
+
+.mobile-block-card p {
+  margin: 0;
+  color: #cbd5e1;
+}
+
+.mobile-block-actions {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  justify-content: center;
+}
+
+.mobile-block-button {
+  border: none;
+  border-radius: 12px;
+  padding: 12px 18px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #2563eb;
+  color: #ffffff;
+  transition: opacity 0.2s ease, transform 0.1s ease;
+}
+
+.mobile-block-button:hover {
+  opacity: 0.9;
+}
+
+.mobile-block-button:active {
+  transform: scale(0.98);
+}
+
+.mobile-block-button-secondary {
+  background: rgba(148, 163, 184, 0.14);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  color: #e5e7eb;
+}

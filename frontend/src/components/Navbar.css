@@ -3,13 +3,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 40px;   /* controls navbar size */
+  padding: 12px 40px;
   color: #F3F4F6;
-}
-
-.logo {
-  height: 100px;   /* change this to resize */
-  width: auto;    /* keeps proportions correct */
 }
 
 .navbar-logo {
@@ -18,12 +13,36 @@
   margin-left: 35px;
 }
 
+/* RIGHT SIDE (links + sign out together) */
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+}
+
+/* links */
 .nav-links a {
-  margin-left: 30px;
   text-decoration: none;
   color: #F3F4F6;
 }
 
 .nav-links a:hover {
   color: #19C37D;
+}
+
+/* sign out button */
+.signout-btn {
+  background: transparent;
+  border: 1px solid #374151;
+  color: #9ca3af;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s ease;
+}
+
+.signout-btn:hover {
+  color: #fff;
+  border-color: #fff;
 }

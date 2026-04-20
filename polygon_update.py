@@ -1,4 +1,7 @@
+from dotenv import load_dotenv
 import os
+
+load_dotenv()
 import traceback
 import time
 import json
@@ -17,7 +20,9 @@ if not DATABASE_URL:
     raise ValueError("DATABASE_URL is missing or empty.")
 
 BASE_URL = "https://api.polygon.io"
-MAX_WORKERS = 8
+MAX_WORKERS = 12
+
+USE_FINANCIALS = False
 
 session = requests.Session()
 
@@ -101,10 +106,24 @@ def get_conn():
     conn = psycopg2.connect(
         db_url,
         cursor_factory=RealDictCursor,
-        connect_timeout=10
+        connect_timeout=10,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
     )
     return conn
-
+def ensure_conn(conn):
+    try:
+        if conn is None or conn.closed != 0:
+            return get_conn()
+        return conn
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return get_conn()
 
 # =========================================================
 # DB SETUP
@@ -773,6 +792,9 @@ def fetch_statement_json(path: str, ticker: str):
 
 
 def fetch_statement_data(ticker: str):
+    if not USE_FINANCIALS:
+        return None
+
     balance_sheet = fetch_statement_json("/stocks/financials/v1/balance-sheets", ticker)
     income_statement = fetch_statement_json("/stocks/financials/v1/income-statements", ticker)
     cash_flow = fetch_statement_json("/stocks/financials/v1/cash-flow-statements", ticker)
@@ -796,7 +818,7 @@ def fetch_ticker_bundle(ticker: str):
     indicators_data = fetch_indicators_data(ticker)
     dividend_data = fetch_dividend_data(ticker)
     filings_data = fetch_filings_data(ticker)
-    statement_data = fetch_statement_data(ticker)
+    statement_data = fetch_statement_data(ticker) if USE_FINANCIALS else None
 
     for block in (reference_data, indicators_data, dividend_data, filings_data):
         if block:
@@ -843,6 +865,7 @@ def main():
     start_time = time.time()
 
     conn = get_conn()
+    conn = ensure_conn(conn)
     ensure_tables(conn)
 
     tickers = fetch_all_polygon_tickers()
@@ -856,6 +879,7 @@ def main():
     # Batch ensure ticker universe exists
     # -----------------------------------------------------
     for i in range(0, len(tickers), 1000):
+        conn = ensure_conn(conn)
         batch = tickers[i:i + 1000]
         ensure_tickers_batch(conn, batch)
         conn.commit()
@@ -874,6 +898,7 @@ def main():
     snapshot_updates = 0
 
     for i in range(0, len(tickers), 1000):
+        conn = ensure_conn(conn)
         batch = tickers[i:i + 1000]
         existing_map = fetch_existing_snapshot_fields(conn, batch)
         snapshot_batch = []
@@ -915,12 +940,19 @@ def main():
     updated_main_rows = 0
     updated_detail_rows = 0
 
+    conn = ensure_conn(conn)
+    price_cache = {}
+
+    for i in range(0, len(tickers), 1000):
+        batch = tickers[i:i + 1000]
+        fetched = fetch_existing_price_fields(conn, batch)
+        price_cache.update(fetched)
+
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(fetch_ticker_bundle, ticker): ticker for ticker in tickers}
 
         main_row_buffer = []
         detail_row_buffer = []
-        price_cache = {}
 
         for i, future in enumerate(as_completed(futures), start=1):
             fallback_ticker = futures[future]
@@ -929,11 +961,6 @@ def main():
                 ticker, stock_row, details_row = future.result()
 
                 if stock_row:
-                    if ticker not in price_cache:
-                        fetched = fetch_existing_price_fields(conn, [ticker])
-                        if ticker in fetched:
-                            price_cache[ticker] = fetched[ticker]
-
                     existing = price_cache.get(ticker)
 
                     if existing:
@@ -957,7 +984,9 @@ def main():
                 print(f"[BUNDLE ERROR] {fallback_ticker}: {type(e).__name__}: {e}")
                 traceback.print_exc()
 
+            # ✅ THIS BLOCK MUST BE OUTSIDE THE EXCEPT
             if i % 250 == 0:
+                conn = ensure_conn(conn)
                 update_main_rows_batch(conn, main_row_buffer)
                 update_detail_rows_batch(conn, detail_row_buffer)
                 conn.commit()
@@ -966,7 +995,7 @@ def main():
                 detail_row_buffer = []
 
                 print(f"Committed through {i} detailed tickers...")
-
+        conn = ensure_conn(conn)
         update_main_rows_batch(conn, main_row_buffer)
         update_detail_rows_batch(conn, detail_row_buffer)
         conn.commit()
@@ -974,6 +1003,7 @@ def main():
     # -----------------------------------------------------
     # Cleanup
     # -----------------------------------------------------
+    conn = ensure_conn(conn)
     clean_database(conn)
     conn.close()
 

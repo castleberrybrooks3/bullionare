@@ -1,3 +1,4 @@
+from dotenv import load_dotenv
 import os
 import time
 import math
@@ -7,6 +8,8 @@ import yfinance as yf
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import random
+
+load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 if not DATABASE_URL:

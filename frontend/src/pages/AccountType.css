@@ -1,0 +1,31 @@
+.account-type-page {
+  height: 100vh;
+  background: #0E1424;
+  color: white;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.account-options {
+  display: flex;
+  gap: 30px;
+  margin-top: 40px;
+}
+
+.account-options button {
+  padding: 30px 40px;
+  font-size: 18px;
+  border-radius: 12px;
+  border: 1px solid #374151;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.account-options button:hover {
+  background: #19C37D;
+  color: #001f3f;
+}

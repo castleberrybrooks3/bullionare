@@ -6,6 +6,45 @@ import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import "./StockTable.css";
 import { useLocation, useNavigate } from "react-router-dom";
 import WatchlistAnalytics from "./components/WatchlistAnalytics";
+import { supabase } from "./lib/supabaseClient";
+
+const saveWatchlists = async (updated) => {
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+
+  const user = session?.user;
+if (!user) return;
+
+  const rows = Object.entries(updated).map(([name, tickers]) => ({
+    user_id: user.id,
+    name,
+    tickers,
+  }));
+
+  const { error: deleteError } = await supabase
+    .from("watchlists")
+    .delete()
+    .eq("user_id", user.id);
+
+  if (deleteError) {
+    console.error("Delete failed:", deleteError);
+    return false;
+  }
+
+  if (!rows.length) return true;
+
+  const { error: insertError } = await supabase
+    .from("watchlists")
+    .insert(rows);
+
+  if (insertError) {
+    console.error("Insert failed:", insertError);
+    return false;
+  }
+
+  return true;
+};
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -46,6 +85,7 @@ const sparklineCacheRef = useRef({});
 const sparklineRequestIdRef = useRef(0);
 const sparklineDebounceRef = useRef(null);
 const sparklineBackgroundLoadStartedRef = useRef(false);
+const loadingWatchlistsRef = useRef(false);
 
 const [chartModalOpen, setChartModalOpen] = useState(false);
 const [chartTicker, setChartTicker] = useState(null);
@@ -56,23 +96,9 @@ const [chartLoading, setChartLoading] = useState(false);
 const [chartHover, setChartHover] = useState(null);
 const [selectedRangePopup, setSelectedRangePopup] = useState(null);
 
-  const [watchlists, setWatchlists] = useState(() => {
-    const saved = localStorage.getItem("watchlists");
-    try {
-      const parsed = saved ? JSON.parse(saved) : null;
-      return parsed && Object.keys(parsed).length ? parsed : { Default: [] };
-    } catch {
-      return { Default: [] };
-    }
-  });
+  const [watchlists, setWatchlists] = useState({});
 
-  const [activeList, setActiveList] = useState(
-    () => localStorage.getItem("activeList") || "Default"
-  );
-
-  useEffect(() => {
-    localStorage.setItem("activeList", activeList);
-  }, [activeList]);
+  const [activeList, setActiveList] = useState("Default");
 
   const gridRef = useRef(null);
   const savedHorizontalScrollRef = useRef(0);
@@ -801,9 +827,8 @@ const scheduleVisibleSparklineLoad = useCallback(() => {
 
   sparklineDebounceRef.current = setTimeout(async () => {
     await loadVisibleSparklines();
-    loadRemainingSparklinesInBackground();
-  }, 80);
-}, [loadVisibleSparklines, loadRemainingSparklinesInBackground]);
+  }, 150);
+}, [loadVisibleSparklines]);
 
   const getBackendParamNames = (col) => {
   switch (col) {
@@ -955,20 +980,20 @@ const fetchStocks = async () => {
   saveScrollPosition();
 
   try {
-    if (view === "Watchlist") {
-      const localStocks = JSON.parse(localStorage.getItem("stocks") || "[]");
-      const safeStocks = Array.isArray(localStocks) ? localStocks : [];
+if (view === "Watchlist") {
+  const localStocks = JSON.parse(localStorage.getItem("stocks") || "[]");
+  const safeStocks = Array.isArray(localStocks) ? localStocks : [];
 
-      setStocks(safeStocks);
-      setDisplayedCount(
-        safeStocks.filter((s) => (watchlists[activeList] ?? []).includes(s.Ticker)).length
-      );
-      setTotalPages(1);
-      setPageCache({});
-      setIsBackgroundLoading(false);
-      setLoading(false);
-      return;
-    }
+  setStocks(safeStocks);
+  setDisplayedCount(
+    safeStocks.filter((s) => (watchlists[activeList] ?? []).includes(s.Ticker)).length
+  );
+  setTotalPages(1);
+  setPageCache({});
+  setIsBackgroundLoading(false);
+  setLoading(false);
+  return;
+}
 
     const requestId = Date.now();
     activeRequestRef.current = requestId;
@@ -1002,39 +1027,8 @@ setIsBackgroundLoading(false);
     localStorage.setItem("stocks", JSON.stringify(firstRows));
     setLoading(false);
 
-    // Prefetch remaining pages in background
-    if (pages > 1) {
-      setIsBackgroundLoading(true);
+    setIsBackgroundLoading(false);
 
-      for (let page = 2; page <= pages; page++) {
-  await new Promise((r) => setTimeout(r, 20));
-
-  if (activeRequestRef.current !== requestId) return;
-
-  const nextParams = new URLSearchParams(baseParams);
-        nextParams.set("page", page.toString());
-
-        try {
-          const nextRes = await fetch(`${API_BASE}/stocks?${nextParams.toString()}`);
-          const nextData = await nextRes.json();
-
-          if (activeRequestRef.current !== requestId) return;
-
-          const nextRows = Array.isArray(nextData?.rows) ? nextData.rows : [];
-          setPageCache((prev) => ({
-  ...prev,
-  [page]: nextRows
-}));
-
-        } catch (err) {
-          console.error(`Background load failed for page ${page}`, err);
-        }
-      }
-
-      if (activeRequestRef.current === requestId) {
-        setIsBackgroundLoading(false);
-      }
-    }
   } catch (err) {
     console.error(err);
     setStocks([]);
@@ -1095,7 +1089,9 @@ restoreScrollPosition();
   selectedType,
   tickerFilter,
   tickersParam,
-  backendFilterModel
+  backendFilterModel,
+  activeList,
+  watchlists
 ]);
 
 useEffect(() => {
@@ -1122,7 +1118,7 @@ useEffect(() => {
  useEffect(() => {
   const handler = setTimeout(() => {
     setSearchQuery(typedQuery);
-  }, 400);
+  }, 650);
 
   return () => clearTimeout(handler);
 }, [typedQuery]);
@@ -1288,19 +1284,20 @@ const technicalsColumns = [
           return (
             <span
               style={{ cursor: "pointer" }}
-              onClick={() => {
+              onClick={async () => {
                 const isInActiveList = watchlists[activeList]?.includes(ticker);
 
                 if (view === "Watchlist" && isInActiveList) {
-                  const updated = { ...watchlists };
-                  updated[activeList] = updated[activeList].filter((t) => t !== ticker);
-                  setWatchlists(updated);
-                  localStorage.setItem("watchlists", JSON.stringify(updated));
+  const updated = { ...watchlists };
+  updated[activeList] = updated[activeList].filter((t) => t !== ticker);
+  setWatchlists(updated);
 
-                  setNotification(`${ticker} removed from watchlist`);
-                  setTimeout(() => setNotification(null), 1500);
-                  return;
-                }
+  await saveWatchlists(updated);
+
+  setNotification(`${ticker} removed from watchlist`);
+  setTimeout(() => setNotification(null), 1500);
+  return;
+}
 
                 openStarModal(ticker);
               }}
@@ -1716,6 +1713,48 @@ useEffect(() => {
   }
 }, [loading, gridFilterModel, view, processedStocks]);
 
+useEffect(() => {
+  const loadWatchlists = async () => {
+    if (loadingWatchlistsRef.current) return;
+    loadingWatchlistsRef.current = true;
+
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+
+      const user = session?.user;
+if (!user) return;
+
+      const { data, error } = await supabase
+        .from("watchlists")
+        .select("*")
+        .eq("user_id", user.id);
+
+      if (error) {
+        console.error("Error loading watchlists:", error);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        setWatchlists({ Default: [] });
+        return;
+      }
+
+      const formatted = {};
+      data.forEach((wl) => {
+        formatted[wl.name] = wl.tickers;
+      });
+
+      setWatchlists(formatted);
+    } finally {
+      loadingWatchlistsRef.current = false;
+    }
+  };
+
+  loadWatchlists();
+}, []);
+
     const defaultColDef = useMemo(
     () => ({
       resizable: true,
@@ -1791,13 +1830,14 @@ useEffect(() => {
                       border: "none",
                       cursor: "pointer"
                     }}
-                    onClick={() => {
+                    onClick={async () => {
                       const name = prompt("Enter new watchlist name:");
                       if (!name || watchlists[name]) return;
                       const updated = { ...watchlists, [name]: [] };
-                      setWatchlists(updated);
-                      localStorage.setItem("watchlists", JSON.stringify(updated));
-                      setActiveList(name);
+setWatchlists(updated);
+
+await saveWatchlists(updated);
+setActiveList(name);
                     }}
                   >
                     New
@@ -1811,7 +1851,7 @@ useEffect(() => {
                       border: "none",
                       cursor: "pointer"
                     }}
-                    onClick={() => {
+                    onClick={async () => {
                       if (activeList === "Default") {
                         alert("Default watchlist cannot be renamed.");
                         return;
@@ -1822,11 +1862,12 @@ useEffect(() => {
                         return;
                       }
                       const updated = { ...watchlists };
-                      updated[newName] = updated[activeList];
-                      delete updated[activeList];
-                      setWatchlists(updated);
-                      localStorage.setItem("watchlists", JSON.stringify(updated));
-                      setActiveList(newName);
+updated[newName] = updated[activeList];
+delete updated[activeList];
+setWatchlists(updated);
+
+await saveWatchlists(updated);
+setActiveList(newName);
                     }}
                   >
                     Rename
@@ -1840,7 +1881,7 @@ useEffect(() => {
                       border: "none",
                       cursor: "pointer"
                     }}
-                    onClick={() => {
+                    onClick={async () => {
                       if (activeList === "Default") {
                         alert("Cannot delete the Default watchlist.");
                         return;
@@ -1850,10 +1891,11 @@ useEffect(() => {
                       );
                       if (!confirmDelete) return;
                       const updated = { ...watchlists };
-                      delete updated[activeList];
-                      setWatchlists(updated);
-                      localStorage.setItem("watchlists", JSON.stringify(updated));
-                      setActiveList("Default");
+delete updated[activeList];
+setWatchlists(updated);
+
+await saveWatchlists(updated);
+setActiveList("Default");
                     }}
                   >
                     Delete
@@ -2015,7 +2057,7 @@ useEffect(() => {
   columnDefs={columns}
   defaultColDef={defaultColDef}
   immutableData={true}
-  getRowId={(params) => `${params.data.Ticker}_${activeList}`}
+  getRowId={(params) => params.data.Ticker}
   suppressScrollOnNewData={true}
   rowBuffer={0}
   animateRows={true}
@@ -2157,7 +2199,7 @@ onBodyScroll={() => {
               Cancel
             </button>
             <button
-              onClick={() => {
+              onClick={async () => {
                 const updated = { ...watchlists };
                 Object.keys(updated).forEach((listName) => {
                   if (modalSelectedLists.includes(listName)) {
@@ -2167,17 +2209,18 @@ onBodyScroll={() => {
                   }
                 });
 
-                setWatchlists(updated);
-                localStorage.setItem("watchlists", JSON.stringify(updated));
-                setStarModalOpen(false);
+setWatchlists(updated);
 
-                if (gridRef.current?.api) {
-                  gridRef.current.api.refreshClientSideRowModel("everything");
-                  gridRef.current.api.redrawRows();
-                }
+await saveWatchlists(updated);
+setStarModalOpen(false);
 
-                setNotification(`${modalTicker} watchlists updated ✓`);
-                setTimeout(() => setNotification(null), 2000);
+if (gridRef.current?.api) {
+  gridRef.current.api.refreshClientSideRowModel("everything");
+  gridRef.current.api.redrawRows();
+}
+
+setNotification(`${modalTicker} watchlists updated ✓`);
+setTimeout(() => setNotification(null), 2000);
               }}
             >
               Save

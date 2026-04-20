@@ -37,7 +37,7 @@ export default function Landing() {
 
         <button
           className="launch-btn"
-          onClick={() => navigate("/dashboard")}
+          onClick={() => navigate("/login")}
         >
           GO
         </button>

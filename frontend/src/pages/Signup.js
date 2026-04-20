@@ -44,7 +44,7 @@ export default function Signup() {
 
     setLoading(true);
 
-    const { error } = await supabase.auth.signUp({
+    const { data, error } = await supabase.auth.signUp({
       email,
       password,
       options: {
@@ -66,7 +66,15 @@ export default function Signup() {
       return;
     }
 
-    setSuccessMsg("Account created successfully. Redirecting to login...");
+    if (data?.session) {
+      setSuccessMsg("Account created successfully. Redirecting...");
+      setTimeout(() => {
+        navigate("/dashboard");
+      }, 800);
+      return;
+    }
+
+    setSuccessMsg("Account created successfully. Please sign in.");
 
     setTimeout(() => {
       navigate("/login", { state: { email } });

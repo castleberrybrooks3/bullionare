@@ -7,6 +7,7 @@ import Dashboard from "./pages/Dashboard";
 import About from "./pages/About";
 import Footer from "./components/Footer";
 import Signup from "./pages/Signup";
+import Welcome from "./pages/Welcome";
 import ProtectedRoute from "./components/ProtectedRoute";
 import AccountType from "./pages/AccountType";
 import Terms from "./pages/Terms";
@@ -17,9 +18,11 @@ function PageTracker() {
   const location = useLocation();
 
   useEffect(() => {
-    window.gtag("config", "G-7L8VKTG3WK", {
-      page_path: location.pathname,
-    });
+    if (window.gtag) {
+      window.gtag("config", "G-7L8VKTG3WK", {
+        page_path: location.pathname,
+      });
+    }
   }, [location]);
 
   return null;
@@ -108,6 +111,7 @@ function AppContent() {
             <Route path="/" element={<Landing />} />
             <Route path="/login" element={<Login />} />
             <Route path="/signup" element={<Signup />} />
+            <Route path="/welcome" element={<Welcome />} />
             <Route path="/terms" element={<Terms />} />
             <Route path="/privacy" element={<Privacy />} />
             <Route path="/account-type" element={<AccountType />} />

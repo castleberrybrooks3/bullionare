@@ -44,7 +44,7 @@ export default function Signup() {
       email,
       password,
       options: {
-        emailRedirectTo: "https://bullionaireiq.com/login",
+        emailRedirectTo: "https://bullionaireiq.com/welcome",
         data: {
           full_name: fullName,
           account_type: accountType,

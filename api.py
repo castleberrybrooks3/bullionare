@@ -53,8 +53,10 @@ app.add_middleware(
         "127.0.0.1",
         "bullionaireiq.com",
         "www.bullionaireiq.com",
+        "api.bullionaireiq.com",
         "bullionareiq.com",
         "www.bullionareiq.com",
+        "api.bullionareiq.com",
         "*.onrender.com",
     ],
 )

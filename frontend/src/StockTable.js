@@ -78,6 +78,7 @@ const [gridFilterModel, setGridFilterModel] = useState({});
 const [isBackgroundLoading, setIsBackgroundLoading] = useState(false);
 const [pageCache, setPageCache] = useState({});
 const activeRequestRef = useRef(0);
+const stocksAbortRef = useRef(null);
 const isRestoringFilterModelRef = useRef(false);
 const [viewMode, setViewMode] = useState("all data");
 const [sparklines, setSparklines] = useState({});
@@ -975,9 +976,20 @@ const restoreScrollPosition = () => {
   });
 };
 
+const cancelStockRequest = () => {
+  if (stocksAbortRef.current) {
+    stocksAbortRef.current.abort();
+    stocksAbortRef.current = null;
+  }
+};
+
 const fetchStocks = async () => {
+  cancelStockRequest();
   setLoading(true);
   saveScrollPosition();
+
+  const controller = new AbortController();
+  stocksAbortRef.current = controller;
 
   try {
 if (view === "Watchlist") {
@@ -998,8 +1010,7 @@ if (view === "Watchlist") {
     const requestId = Date.now();
     activeRequestRef.current = requestId;
 
-    setPageCache({});
-setIsBackgroundLoading(false);
+    setIsBackgroundLoading(false);
 
     const baseParams = buildBaseQueryParams();
 
@@ -1007,7 +1018,9 @@ setIsBackgroundLoading(false);
     const firstParams = new URLSearchParams(baseParams);
     firstParams.set("page", "1");
 
-    const firstRes = await fetch(`${API_BASE}/stocks?${firstParams.toString()}`);
+    const firstRes = await fetch(`${API_BASE}/stocks?${firstParams.toString()}`, {
+      signal: controller.signal,
+    });
     const firstData = await firstRes.json();
 
     if (activeRequestRef.current !== requestId) return;
@@ -1029,12 +1042,14 @@ setIsBackgroundLoading(false);
 
     setIsBackgroundLoading(false);
 
-  } catch (err) {
-    console.error(err);
-    setStocks([]);
-    setPageCache({});
-    setIsBackgroundLoading(false);
-    setLoading(false);
+   } catch (err) {
+    if (err.name !== "AbortError") {
+      console.error(err);
+      setStocks([]);
+      setPageCache({});
+      setIsBackgroundLoading(false);
+      setLoading(false);
+    }
   }
 };
 

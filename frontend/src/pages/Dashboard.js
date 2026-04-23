@@ -5,10 +5,12 @@ import Navbar from "../components/Navbar";
 import StockTable from "../StockTable";
 import DependencyMap from "../DependencyMap";
 import "./Dashboard.css";
+import "./DashboardOverlay.css";
 import SupplyChain from "../SupplyChain";
 import HiddenPairs from "../HiddenPairs";
 import MarketOutlook from "../MarketOutlook";
 import Feedback from "../Feedback";
+import logo from "../assets/logo.png";
 
 export default function Dashboard() {
   const [activeMenu, setActiveMenu] = useState("Stocks");
@@ -20,15 +22,23 @@ export default function Dashboard() {
   const [sectorOpen, setSectorOpen] = useState(false);
   const [sectorPerformance, setSectorPerformance] = useState({});
   const navigate = useNavigate();
+
+  const shouldShowStartupOverlay =
+    sessionStorage.getItem("showEmailConfirmedOverlay") === "true";
+
+  const [showOverlay, setShowOverlay] = useState(shouldShowStartupOverlay);
+  const [minimumTimeDone, setMinimumTimeDone] = useState(!shouldShowStartupOverlay);
+  const [dashboardReady, setDashboardReady] = useState(false);
+
   const handleSignOut = async () => {
-  await supabase.auth.signOut();
-  navigate("/login");
-};
+    await supabase.auth.signOut();
+    navigate("/login");
+  };
 
   const API_BASE =
-  process.env.NODE_ENV === "development"
-    ? "http://localhost:8000"
-    : process.env.REACT_APP_API_BASE;
+    process.env.NODE_ENV === "development"
+      ? "http://localhost:8000"
+      : process.env.REACT_APP_API_BASE;
 
   const sectorList = [
     "Basic Materials",
@@ -58,13 +68,34 @@ export default function Dashboard() {
       } catch (err) {
         console.error("Failed to load sector performance", err);
         setSectorPerformance({});
+      } finally {
+        setDashboardReady(true);
       }
     };
 
     fetchSectorPerformance();
   }, [API_BASE]);
 
-  const startResizing = (e) => {
+  useEffect(() => {
+    if (!shouldShowStartupOverlay) return;
+
+    const timer = setTimeout(() => {
+      setMinimumTimeDone(true);
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, [shouldShowStartupOverlay]);
+
+  useEffect(() => {
+    if (!showOverlay) return;
+    if (!minimumTimeDone) return;
+    if (!dashboardReady) return;
+
+    setShowOverlay(false);
+    sessionStorage.removeItem("showEmailConfirmedOverlay");
+  }, [showOverlay, minimumTimeDone, dashboardReady]);
+
+  const startResizing = () => {
     isResizing.current = true;
     document.addEventListener("mousemove", resizeSidebar);
     document.addEventListener("mouseup", stopResizing);
@@ -87,6 +118,7 @@ export default function Dashboard() {
   return (
     <>
       <Navbar />
+
       <div className="dashboard">
         <aside
           className={`sidebar ${collapsed ? "collapsed" : ""}`}
@@ -260,35 +292,54 @@ export default function Dashboard() {
               Feedback
             </div>
           </nav>
-        {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
+
+          {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
         </aside>
 
         <main
-  className="main-content"
-  style={{
-    backgroundColor: "#0E1424",
-    padding: "40px",
-    position: "relative",
-  }}
->
-  {activeMenu === "DependencyMap" ? (
-    <DependencyMap />
-  ) : activeMenu === "SupplyChain" ? (
-    <SupplyChain />
-  ) : activeMenu === "HiddenPairs" ? (
-    <HiddenPairs />
-  ) : activeMenu === "MarketOutlook" ? (
-    <MarketOutlook />
-  ) : activeMenu === "Feedback" ? (
-    <Feedback />
-  ) : (
-    <StockTable
-      view={activeMenu}
-      selectedSector={selectedSector}
-    />
-  )}
-</main>
+          className="main-content"
+          style={{
+            backgroundColor: "#0E1424",
+            padding: "40px",
+            position: "relative",
+          }}
+        >
+          {activeMenu === "DependencyMap" ? (
+            <DependencyMap />
+          ) : activeMenu === "SupplyChain" ? (
+            <SupplyChain />
+          ) : activeMenu === "HiddenPairs" ? (
+            <HiddenPairs />
+          ) : activeMenu === "MarketOutlook" ? (
+            <MarketOutlook />
+          ) : activeMenu === "Feedback" ? (
+            <Feedback />
+          ) : (
+            <StockTable
+              view={activeMenu}
+              selectedSector={selectedSector}
+            />
+          )}
+        </main>
       </div>
+
+      {showOverlay && (
+        <div className="dashboard-loading-overlay">
+          <div className="dashboard-loading-card">
+            <h1>Email Confirmed</h1>
+            <p>Getting your dashboard ready...</p>
+
+            <div className="logo-ring-wrap">
+              <img src={logo} alt="Bullionaire logo" className="overlay-logo" />
+
+              <svg className="progress-ring" viewBox="0 0 120 120">
+                <circle className="progress-ring-bg" cx="60" cy="60" r="54" />
+                <circle className="progress-ring-fill" cx="60" cy="60" r="54" />
+              </svg>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

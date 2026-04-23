@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from db import get_db_connection_dict
 import os
@@ -8,6 +8,9 @@ from typing import Optional
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import threading
+from collections import defaultdict, deque
 
 app = FastAPI()
 
@@ -30,7 +33,42 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 POLYGON_BASE_URL = "https://api.polygon.io"
 polygon_session = requests.Session()
 
+RATE_LIMIT_STORAGE = defaultdict(deque)
+RATE_LIMIT_LOCK = threading.Lock()
 
+SPARKLINES_RATE_LIMIT = (180, 60)   # 180 requests per 60 seconds per IP
+CHART_RATE_LIMIT = (240, 60)        # 240 requests per 60 seconds per IP
+
+
+def get_client_ip(request):
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+
+    if request.client and request.client.host:
+        return request.client.host
+
+    return "unknown"
+
+
+def is_route_rate_limited(request, route_key, limit, window_seconds):
+    client_ip = get_client_ip(request)
+    key = f"{client_ip}:{route_key}"
+    now = time.time()
+    window_start = now - window_seconds
+
+    with RATE_LIMIT_LOCK:
+        dq = RATE_LIMIT_STORAGE[key]
+
+        while dq and dq[0] < window_start:
+            dq.popleft()
+
+        if len(dq) >= limit:
+            return True
+
+        dq.append(now)
+
+    return False
 # =========================================================
 # DB HELPERS
 # =========================================================
@@ -56,14 +94,16 @@ def parse_json_field(value):
     except Exception:
         return None
 
-
 def add_min_max_filter(where_clauses, params, column_sql, min_val, max_val):
-    if min_val is not None:
-        where_clauses.append(f"{column_sql} >= %s")
-        params.append(min_val)
-    if max_val is not None:
-        where_clauses.append(f"{column_sql} <= %s")
-        params.append(max_val)
+        if min_val is not None:
+            where_clauses.append(f"{column_sql} >= %s")
+            params.append(min_val)
+        if max_val is not None:
+            where_clauses.append(f"{column_sql} <= %s")
+            params.append(max_val)
+
+def safe_server_error_message():
+        return {"error": "Internal server error."}
 
 def get_polygon_json(path: str, params: Optional[dict] = None, timeout: int = 20):
     if not POLYGON_API_KEY:
@@ -536,6 +576,7 @@ def get_stocks(
     sort_by: str = Query("Market Cap"),
     sort_order: str = Query("desc"),
 ):
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -688,8 +729,6 @@ def get_stocks(
         for row in rows:
             safe_rows.append({k: row[k] for k in row.keys()})
 
-        conn.close()
-
         return {
             "rows": safe_rows,
             "total": total,
@@ -701,39 +740,60 @@ def get_stocks(
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /stocks -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 @app.get("/stocks/sparklines")
-def get_stock_sparklines(tickers: str = Query(...)):
-    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+def get_stock_sparklines(request: Request, tickers: str = Query(...)):
+    try:
+        if is_route_rate_limited(request, "stocks_sparklines", *SPARKLINES_RATE_LIMIT):
+            return {"error": "Too many requests. Please slow down and try again shortly."}
 
-    if not ticker_list:
-        return {"rows": {}}
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
 
-    ticker_list = ticker_list[:100]
+        if not ticker_list:
+            return {"rows": {}}
 
-    rows = {}
+        ticker_list = ticker_list[:100]
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(fetch_intraday_sparkline, ticker): ticker
-            for ticker in ticker_list
-        }
+        rows = {}
 
-        for future in as_completed(futures):
-            result = future.result()
-            rows[result["ticker"]] = {
-                "points": result["points"],
-                "change_pct": result["change_pct"],
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {
+                executor.submit(fetch_intraday_sparkline, ticker): ticker
+                for ticker in ticker_list
             }
 
-    return {"rows": rows}
+            for future in as_completed(futures):
+                result = future.result()
+                rows[result["ticker"]] = {
+                    "points": result["points"],
+                    "change_pct": result["change_pct"],
+                }
+
+        return {"rows": rows}
+
+    except Exception as e:
+        print(f"[ERROR] /stocks/sparklines -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
 
 @app.get("/stocks/{ticker}/chart")
-def get_stock_chart(ticker: str, range: str = Query("1D")):
-    return fetch_chart_data(ticker.upper(), range)
+def get_stock_chart(request: Request, ticker: str, range: str = Query("1D")):
+    try:
+        if is_route_rate_limited(request, "stocks_chart", *CHART_RATE_LIMIT):
+            return {"error": "Too many requests. Please slow down and try again shortly."}
+
+        return fetch_chart_data(ticker.upper(), range)
+    except Exception as e:
+        print(f"[ERROR] /stocks/{ticker}/chart -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
 
 @app.get("/stocks/{ticker}")
 def get_stock_detail(ticker: str):
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -787,7 +847,6 @@ def get_stock_detail(ticker: str):
         """, (ticker.upper(),))
 
         row = cursor.fetchone()
-        conn.close()
 
         if not row:
             raise HTTPException(status_code=404, detail="Ticker not found")
@@ -797,11 +856,17 @@ def get_stock_detail(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /stocks/{ticker} -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/stocks/{ticker}/financials")
 def get_stock_financials(ticker: str):
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -819,7 +884,6 @@ def get_stock_financials(ticker: str):
         """, (ticker.upper(),))
 
         row = cursor.fetchone()
-        conn.close()
 
         if not row:
             raise HTTPException(status_code=404, detail="Ticker not found")
@@ -834,11 +898,17 @@ def get_stock_financials(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /stocks/{ticker}/financials -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/sectors")
 def get_sectors():
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -852,16 +922,20 @@ def get_sectors():
         """)
 
         rows = cursor.fetchall()
-        conn.close()
-
         return [row["Sector"] for row in rows]
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /sectors -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/security-types")
 def get_security_types():
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -875,16 +949,20 @@ def get_security_types():
         """)
 
         rows = cursor.fetchall()
-        conn.close()
-
         return [row["Type"] for row in rows]
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /security-types -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 
 
 @app.get("/sector-performance")
 def get_sector_performance():
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -917,7 +995,6 @@ def get_sector_performance():
         """)
 
         rows = cursor.fetchall()
-        conn.close()
 
         return {
             row["Sector"]: row["avg_change"]
@@ -926,10 +1003,16 @@ def get_sector_performance():
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /sector-performance -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 
 @app.get("/market-breadth")
 def get_market_breadth():
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -943,7 +1026,6 @@ def get_market_breadth():
         """)
 
         rows = cursor.fetchall()
-        conn.close()
 
         changes = [row["change_pct"] for row in rows if row["change_pct"] is not None]
 
@@ -999,10 +1081,16 @@ def get_market_breadth():
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /market-breadth -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
 
 @app.get("/market-summary")
 def get_market_summary():
+    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1017,7 +1105,6 @@ def get_market_summary():
         """)
 
         rows = cursor.fetchall()
-        conn.close()
 
         return {
             row["Ticker"]: {
@@ -1028,4 +1115,9 @@ def get_market_summary():
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        print(f"[ERROR] /market-summary -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()

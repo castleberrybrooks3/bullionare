@@ -1,236 +1,34 @@
-from fastapi import FastAPI, Query, HTTPException, Request
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from starlette.middleware.trustedhost import TrustedHostMiddleware
-
 from db import get_db_connection_dict
-
 import os
 import math
 import json
-import time
-import threading
-from collections import defaultdict, deque
 from typing import Optional
-
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
-# =========================================================
-# APP SETUP
-# =========================================================
-
 app = FastAPI()
 
-# Explicit allowlist of browser origins.
-# This is safer than broad CORS and matches FastAPI guidance to list trusted origins.
-ALLOWED_ORIGINS = [
+origins = [
     "http://localhost:3000",
     "https://bullionaireiq.com",
-    "https://www.bullionaireiq.com",
     "https://bullionareiq.com",
-    "https://www.bullionareiq.com",
+    "https://www.bullionareiq.com"
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=origins,
     allow_credentials=True,
-    # Keep GET + OPTIONS only, since this API is currently read-heavy.
-    # This reduces unnecessary exposure without changing current frontend behavior.
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Trusted host protection helps guard against malicious Host headers.
-# Include local dev, your domains, and Render hostnames used during deployment.
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=[
-        "localhost",
-        "127.0.0.1",
-        "bullionaireiq.com",
-        "www.bullionaireiq.com",
-        "api.bullionaireiq.com",
-        "bullionareiq.com",
-        "www.bullionareiq.com",
-        "api.bullionareiq.com",
-        "*.onrender.com",
-    ],
-)
-
-
-# =========================================================
-# ENV / EXTERNAL API SETUP
-# =========================================================
-
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "").strip()
 POLYGON_BASE_URL = "https://api.polygon.io"
-
-# Reuse a single session for outbound Polygon requests.
-# Adds a User-Agent so requests are more explicit and easier to debug upstream.
 polygon_session = requests.Session()
-polygon_session.headers.update(
-    {
-        "User-Agent": "BullionaireAPI/1.0",
-        "Accept": "application/json",
-    }
-)
-
-# Threading limits for external calls.
-SPARKLINE_MAX_WORKERS = 8
-
-# Simple in-memory rate limiting.
-# This is good for a single-process launch setup.
-# If you later run multiple workers/instances, move this to Redis or an API gateway.
-RATE_LIMIT_STORAGE = defaultdict(deque)
-RATE_LIMIT_LOCK = threading.Lock()
-
-# Route-specific per-IP request budgets.
-# Kept intentionally generous so normal users are unaffected,
-# while still making scraping less attractive and more expensive.
-RATE_LIMITS = {
-    "/stocks": (120, 60),                # 120 requests / 60 seconds
-    "/stocks/sparklines": (60, 60),      # 60 requests / 60 seconds
-    "/stocks/chart": (180, 60),          # 180 requests / 60 seconds
-    "/stocks/detail": (240, 60),         # 240 requests / 60 seconds
-    "/sectors": (60, 60),
-    "/security-types": (60, 60),
-    "/sector-performance": (60, 60),
-    "/market-breadth": (60, 60),
-    "/market-summary": (60, 60),
-    "default": (300, 60),
-}
-
-
-# =========================================================
-# SECURITY / REQUEST MIDDLEWARE
-# =========================================================
-
-def get_client_ip(request: Request) -> str:
-    """
-    Best-effort client IP extraction.
-
-    Behind proxies/load balancers, X-Forwarded-For often contains the real client IP.
-    FastAPI documents proxy headers for deployments behind a proxy.
-    For launch, this is enough; later you can tighten trusted proxy handling if needed.
-    """
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        # First IP is typically the original client.
-        return forwarded_for.split(",")[0].strip()
-
-    if request.client and request.client.host:
-        return request.client.host
-
-    return "unknown"
-
-
-def get_rate_limit_bucket(request: Request) -> str:
-    """
-    Map incoming paths to rate limit buckets without changing route behavior.
-    """
-    path = request.url.path
-
-    if path == "/stocks":
-        return "/stocks"
-    if path == "/stocks/sparklines":
-        return "/stocks/sparklines"
-    if path.endswith("/chart") and path.startswith("/stocks/"):
-        return "/stocks/chart"
-    if path.startswith("/stocks/"):
-        return "/stocks/detail"
-    if path in RATE_LIMITS:
-        return path
-
-    return "default"
-
-
-def is_rate_limited(request: Request) -> tuple[bool, Optional[int]]:
-    """
-    Sliding-window in-memory rate limiter per client IP + route bucket.
-
-    Returns:
-      (True, retry_after_seconds) if blocked
-      (False, None) if allowed
-    """
-    bucket = get_rate_limit_bucket(request)
-    limit, window_seconds = RATE_LIMITS.get(bucket, RATE_LIMITS["default"])
-    client_ip = get_client_ip(request)
-
-    # Skip throttling CORS preflight.
-    if request.method.upper() == "OPTIONS":
-        return False, None
-
-    key = f"{client_ip}:{bucket}"
-    now = time.time()
-    window_start = now - window_seconds
-
-    with RATE_LIMIT_LOCK:
-        dq = RATE_LIMIT_STORAGE[key]
-
-        # Drop old entries outside the sliding window.
-        while dq and dq[0] < window_start:
-            dq.popleft()
-
-        if len(dq) >= limit:
-            retry_after = max(1, int(dq[0] + window_seconds - now))
-            return True, retry_after
-
-        dq.append(now)
-
-    return False, None
-
-
-@app.middleware("http")
-async def security_middleware(request: Request, call_next):
-    """
-    Adds:
-    - rate limiting
-    - lightweight request logging
-    - basic security headers
-
-    Keeps functionality unchanged for valid requests.
-    """
-    blocked, retry_after = is_rate_limited(request)
-    if blocked:
-        return JSONResponse(
-            status_code=429,
-            content={"error": "Too many requests. Please slow down and try again shortly."},
-            headers={"Retry-After": str(retry_after)},
-        )
-
-    start = time.time()
-
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        # Server-side log only; do not leak internals to clients.
-        client_ip = get_client_ip(request)
-        print(f"[UNHANDLED ERROR] {client_ip} {request.method} {request.url.path} -> {type(exc).__name__}: {exc}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Internal server error."},
-        )
-
-    duration_ms = (time.time() - start) * 1000
-    client_ip = get_client_ip(request)
-
-    # Lightweight request log for launch monitoring.
-    print(
-        f'{client_ip} | {request.method} {request.url.path} | '
-        f'{response.status_code} | {duration_ms:.1f}ms'
-    )
-
-    # Basic hardening headers.
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-
-    return response
 
 
 # =========================================================
@@ -267,24 +65,7 @@ def add_min_max_filter(where_clauses, params, column_sql, min_val, max_val):
         where_clauses.append(f"{column_sql} <= %s")
         params.append(max_val)
 
-
-def safe_server_error_message():
-    """
-    Generic client-facing error.
-    Avoids leaking implementation details.
-    """
-    return {"error": "Internal server error."}
-
-
-# =========================================================
-# OUTBOUND POLYGON HELPERS
-# =========================================================
-
 def get_polygon_json(path: str, params: Optional[dict] = None, timeout: int = 20):
-    """
-    Safe outbound call wrapper for Polygon.
-    Keeps timeouts bounded and never raises raw request details to the client.
-    """
     if not POLYGON_API_KEY:
         return None
 
@@ -298,7 +79,7 @@ def get_polygon_json(path: str, params: Optional[dict] = None, timeout: int = 20
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        print(f"[POLYGON ERROR] {url} -> {type(e).__name__}: {e}")
+        print(f"[POLYGON ERROR] {url} -> {e}")
         return None
 
 
@@ -343,8 +124,6 @@ def fetch_intraday_sparkline(ticker: str):
         "points": [],
         "change_pct": None,
     }
-
-
 def fetch_chart_data(ticker: str, range_key: str):
     range_map = {
         "1D": {"multiplier": 5, "timespan": "minute", "days": 1},
@@ -358,7 +137,7 @@ def fetch_chart_data(ticker: str, range_key: str):
 
     config = range_map.get(range_key, range_map["1D"])
 
-    # Special handling for 1D so weekends/market holidays still show data.
+    # Special handling for 1D so weekends/market holidays still show
     if range_key == "1D":
         for days_back in range(0, 5):
             target_date = (datetime.now() - timedelta(days=days_back)).date().isoformat()
@@ -468,8 +247,6 @@ def fetch_chart_data(ticker: str, range_key: str):
         "range": range_key,
         "points": points,
     }
-
-
 # =========================================================
 # WHERE CLAUSE BUILDER
 # =========================================================
@@ -528,35 +305,35 @@ def build_where_clause(
     min_analysts: Optional[int] = None,
     max_analysts: Optional[int] = None,
 
-    min_previous_close: Optional[float] = None,
-    max_previous_close: Optional[float] = None,
+        min_previous_close: Optional[float] = None,
+        max_previous_close: Optional[float] = None,
 
-    min_day_open: Optional[float] = None,
-    max_day_open: Optional[float] = None,
+        min_day_open: Optional[float] = None,
+        max_day_open: Optional[float] = None,
 
-    min_day_high: Optional[float] = None,
-    max_day_high: Optional[float] = None,
+        min_day_high: Optional[float] = None,
+        max_day_high: Optional[float] = None,
 
-    min_day_low: Optional[float] = None,
-    max_day_low: Optional[float] = None,
+        min_day_low: Optional[float] = None,
+        max_day_low: Optional[float] = None,
 
-    min_day_volume: Optional[float] = None,
-    max_day_volume: Optional[float] = None,
+        min_day_volume: Optional[float] = None,
+        max_day_volume: Optional[float] = None,
 
-    min_today_change: Optional[float] = None,
-    max_today_change: Optional[float] = None,
+        min_today_change: Optional[float] = None,
+        max_today_change: Optional[float] = None,
 
-    min_macd_signal: Optional[float] = None,
-    max_macd_signal: Optional[float] = None,
+        min_macd_signal: Optional[float] = None,
+        max_macd_signal: Optional[float] = None,
 
-    min_macd_histogram: Optional[float] = None,
-    max_macd_histogram: Optional[float] = None,
+        min_macd_histogram: Optional[float] = None,
+        max_macd_histogram: Optional[float] = None,
 
-    min_latest_dividend: Optional[float] = None,
-    max_latest_dividend: Optional[float] = None,
+        min_latest_dividend: Optional[float] = None,
+        max_latest_dividend: Optional[float] = None,
 
-    min_dividend_frequency: Optional[float] = None,
-    max_dividend_frequency: Optional[float] = None,
+        min_dividend_frequency: Optional[float] = None,
+        max_dividend_frequency: Optional[float] = None,
 ):
     where_clauses = []
     params = []
@@ -607,8 +384,10 @@ def build_where_clause(
     add_min_max_filter(where_clauses, params, 'CAST("Today Change %%" AS REAL)', min_today_change, max_today_change)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Signal" AS REAL)', min_macd_signal, max_macd_signal)
     add_min_max_filter(where_clauses, params, 'CAST("MACD Histogram" AS REAL)', min_macd_histogram, max_macd_histogram)
-    add_min_max_filter(where_clauses, params, 'CAST("Latest Dividend Amount" AS REAL)', min_latest_dividend, max_latest_dividend)
-    add_min_max_filter(where_clauses, params, 'CAST("Dividend Frequency" AS REAL)', min_dividend_frequency, max_dividend_frequency)
+    add_min_max_filter(where_clauses, params, 'CAST("Latest Dividend Amount" AS REAL)', min_latest_dividend,
+                       max_latest_dividend)
+    add_min_max_filter(where_clauses, params, 'CAST("Dividend Frequency" AS REAL)', min_dividend_frequency,
+                       max_dividend_frequency)
 
     where_sql = ""
     if where_clauses:
@@ -666,7 +445,6 @@ STOCK_LIST_COLUMNS = """
 # =========================================================
 # ROUTES
 # =========================================================
-
 @app.get("/stocks")
 def get_stocks(
     page: int = Query(1, ge=1),
@@ -758,7 +536,6 @@ def get_stocks(
     sort_by: str = Query("Market Cap"),
     sort_order: str = Query("desc"),
 ):
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -911,6 +688,8 @@ def get_stocks(
         for row in rows:
             safe_rows.append({k: row[k] for k in row.keys()})
 
+        conn.close()
+
         return {
             "rows": safe_rows,
             "total": total,
@@ -922,59 +701,39 @@ def get_stocks(
         }
 
     except Exception as e:
-        print(f"[ERROR] /stocks -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
-
-
+        return {"error": str(e)}
 @app.get("/stocks/sparklines")
 def get_stock_sparklines(tickers: str = Query(...)):
-    try:
-        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
 
-        if not ticker_list:
-            return {"rows": {}}
+    if not ticker_list:
+        return {"rows": {}}
 
-        # Keep existing functional cap.
-        ticker_list = ticker_list[:100]
+    ticker_list = ticker_list[:100]
 
-        rows = {}
+    rows = {}
 
-        with ThreadPoolExecutor(max_workers=SPARKLINE_MAX_WORKERS) as executor:
-            futures = {
-                executor.submit(fetch_intraday_sparkline, ticker): ticker
-                for ticker in ticker_list
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {
+            executor.submit(fetch_intraday_sparkline, ticker): ticker
+            for ticker in ticker_list
+        }
+
+        for future in as_completed(futures):
+            result = future.result()
+            rows[result["ticker"]] = {
+                "points": result["points"],
+                "change_pct": result["change_pct"],
             }
 
-            for future in as_completed(futures):
-                result = future.result()
-                rows[result["ticker"]] = {
-                    "points": result["points"],
-                    "change_pct": result["change_pct"],
-                }
-
-        return {"rows": rows}
-
-    except Exception as e:
-        print(f"[ERROR] /stocks/sparklines -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
+    return {"rows": rows}
 
 @app.get("/stocks/{ticker}/chart")
 def get_stock_chart(ticker: str, range: str = Query("1D")):
-    try:
-        return fetch_chart_data(ticker.upper(), range)
-    except Exception as e:
-        print(f"[ERROR] /stocks/{ticker}/chart -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
+    return fetch_chart_data(ticker.upper(), range)
 
 @app.get("/stocks/{ticker}")
 def get_stock_detail(ticker: str):
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1028,6 +787,7 @@ def get_stock_detail(ticker: str):
         """, (ticker.upper(),))
 
         row = cursor.fetchone()
+        conn.close()
 
         if not row:
             raise HTTPException(status_code=404, detail="Ticker not found")
@@ -1037,17 +797,11 @@ def get_stock_detail(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[ERROR] /stocks/{ticker} -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
+        return {"error": str(e)}
 
 
 @app.get("/stocks/{ticker}/financials")
 def get_stock_financials(ticker: str):
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1065,6 +819,7 @@ def get_stock_financials(ticker: str):
         """, (ticker.upper(),))
 
         row = cursor.fetchone()
+        conn.close()
 
         if not row:
             raise HTTPException(status_code=404, detail="Ticker not found")
@@ -1079,17 +834,11 @@ def get_stock_financials(ticker: str):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"[ERROR] /stocks/{ticker}/financials -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
+        return {"error": str(e)}
 
 
 @app.get("/sectors")
 def get_sectors():
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1103,20 +852,16 @@ def get_sectors():
         """)
 
         rows = cursor.fetchall()
+        conn.close()
+
         return [row["Sector"] for row in rows]
 
     except Exception as e:
-        print(f"[ERROR] /sectors -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
+        return {"error": str(e)}
 
 
 @app.get("/security-types")
 def get_security_types():
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1130,20 +875,16 @@ def get_security_types():
         """)
 
         rows = cursor.fetchall()
+        conn.close()
+
         return [row["Type"] for row in rows]
 
     except Exception as e:
-        print(f"[ERROR] /security-types -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
+        return {"error": str(e)}
 
 
 @app.get("/sector-performance")
 def get_sector_performance():
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1176,6 +917,7 @@ def get_sector_performance():
         """)
 
         rows = cursor.fetchall()
+        conn.close()
 
         return {
             row["Sector"]: row["avg_change"]
@@ -1184,17 +926,10 @@ def get_sector_performance():
         }
 
     except Exception as e:
-        print(f"[ERROR] /sector-performance -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
-
+        return {"error": str(e)}
 
 @app.get("/market-breadth")
 def get_market_breadth():
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1208,6 +943,8 @@ def get_market_breadth():
         """)
 
         rows = cursor.fetchall()
+        conn.close()
+
         changes = [row["change_pct"] for row in rows if row["change_pct"] is not None]
 
         buckets = {
@@ -1262,17 +999,10 @@ def get_market_breadth():
         }
 
     except Exception as e:
-        print(f"[ERROR] /market-breadth -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
-
+        return {"error": str(e)}
 
 @app.get("/market-summary")
 def get_market_summary():
-    conn = None
     try:
         conn = get_db_connection_dict()
         cursor = conn.cursor()
@@ -1287,6 +1017,7 @@ def get_market_summary():
         """)
 
         rows = cursor.fetchall()
+        conn.close()
 
         return {
             row["Ticker"]: {
@@ -1297,9 +1028,4 @@ def get_market_summary():
         }
 
     except Exception as e:
-        print(f"[ERROR] /market-summary -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
-
-    finally:
-        if conn:
-            conn.close()
+        return {"error": str(e)}

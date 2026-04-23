@@ -8,6 +8,13 @@
   background: #0b0f14;
   color: white;
   padding: 20px;
+  opacity: 1;
+  transition: opacity 0.4s ease;
+}
+
+.dashboard-loading-overlay.fade-out {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .dashboard-loading-card {

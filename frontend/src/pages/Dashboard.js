@@ -29,6 +29,7 @@ export default function Dashboard() {
   const [showOverlay, setShowOverlay] = useState(shouldShowStartupOverlay);
   const [minimumTimeDone, setMinimumTimeDone] = useState(!shouldShowStartupOverlay);
   const [dashboardReady, setDashboardReady] = useState(false);
+  const [fadeOutOverlay, setFadeOutOverlay] = useState(false);
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -87,13 +88,20 @@ export default function Dashboard() {
   }, [shouldShowStartupOverlay]);
 
   useEffect(() => {
-    if (!showOverlay) return;
-    if (!minimumTimeDone) return;
-    if (!dashboardReady) return;
+  if (!showOverlay) return;
+  if (!minimumTimeDone) return;
+  if (!dashboardReady) return;
 
+  setFadeOutOverlay(true);
+
+  const fadeTimer = setTimeout(() => {
     setShowOverlay(false);
+    setFadeOutOverlay(false);
     sessionStorage.removeItem("showEmailConfirmedOverlay");
-  }, [showOverlay, minimumTimeDone, dashboardReady]);
+  }, 400);
+
+  return () => clearTimeout(fadeTimer);
+}, [showOverlay, minimumTimeDone, dashboardReady]);
 
   const startResizing = () => {
     isResizing.current = true;
@@ -324,7 +332,7 @@ export default function Dashboard() {
       </div>
 
       {showOverlay && (
-        <div className="dashboard-loading-overlay">
+        <div className={`dashboard-loading-overlay ${fadeOutOverlay ? "fade-out" : ""}`}>
           <div className="dashboard-loading-card">
             <h1>Email Confirmed</h1>
             <p>Getting your dashboard ready...</p>

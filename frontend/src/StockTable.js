@@ -87,6 +87,8 @@ const sparklineRequestIdRef = useRef(0);
 const sparklineDebounceRef = useRef(null);
 const sparklineBackgroundLoadStartedRef = useRef(false);
 const loadingWatchlistsRef = useRef(false);
+const livePriceCacheRef = useRef({});
+const LIVE_PRICE_CACHE_MS = 2 * 60 * 1000;
 
 const [chartModalOpen, setChartModalOpen] = useState(false);
 const [chartTicker, setChartTicker] = useState(null);
@@ -983,6 +985,71 @@ const cancelStockRequest = () => {
   }
 };
 
+const mergeLivePricesIntoRows = async (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+
+  const now = Date.now();
+
+  const tickers = rows
+    .map((row) => row.Ticker)
+    .filter(Boolean)
+    .slice(0, 100);
+
+  if (!tickers.length) return rows;
+
+  const cachedLiveRows = {};
+  const missingTickers = [];
+
+  tickers.forEach((ticker) => {
+    const cached = livePriceCacheRef.current[ticker];
+
+    if (cached && now - cached.timestamp < LIVE_PRICE_CACHE_MS) {
+      cachedLiveRows[ticker] = cached.data;
+    } else {
+      missingTickers.push(ticker);
+    }
+  });
+
+  let fetchedLiveRows = {};
+
+  if (missingTickers.length) {
+    try {
+      const res = await fetch(
+        `${API_BASE}/stocks/live-prices?tickers=${encodeURIComponent(
+          missingTickers.join(",")
+        )}`
+      );
+
+      const data = await res.json();
+      fetchedLiveRows = data?.rows || {};
+
+      Object.entries(fetchedLiveRows).forEach(([ticker, liveData]) => {
+        livePriceCacheRef.current[ticker] = {
+          data: liveData,
+          timestamp: Date.now(),
+        };
+      });
+    } catch (err) {
+      console.error("Failed to load live prices", err);
+    }
+  }
+
+  const liveRows = {
+    ...cachedLiveRows,
+    ...fetchedLiveRows,
+  };
+
+  return rows.map((row) => {
+    const live = liveRows[row.Ticker];
+    if (!live) return row;
+
+    return {
+      ...row,
+      ...live,
+    };
+  });
+};
+
 const fetchStocks = async () => {
   cancelStockRequest();
   setLoading(true);
@@ -993,13 +1060,37 @@ const fetchStocks = async () => {
 
   try {
 if (view === "Watchlist") {
-  const localStocks = JSON.parse(localStorage.getItem("stocks") || "[]");
-  const safeStocks = Array.isArray(localStocks) ? localStocks : [];
+  const tickers = watchlists[activeList] ?? [];
 
-  setStocks(safeStocks);
-  setDisplayedCount(
-    safeStocks.filter((s) => (watchlists[activeList] ?? []).includes(s.Ticker)).length
-  );
+  if (!tickers.length) {
+    setStocks([]);
+    setDisplayedCount(0);
+    setTotalPages(1);
+    setPageCache({});
+    setIsBackgroundLoading(false);
+    setLoading(false);
+    return;
+  }
+
+  const params = new URLSearchParams();
+  params.set("tickers", tickers.join(","));
+  params.set("page", "1");
+  params.set("page_size", String(Math.max(tickers.length, 100)));
+
+  const res = await fetch(`${API_BASE}/stocks?${params.toString()}`, {
+    signal: controller.signal,
+  });
+  const data = await res.json();
+
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+
+setStocks(rows);
+setDisplayedCount(rows.length);
+setLoading(false);
+
+mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
+  setStocks(rowsWithLivePrices);
+});
   setTotalPages(1);
   setPageCache({});
   setIsBackgroundLoading(false);
@@ -1031,14 +1122,20 @@ if (view === "Watchlist") {
 
     const initialCache = { 1: firstRows };
 
-    setPageCache(initialCache);
-    setStocks(firstRows);
-    restoreScrollPosition();
-    setDisplayedCount(total);
-    setTotalPages(pages);
-    setCurrentPage(1);
-    localStorage.setItem("stocks", JSON.stringify(firstRows));
-    setLoading(false);
+setPageCache(initialCache);
+setStocks(firstRows);
+restoreScrollPosition();
+setDisplayedCount(total);
+setTotalPages(pages);
+setCurrentPage(1);
+localStorage.setItem("stocks", JSON.stringify(firstRows));
+setLoading(false);
+
+mergeLivePricesIntoRows(firstRows).then((rowsWithLivePrices) => {
+  setPageCache((prev) => ({ ...prev, 1: rowsWithLivePrices }));
+  setStocks(rowsWithLivePrices);
+  localStorage.setItem("stocks", JSON.stringify(rowsWithLivePrices));
+});
 
     setIsBackgroundLoading(false);
 
@@ -1076,9 +1173,15 @@ const changePage = async (nextPage) => {
 
     const rows = Array.isArray(data?.rows) ? data.rows : [];
 
-    setPageCache((prev) => ({ ...prev, [nextPage]: rows }));
+setPageCache((prev) => ({ ...prev, [nextPage]: rows }));
 setStocks(rows);
 restoreScrollPosition();
+setLoading(false);
+
+mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
+  setPageCache((prev) => ({ ...prev, [nextPage]: rowsWithLivePrices }));
+  setStocks(rowsWithLivePrices);
+});
   } catch (err) {
     console.error(`Failed to load page ${nextPage}`, err);
   } finally {
@@ -1108,23 +1211,6 @@ restoreScrollPosition();
   activeList,
   watchlists
 ]);
-
-useEffect(() => {
-  if (!showTable) return;
-  if (view !== "Watchlist") return;
-
-  const localStocks = JSON.parse(localStorage.getItem("stocks") || "[]");
-  const safeStocks = Array.isArray(localStocks) ? localStocks : [];
-
-  setStocks(safeStocks);
-  setDisplayedCount(
-    safeStocks.filter((s) => activeWatchlistTickers.includes(s.Ticker)).length
-  );
-  setTotalPages(1);
-  setPageCache({});
-  setIsBackgroundLoading(false);
-  setLoading(false);
-}, [showTable, view, activeList]);
 
 useEffect(() => {
   setCurrentPage(1);
@@ -1944,6 +2030,7 @@ setActiveList("Default");
                   <WatchlistAnalytics
   activeList={activeList}
   watchlists={watchlistAnalyticsWatchlists}
+  stocks={rowData}
 />
                 </div>
               )}

@@ -19,7 +19,7 @@ function PageTracker() {
 
   useEffect(() => {
     if (window.gtag) {
-      window.gtag("config", "G-7L8VKTG3WK", {
+      window.gtag("config", "G-L6BKRZE20E", {
         page_path: location.pathname,
       });
     }

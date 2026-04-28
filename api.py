@@ -746,6 +746,61 @@ def get_stocks(
     finally:
         if conn:
             conn.close()
+
+@app.get("/stocks/live-prices")
+def get_live_prices(tickers: str = Query(...)):
+    try:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+        ticker_list = ticker_list[:100]
+
+        if not ticker_list:
+            return {"rows": {}}
+
+        snapshot = get_polygon_json(
+            "/v2/snapshot/locale/us/markets/stocks/tickers",
+            {"include_otc": "true"},
+            timeout=60,
+        )
+
+        if not snapshot or not snapshot.get("tickers"):
+            return {"rows": {}}
+
+        wanted = set(ticker_list)
+        rows = {}
+
+        for item in snapshot.get("tickers", []):
+            ticker = item.get("ticker")
+            if ticker not in wanted:
+                continue
+
+            day = item.get("day", {}) or {}
+            prev_day = item.get("prevDay", {}) or {}
+            min_bar = item.get("min", {}) or {}
+            last_trade = item.get("lastTrade", {}) or {}
+
+            current_price = (
+                last_trade.get("p")
+                or min_bar.get("c")
+                or day.get("c")
+                or prev_day.get("c")
+            )
+
+            rows[ticker] = {
+                "Current Price": current_price,
+                "Previous Close": prev_day.get("c"),
+                "Day Open": day.get("o"),
+                "Day High": day.get("h"),
+                "Day Low": day.get("l"),
+                "Day Volume": day.get("v"),
+                "Today Change %": item.get("todaysChangePerc"),
+            }
+
+        return {"rows": rows}
+
+    except Exception as e:
+        print(f"[ERROR] /stocks/live-prices -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
 @app.get("/stocks/sparklines")
 def get_stock_sparklines(request: Request, tickers: str = Query(...)):
     try:

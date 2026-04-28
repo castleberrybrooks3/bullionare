@@ -3,19 +3,20 @@ import { Pie } from "react-chartjs-2";
 import { Chart as ChartJS, ArcElement, Tooltip, Legend } from "chart.js";
 
 const SECTOR_COLORS = {
-  Technology: "#60a5fa",              // medium blue
-  Healthcare: "#ef4444",              // same red family as site
-  "Financial Services": "#22c55e",    // same green family as site
+  Technology: "#60a5fa",
+  Healthcare: "#ef4444",
+  "Financial Services": "#22c55e",
   Financials: "#22c55e",
-  "Consumer Cyclical": "#fbbf24",     // amber
-  "Consumer Defensive": "#a78bfa",    // violet
-  Industrials: "#94a3b8",             // slate
-  Energy: "#fb923c",                  // orange
-  Utilities: "#22d3ee",               // cyan
-  "Communication Services": "#f472b6",// pink
-  Materials: "#a3e635",               // lime
+  "Consumer Cyclical": "#fbbf24",
+  "Consumer Defensive": "#a78bfa",
+  Industrials: "#94a3b8",
+  Energy: "#fb923c",
+  Utilities: "#22d3ee",
+  "Communication Services": "#f472b6",
+  Materials: "#a3e635",
   "Basic Materials": "#a3e635",
-  "Real Estate": "#34d399",           // emerald/green-teal
+  "Real Estate": "#34d399",
+  Unknown: "#6366f1",
 };
 
 const getSectorColor = (sector) => {
@@ -24,35 +25,13 @@ const getSectorColor = (sector) => {
 
 ChartJS.register(ArcElement, Tooltip, Legend);
 
-let cachedStocksRaw = null;
-let cachedStockMap = null;
-
-const getCachedStockMap = () => {
-  const stocksRaw = localStorage.getItem("stocks") || "[]";
-
-  if (stocksRaw === cachedStocksRaw && cachedStockMap) {
-    return cachedStockMap;
-  }
-
-  cachedStocksRaw = stocksRaw;
-
-  try {
-    const allStocks = JSON.parse(stocksRaw);
-    cachedStockMap = Object.fromEntries(
-      allStocks.map((stock) => [stock.Ticker, stock])
-    );
-  } catch (error) {
-    console.error("Failed to parse cached stocks from localStorage", error);
-    cachedStockMap = {};
-  }
-
-  return cachedStockMap;
-};
-
-function WatchlistAnalytics({ activeList, watchlists }) {
+function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
   const { chartData, avgBeta } = useMemo(() => {
-    const stockMap = getCachedStockMap();
     const tickers = watchlists?.[activeList] || [];
+
+    const stockMap = Object.fromEntries(
+      stocks.map((stock) => [stock.Ticker, stock])
+    );
 
     const breakdown = {};
     const betaValues = [];
@@ -96,7 +75,7 @@ function WatchlistAnalytics({ activeList, watchlists }) {
         : null;
 
     return { chartData, avgBeta };
-  }, [activeList, watchlists]);
+  }, [activeList, watchlists, stocks]);
 
   const options = {
     responsive: true,
@@ -124,43 +103,42 @@ function WatchlistAnalytics({ activeList, watchlists }) {
 
   return (
     <div
-  style={{
-    width: "100%",
-    maxWidth: "650px",
-    minWidth: 0,
-    height: "220px",
-    minHeight: "220px",
-    display: "flex",
-    flexWrap: "nowrap",
-    flexDirection: "row",
-    alignItems: "flex-end",
-    justifyContent: "center",
-    gap: "20px",
-    boxSizing: "border-box",
-    marginTop: "-12px",
-  }}
->
-      {/* PIE CHART */}
+      style={{
+        width: "100%",
+        maxWidth: "650px",
+        minWidth: 0,
+        height: "220px",
+        minHeight: "220px",
+        display: "flex",
+        flexWrap: "nowrap",
+        flexDirection: "row",
+        alignItems: "flex-end",
+        justifyContent: "center",
+        gap: "20px",
+        boxSizing: "border-box",
+        marginTop: "-12px",
+      }}
+    >
       <div
-  style={{
-    flex: "1 1 220px",
-    minWidth: "220px",
-    minHeight: 0,
-    display: "flex",
-    alignItems: "flex-end",
-    justifyContent: "center",
-    paddingTop: "0px",
-  }}
->
+        style={{
+          flex: "1 1 220px",
+          minWidth: "220px",
+          minHeight: 0,
+          display: "flex",
+          alignItems: "flex-end",
+          justifyContent: "center",
+          paddingTop: "0px",
+        }}
+      >
         {chartData ? (
           <div
-  style={{
-    width: "200px",
-    maxWidth: "100%",
-    height: "200px",
-    marginTop: "0px",
-  }}
->
+            style={{
+              width: "200px",
+              maxWidth: "100%",
+              height: "200px",
+              marginTop: "0px",
+            }}
+          >
             <Pie data={chartData} options={options} />
           </div>
         ) : (
@@ -176,21 +154,20 @@ function WatchlistAnalytics({ activeList, watchlists }) {
         )}
       </div>
 
-      {/* BETA / VOLATILITY BAR */}
       <div
-  style={{
-    flex: "1 1 260px",
-    minWidth: "240px",
-    maxWidth: "320px",
-    display: "flex",
-    flexDirection: "column",
-    marginRight: "0px",
-    justifyContent: "flex-end",
-    paddingTop: "0px",
-    paddingLeft: "0px",
-    boxSizing: "border-box",
-  }}
->
+        style={{
+          flex: "1 1 260px",
+          minWidth: "240px",
+          maxWidth: "320px",
+          display: "flex",
+          flexDirection: "column",
+          marginRight: "0px",
+          justifyContent: "flex-end",
+          paddingTop: "0px",
+          paddingLeft: "0px",
+          boxSizing: "border-box",
+        }}
+      >
         <div
           style={{
             color: "white",

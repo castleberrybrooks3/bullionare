@@ -521,6 +521,33 @@ def update_main_rows_batch(conn, rows: list[tuple[str, dict]]):
         page_size=250
     )
 
+def update_main_rows_batch_safe(conn, rows: list[tuple[str, dict]]):
+    if not rows:
+        return
+
+    try:
+        update_main_rows_batch(conn, rows)
+        return
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[BATCH MAIN ERROR] Batch failed with {type(e).__name__}: {e}")
+        print("Retrying rows one-by-one and skipping bad tickers...")
+
+    good_count = 0
+    bad_count = 0
+
+    for ticker, row in rows:
+        try:
+            update_main_rows_batch(conn, [(ticker, row)])
+            good_count += 1
+
+        except Exception as e:
+            conn.rollback()
+            bad_count += 1
+            print(f"[SKIPPED MAIN ROW] {ticker}: {type(e).__name__}: {e}")
+
+    print(f"Recovered batch: updated {good_count}, skipped {bad_count}")
 
 def update_detail_rows_batch(conn, rows: list[tuple[str, dict]]):
     if not rows:
@@ -987,7 +1014,7 @@ def main():
             # ✅ THIS BLOCK MUST BE OUTSIDE THE EXCEPT
             if i % 250 == 0:
                 conn = ensure_conn(conn)
-                update_main_rows_batch(conn, main_row_buffer)
+                update_main_rows_batch_safe(conn, main_row_buffer)
                 update_detail_rows_batch(conn, detail_row_buffer)
                 conn.commit()
 
@@ -996,7 +1023,7 @@ def main():
 
                 print(f"Committed through {i} detailed tickers...")
         conn = ensure_conn(conn)
-        update_main_rows_batch(conn, main_row_buffer)
+        update_main_rows_batch_safe(conn, main_row_buffer)
         update_detail_rows_batch(conn, detail_row_buffer)
         conn.commit()
 

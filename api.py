@@ -4,7 +4,8 @@ from db import get_db_connection_dict
 import os
 import math
 import json
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel
 import requests
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,7 +19,8 @@ origins = [
     "http://localhost:3000",
     "https://bullionaireiq.com",
     "https://bullionareiq.com",
-    "https://www.bullionareiq.com"
+    "https://www.bullionareiq.com",
+    "https://www.bullionaireiq.com"
 ]
 
 app.add_middleware(
@@ -38,7 +40,18 @@ RATE_LIMIT_LOCK = threading.Lock()
 
 SPARKLINES_RATE_LIMIT = (180, 60)   # 180 requests per 60 seconds per IP
 CHART_RATE_LIMIT = (240, 60)        # 240 requests per 60 seconds per IP
+BACKTEST_RATE_LIMIT = (120, 60)  # 120 backtests per minute per IP
 
+
+class StrategyPosition(BaseModel):
+    ticker: str
+    weight: float
+
+
+class BacktestRequest(BaseModel):
+    benchmark: str = "SPY"
+    range: str = "1Y"
+    positions: List[StrategyPosition]
 
 def get_client_ip(request):
     forwarded_for = request.headers.get("x-forwarded-for")
@@ -287,6 +300,66 @@ def fetch_chart_data(ticker: str, range_key: str):
         "range": range_key,
         "points": points,
     }
+
+def normalize_chart_points(chart_response):
+    points = chart_response.get("points", []) if isinstance(chart_response, dict) else []
+
+    normalized = []
+
+    for point in points:
+        timestamp = point.get("time")
+        close_price = point.get("close")
+
+        if timestamp is None or close_price is None:
+            continue
+
+        normalized.append({
+            "time": timestamp,
+            "close": float(close_price),
+        })
+
+    return normalized
+
+
+def calculate_max_drawdown(values):
+    if not values:
+        return 0
+
+    peak = values[0]
+    max_drawdown = 0
+
+    for value in values:
+        peak = max(peak, value)
+        if peak != 0:
+            drawdown = ((value - peak) / peak) * 100
+            max_drawdown = min(max_drawdown, drawdown)
+
+    return max_drawdown
+
+
+def calculate_volatility(returns):
+    if len(returns) < 2:
+        return 0
+
+    avg_return = sum(returns) / len(returns)
+    variance = sum((r - avg_return) ** 2 for r in returns) / (len(returns) - 1)
+
+    return math.sqrt(variance) * 100
+
+def calculate_holding_volatility_from_prices(prices):
+    if len(prices) < 3:
+        return 0
+
+    returns = []
+
+    for i in range(1, len(prices)):
+        previous_price = prices[i - 1]
+        current_price = prices[i]
+
+        if previous_price and current_price and previous_price > 0 and current_price > 0:
+            returns.append((current_price / previous_price) - 1)
+
+    return calculate_volatility(returns)
 # =========================================================
 # WHERE CLAUSE BUILDER
 # =========================================================
@@ -835,6 +908,205 @@ def get_stock_sparklines(request: Request, tickers: str = Query(...)):
         print(f"[ERROR] /stocks/sparklines -> {type(e).__name__}: {e}")
         return safe_server_error_message()
 
+@app.post("/backtest-strategy")
+def backtest_strategy(request: Request, payload: BacktestRequest):
+    try:
+        if is_route_rate_limited(request, "backtest_strategy", *BACKTEST_RATE_LIMIT):
+            return {"error": "Too many requests. Please slow down and try again shortly."}
+
+        valid_ranges = {"1D", "5D", "1M", "6M", "1Y", "5Y"}
+        range_key = payload.range if payload.range in valid_ranges else "1Y"
+
+        positions = [
+            {
+                "ticker": p.ticker.strip().upper(),
+                "weight": float(p.weight) / 100,
+            }
+            for p in payload.positions
+            if p.ticker and p.ticker.strip() and p.weight != 0
+        ]
+
+        if not positions:
+            raise HTTPException(status_code=400, detail="At least one strategy position is required.")
+
+        benchmark = payload.benchmark.strip().upper() if payload.benchmark else "SPY"
+
+        tickers_to_fetch = list({p["ticker"] for p in positions} | {benchmark})
+
+        chart_results = {}
+
+        with ThreadPoolExecutor(max_workers=min(8, len(tickers_to_fetch))) as executor:
+            futures = {
+                executor.submit(fetch_chart_data, ticker, range_key): ticker
+                for ticker in tickers_to_fetch
+            }
+
+            for future in as_completed(futures):
+                ticker = futures[future]
+                chart_results[ticker] = normalize_chart_points(future.result())
+
+        benchmark_points = chart_results.get(benchmark, [])
+
+        if len(benchmark_points) < 2:
+            raise HTTPException(status_code=400, detail="Not enough benchmark data available.")
+
+        benchmark_points = sorted(benchmark_points, key=lambda p: p["time"])
+
+        if len(benchmark_points) < 2:
+            raise HTTPException(status_code=400, detail="Not enough benchmark data available.")
+
+        benchmark_start = benchmark_points[0]["close"]
+
+        position_series = {}
+
+        for position in positions:
+            ticker = position["ticker"]
+            ticker_points = sorted(chart_results.get(ticker, []), key=lambda p: p["time"])
+
+            if len(ticker_points) < 2:
+                continue
+
+            start_price = ticker_points[0]["close"]
+
+            if not start_price:
+                continue
+
+            position_series[ticker] = {
+                "weight": position["weight"],
+                "points": ticker_points,
+                "start_price": start_price,
+            }
+
+        if not position_series:
+            raise HTTPException(status_code=400, detail="Not enough price history for the selected strategy.")
+
+        strategy_points = []
+        benchmark_series = []
+        strategy_values = []
+        strategy_returns = []
+
+        previous_strategy_value = None
+
+        for index, benchmark_point in enumerate(benchmark_points):
+            benchmark_price = benchmark_point["close"]
+
+            if not benchmark_start or not benchmark_price:
+                continue
+
+            weighted_return = 0
+
+            for ticker, series in position_series.items():
+                ticker_points = series["points"]
+
+                # Use the closest matching index instead of requiring exact same timestamp
+                ticker_index = min(index, len(ticker_points) - 1)
+
+                current_price = ticker_points[ticker_index]["close"]
+                start_price = series["start_price"]
+                weight = series["weight"]
+
+                if not start_price or not current_price:
+                    continue
+
+                asset_return = (current_price / start_price) - 1
+
+                # Positive weight = long.
+                # Negative weight = short.
+                weighted_return += weight * asset_return
+
+            strategy_value = 100 * (1 + weighted_return)
+            benchmark_value = 100 * (benchmark_price / benchmark_start)
+
+            if previous_strategy_value is not None and previous_strategy_value != 0:
+                strategy_returns.append((strategy_value / previous_strategy_value) - 1)
+
+            previous_strategy_value = strategy_value
+
+            strategy_values.append(strategy_value)
+
+            strategy_points.append({
+                "time": benchmark_point["time"],
+                "strategy": strategy_value,
+                "benchmark": benchmark_value,
+            })
+
+            benchmark_series.append(benchmark_value)
+
+        strategy_return = strategy_points[-1]["strategy"] - 100
+        benchmark_return = strategy_points[-1]["benchmark"] - 100
+        outperformance = strategy_return - benchmark_return
+        max_drawdown = calculate_max_drawdown(strategy_values)
+        volatility = calculate_volatility(strategy_returns)
+
+        attribution_rows = []
+
+        for ticker, series in position_series.items():
+            ticker_points = series["points"]
+            prices = [
+                point["close"]
+                for point in ticker_points
+                if point.get("close") is not None and point.get("close") > 0
+            ]
+
+            if len(prices) < 2:
+                continue
+
+            start_price = prices[0]
+            end_price = prices[-1]
+
+            if not start_price:
+                continue
+
+            holding_return = ((end_price / start_price) - 1) * 100
+            contribution = series["weight"] * holding_return
+            holding_volatility = calculate_holding_volatility_from_prices(prices)
+
+            attribution_rows.append({
+                "ticker": ticker,
+                "weight": series["weight"] * 100,
+                "holdingReturn": holding_return,
+                "contribution": contribution,
+                "volatility": holding_volatility,
+            })
+
+        sorted_by_contribution = sorted(
+            attribution_rows,
+            key=lambda row: row["contribution"],
+            reverse=True
+        )
+
+        sorted_by_volatility = sorted(
+            attribution_rows,
+            key=lambda row: row["volatility"],
+            reverse=True
+        )
+
+        holding_attribution = {
+            "rows": attribution_rows,
+            "bestContributor": sorted_by_contribution[0] if sorted_by_contribution else None,
+            "worstContributor": sorted_by_contribution[-1] if sorted_by_contribution else None,
+            "mostVolatile": sorted_by_volatility[0] if sorted_by_volatility else None,
+        }
+
+        return {
+            "benchmark": benchmark,
+            "range": range_key,
+            "positions": positions,
+            "strategyReturn": strategy_return,
+            "benchmarkReturn": benchmark_return,
+            "outperformance": outperformance,
+            "maxDrawdown": max_drawdown,
+            "volatility": volatility,
+            "points": strategy_points,
+            "holdingAttribution": holding_attribution,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[ERROR] /backtest-strategy -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
 @app.get("/stocks/{ticker}/chart")
 def get_stock_chart(request: Request, ticker: str, range: str = Query("1D")):
     try:
@@ -972,21 +1244,25 @@ def get_sectors():
             SELECT DISTINCT "Sector"
             FROM stocks
             WHERE "Sector" IS NOT NULL
-              AND TRIM("Sector") != ''
+              AND "Sector" <> ''
             ORDER BY "Sector" ASC
         """)
 
         rows = cursor.fetchall()
-        return [row["Sector"] for row in rows]
+
+        return [
+            row["Sector"]
+            for row in rows
+            if row["Sector"] and str(row["Sector"]).strip()
+        ]
 
     except Exception as e:
         print(f"[ERROR] /sectors -> {type(e).__name__}: {e}")
-        return safe_server_error_message()
+        return []
 
     finally:
         if conn:
             conn.close()
-
 
 @app.get("/security-types")
 def get_security_types():

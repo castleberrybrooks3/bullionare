@@ -10,6 +10,8 @@ import SupplyChain from "../SupplyChain";
 import HiddenPairs from "../HiddenPairs";
 import MarketOutlook from "../MarketOutlook";
 import Feedback from "../Feedback";
+import Strategies from "../Strategies";
+import News from "../News";
 import logo from "../assets/logo.png";
 
 export default function Dashboard() {
@@ -279,26 +281,48 @@ export default function Dashboard() {
             </div>
 
             <div
-              className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
-              onClick={() => {
-                navigate("/dashboard");
-                setActiveMenu("Watchlist");
-                setSectorOpen(false);
-              }}
-            >
-              Watchlist
-            </div>
+  className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
+  onClick={() => {
+    navigate("/dashboard");
+    setActiveMenu("Watchlist");
+    setSectorOpen(false);
+  }}
+>
+  Watchlist
+</div>
 
-            <div
-              className={`sidebar-item ${activeMenu === "Feedback" ? "active" : ""}`}
-              onClick={() => {
-                navigate("/dashboard");
-                setActiveMenu("Feedback");
-                setSectorOpen(false);
-              }}
-            >
-              Feedback
-            </div>
+<div
+  className={`sidebar-item ${activeMenu === "Strategies" ? "active" : ""}`}
+  onClick={() => {
+    navigate("/dashboard");
+    setActiveMenu("Strategies");
+    setSectorOpen(false);
+  }}
+>
+  Strategies
+</div>
+
+<div
+  className={`sidebar-item ${activeMenu === "News" ? "active" : ""}`}
+  onClick={() => {
+    navigate("/dashboard");
+    setActiveMenu("News");
+    setSectorOpen(false);
+  }}
+>
+  News
+</div>
+
+<div
+  className={`sidebar-item ${activeMenu === "Feedback" ? "active" : ""}`}
+  onClick={() => {
+    navigate("/dashboard");
+    setActiveMenu("Feedback");
+    setSectorOpen(false);
+  }}
+>
+  Feedback
+</div>
           </nav>
 
           {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
@@ -320,9 +344,13 @@ export default function Dashboard() {
             <HiddenPairs />
           ) : activeMenu === "MarketOutlook" ? (
             <MarketOutlook />
-          ) : activeMenu === "Feedback" ? (
-            <Feedback />
-          ) : (
+          ) : activeMenu === "Strategies" ? (
+  <Strategies />
+) : activeMenu === "News" ? (
+  <News />
+) : activeMenu === "Feedback" ? (
+  <Feedback />
+) : (
             <StockTable
               view={activeMenu}
               selectedSector={selectedSector}

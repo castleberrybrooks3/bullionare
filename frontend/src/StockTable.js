@@ -48,6 +48,50 @@ if (!user) return;
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
+const metricTooltips = {
+  "Day Volume": "The number of shares traded during the current trading day.",
+  "Market Cap": "The total market value of the company. Calculated as share price times shares outstanding.",
+  "EPS (TTM)": "Earnings per share over the trailing twelve months. A profitability measure showing earnings for each share.",
+  "P/E (TTM)": "Price-to-earnings ratio over the trailing twelve months. Shows how much investors pay for each dollar of earnings.",
+  "Beta": "Measures how volatile the stock is compared to the overall market. Above 1 means more volatile than the market.",
+  "EBITDA": "Earnings before interest, taxes, depreciation, and amortization. Often used to compare operating performance.",
+  "Short % of Float": "The percentage of tradable shares currently sold short. A high value may suggest bearish sentiment or short-squeeze potential.",
+  "Gross Profit": "Revenue minus the direct cost of goods sold. Shows how much money remains after production costs.",
+  "Dividend Yield": "Annual dividend income as a percentage of the stock price.",
+  "Analyst Upside": "The estimated percentage upside from the current price to the average analyst price target.",
+  "Analyst Downside": "The estimated percentage downside from the current price to the lower analyst target estimate.",
+  "Number of Analysts": "The number of analysts included in the available price target data.",
+  "Mean Target": "The average analyst price target for the stock.",
+  "RSI": "Relative Strength Index. A momentum indicator where below 30 may suggest oversold and above 70 may suggest overbought.",
+  "MACD": "Moving Average Convergence Divergence. A momentum indicator comparing short-term and long-term price trends.",
+  "MACD Signal": "A smoothed version of MACD. Traders often watch for MACD crossing above or below this line.",
+  "MACD Histogram": "The difference between MACD and the signal line. It helps show whether momentum is strengthening or weakening.",
+  "SMA 20": "The stock's average closing price over the last 20 trading days. Used to identify short-term trend direction.",
+  "Sector": "The broad industry group the company belongs to.",
+  "Latest Dividend Amount": "The most recent dividend payment amount per share.",
+  "Latest Ex-Dividend Date": "The date by which an investor must own the stock to receive the latest dividend.",
+  "Latest Pay Date": "The date the latest dividend is scheduled to be paid.",
+  "Dividend Frequency": "How often the company typically pays dividends.",
+  "Latest 10-K Date": "The filing date of the company's latest annual 10-K report.",
+  "Latest 10-K URL": "A link to the company's latest annual 10-K filing.",
+  "Latest 10-Q Date": "The filing date of the company's latest quarterly 10-Q report.",
+  "Latest 10-Q URL": "A link to the company's latest quarterly 10-Q filing.",
+  "Last Updated": "The last time this stock's data was updated in Bullionaire.",
+};
+const typeTooltips = {
+  CS: "Common Stock",
+  ADRC: "American Depositary Receipt",
+  ETF: "Exchange-Traded Fund",
+  ETN: "Exchange-Traded Note",
+  ETS: "Exchange-Traded Security",
+  ETV: "Exchange-Traded Vehicle",
+  FUND: "Fund",
+  PFD: "Preferred Stock",
+  RIGHT: "Stock Purchase Right",
+  SP: "Structured Product",
+  UNIT: "Unit",
+  WARRANT: "Warrant",
+};
 const StockTable = ({
   view,
   selectedSector,
@@ -1415,15 +1459,7 @@ const technicalsColumns = [
   pinned: "left",
   sortable: true,
   filter: view === "Watchlist" ? "agTextColumnFilter" : false,
-  tooltipValueGetter: (params) => {
-    const name = params.data?.["Company Name"] || "";
-    const description = params.data?.["Description"] || "";
 
-    if (name && description) return `${name}\n\n${description}`;
-    if (name) return name;
-    if (description) return description;
-    return "";
-  },
   filterParams: {
     buttons: ["reset"],
     debounceMs: 200,
@@ -1538,14 +1574,27 @@ const technicalsColumns = [
   })
   .forEach((col) => {
       const columnDef = {
-        headerName: col,
-        field: col,
-        sortable: true,
-        flex: 1,
-        minWidth: 130,
-        headerClass: "column-border",
-        cellClass: "column-border",
-        valueGetter: (params) => {
+  headerName: col,
+  headerTooltip: metricTooltips[col],
+  field: col,
+  sortable: true,
+  flex: 1,
+  minWidth: 130,
+  headerClass: "column-border",
+  cellClass: "column-border",
+
+  tooltipValueGetter:
+    col === "Type"
+      ? (params) => {
+          const raw = (params.value || params.data?.["Type"] || "")
+            .toString()
+            .toUpperCase();
+
+          return typeTooltips[raw] || raw;
+        }
+      : undefined,
+
+  valueGetter: (params) => {
   if (["Market Cap", "Day Volume", "EBITDA", "Gross Profit"].includes(col)) {
     return parseLargeNumber(params.data[col]);
   }
@@ -1556,18 +1605,7 @@ const technicalsColumns = [
 
   return params.data[col];
 },
-        tooltipValueGetter:
-          col === "Type"
-            ? (params) => {
-                const raw = (params.data?.["Type"] || "").toString().toUpperCase();
-                if (raw === "CS") return "Stock";
-                if (raw === "ETF") return "ETF";
-                if (raw === "ETP") return "ETP";
-                if (raw === "ADRC") return "ADR";
-                if (raw === "PFD") return "Preferred Stock";
-                return raw || "";
-              }
-            : undefined,
+
         valueFormatter: (params) => {
           const val = params.value;
 

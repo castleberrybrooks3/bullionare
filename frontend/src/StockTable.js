@@ -1460,6 +1460,16 @@ const technicalsColumns = [
   sortable: true,
   filter: view === "Watchlist" ? "agTextColumnFilter" : false,
 
+    tooltipValueGetter: (params) => {
+    const name = params.data?.["Company Name"] || "";
+    const description = params.data?.["Description"] || "";
+
+    if (name && description) return `${name}\n\n${description}`;
+    if (name) return name;
+    if (description) return description;
+    return "";
+  },
+
   filterParams: {
     buttons: ["reset"],
     debounceMs: 200,

@@ -14,50 +14,26 @@ export default function MarketOutlook() {
     ? "http://localhost:8000"
     : process.env.REACT_APP_API_BASE;
 
-  useEffect(() => {
+ useEffect(() => {
     const fetchOutlookData = async () => {
       try {
-        const [
-          gainersRes,
-          losersRes,
-          gainersAbove5Res,
-          losersAbove5Res,
-          breadthRes,
-          summaryRes
-        ] = await Promise.all([
-          fetch(
-            `${API_BASE}/stocks?page=1&page_size=10&security_type=CS&sort_by=Today%20Change%20%25&sort_order=desc`
-          ),
-          fetch(
-            `${API_BASE}/stocks?page=1&page_size=10&security_type=CS&sort_by=Today%20Change%20%25&sort_order=asc&min_price=0.12`
-          ),
-          fetch(
-            `${API_BASE}/stocks?page=1&page_size=10&security_type=CS&sort_by=Today%20Change%20%25&sort_order=desc&min_price=5`
-          ),
-          fetch(
-            `${API_BASE}/stocks?page=1&page_size=10&security_type=CS&sort_by=Today%20Change%20%25&sort_order=asc&min_price=5`
-          ),
-          fetch(`${API_BASE}/market-breadth`),
-          fetch(`${API_BASE}/market-summary`)
-        ]);
+        const outlookRes = await fetch(`${API_BASE}/market-outlook-snapshot`);
+        const outlookData = await outlookRes.json();
 
-        const gainersData = await gainersRes.json();
-        const losersData = await losersRes.json();
-        const gainersAbove5Data = await gainersAbove5Res.json();
-        const losersAbove5Data = await losersAbove5Res.json();
-        const breadthData = await breadthRes.json();
-        const summaryData = await summaryRes.json();
+        if (outlookData?.error) {
+          throw new Error(outlookData.error);
+        }
 
-        setGainers(Array.isArray(gainersData?.rows) ? gainersData.rows : []);
-        setLosers(Array.isArray(losersData?.rows) ? losersData.rows : []);
+        setGainers(Array.isArray(outlookData?.gainers) ? outlookData.gainers : []);
+        setLosers(Array.isArray(outlookData?.losers) ? outlookData.losers : []);
         setGainersAbove5(
-          Array.isArray(gainersAbove5Data?.rows) ? gainersAbove5Data.rows : []
+          Array.isArray(outlookData?.gainersAbove5) ? outlookData.gainersAbove5 : []
         );
         setLosersAbove5(
-          Array.isArray(losersAbove5Data?.rows) ? losersAbove5Data.rows : []
+          Array.isArray(outlookData?.losersAbove5) ? outlookData.losersAbove5 : []
         );
-        setBreadth(breadthData && !breadthData.error ? breadthData : null);
-        setMarketSummary(summaryData && !summaryData.error ? summaryData : {});
+        setBreadth(outlookData?.breadth || null);
+        setMarketSummary(outlookData?.marketSummary || {});
       } catch (err) {
         console.error("Failed to load market outlook", err);
         setGainers([]);

@@ -42,6 +42,9 @@ SPARKLINES_RATE_LIMIT = (180, 60)   # 180 requests per 60 seconds per IP
 CHART_RATE_LIMIT = (240, 60)        # 240 requests per 60 seconds per IP
 BACKTEST_RATE_LIMIT = (120, 60)  # 120 backtests per minute per IP
 
+CHART_CACHE = {}
+CHART_CACHE_LOCK = threading.Lock()
+CHART_CACHE_TTL_SECONDS = 60 * 15
 
 class StrategyPosition(BaseModel):
     ticker: str
@@ -133,6 +136,14 @@ def get_polygon_json(path: str, params: Optional[dict] = None, timeout: int = 20
         return response.json()
     except Exception as e:
         print(f"[POLYGON ERROR] {url} -> {e}")
+        return None
+
+def safe_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
         return None
 
 
@@ -300,6 +311,30 @@ def fetch_chart_data(ticker: str, range_key: str):
         "range": range_key,
         "points": points,
     }
+def fetch_chart_data_cached(ticker: str, range_key: str):
+    cache_key = f"{ticker.upper()}:{range_key}"
+    now = time.time()
+
+    with CHART_CACHE_LOCK:
+        cached = CHART_CACHE.get(cache_key)
+
+        if cached:
+            cached_time = cached.get("time", 0)
+            cached_data = cached.get("data")
+
+            if cached_data and now - cached_time < CHART_CACHE_TTL_SECONDS:
+                return cached_data
+
+    data = fetch_chart_data(ticker.upper(), range_key)
+
+    if data and data.get("points"):
+        with CHART_CACHE_LOCK:
+            CHART_CACHE[cache_key] = {
+                "time": now,
+                "data": data,
+            }
+
+    return data
 
 def normalize_chart_points(chart_response):
     points = chart_response.get("points", []) if isinstance(chart_response, dict) else []
@@ -937,7 +972,7 @@ def backtest_strategy(request: Request, payload: BacktestRequest):
 
         with ThreadPoolExecutor(max_workers=min(8, len(tickers_to_fetch))) as executor:
             futures = {
-                executor.submit(fetch_chart_data, ticker, range_key): ticker
+                executor.submit(fetch_chart_data_cached, ticker, range_key): ticker
                 for ticker in tickers_to_fetch
             }
 
@@ -1113,7 +1148,7 @@ def get_stock_chart(request: Request, ticker: str, range: str = Query("1D")):
         if is_route_rate_limited(request, "stocks_chart", *CHART_RATE_LIMIT):
             return {"error": "Too many requests. Please slow down and try again shortly."}
 
-        return fetch_chart_data(ticker.upper(), range)
+        return fetch_chart_data_cached(ticker.upper(), range)
     except Exception as e:
         print(f"[ERROR] /stocks/{ticker}/chart -> {type(e).__name__}: {e}")
         return safe_server_error_message()
@@ -1335,6 +1370,223 @@ def get_sector_performance():
 
     except Exception as e:
         print(f"[ERROR] /sector-performance -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+    finally:
+        if conn:
+            conn.close()
+
+@app.get("/market-outlook-snapshot")
+def get_market_outlook_snapshot():
+    conn = None
+
+    try:
+        snapshot = get_polygon_json(
+            "/v2/snapshot/locale/us/markets/stocks/tickers",
+            {"include_otc": "false"},
+            timeout=60,
+        )
+
+        if not snapshot or not snapshot.get("tickers"):
+            return {"error": "Snapshot data unavailable."}
+
+        snapshot_items = snapshot.get("tickers", [])
+
+        tickers = [
+            item.get("ticker")
+            for item in snapshot_items
+            if item.get("ticker")
+        ]
+
+        ticker_meta = {}
+
+        if tickers:
+            conn = get_db_connection_dict()
+            cursor = conn.cursor()
+
+            for i in range(0, len(tickers), 1000):
+                batch = tickers[i:i + 1000]
+                placeholders = ",".join(["%s"] * len(batch))
+
+                cursor.execute(f"""
+                    SELECT
+                        "Ticker",
+                        "Company Name",
+                        "Description",
+                        "Type",
+                        "Sector",
+                        "Market Cap"
+                    FROM stocks
+                    WHERE "Ticker" IN ({placeholders})
+                """, batch)
+
+                rows = cursor.fetchall()
+
+                for row in rows:
+                    ticker_meta[row["Ticker"]] = {
+                        "Company Name": row.get("Company Name"),
+                        "Description": row.get("Description"),
+                        "Type": row.get("Type"),
+                        "Sector": row.get("Sector"),
+                        "Market Cap": row.get("Market Cap"),
+                    }
+
+        market_rows = []
+
+        for item in snapshot_items:
+            ticker = item.get("ticker")
+            if not ticker:
+                continue
+
+            meta = ticker_meta.get(ticker, {})
+
+            if str(meta.get("Type", "")).upper() != "CS":
+                continue
+
+            day = item.get("day", {}) or {}
+            prev_day = item.get("prevDay", {}) or {}
+            min_bar = item.get("min", {}) or {}
+            last_trade = item.get("lastTrade", {}) or {}
+
+            current_price = (
+                safe_float(last_trade.get("p"))
+                or safe_float(min_bar.get("c"))
+                or safe_float(day.get("c"))
+                or safe_float(prev_day.get("c"))
+            )
+
+            change_pct = safe_float(item.get("todaysChangePerc"))
+
+            if current_price is None or change_pct is None:
+                continue
+
+            market_rows.append({
+                "Ticker": ticker,
+                "Company Name": meta.get("Company Name"),
+                "Description": meta.get("Description"),
+                "Type": meta.get("Type"),
+                "Sector": meta.get("Sector"),
+                "Market Cap": meta.get("Market Cap"),
+                "Current Price": current_price,
+                "Previous Close": safe_float(prev_day.get("c")),
+                "Day Open": safe_float(day.get("o")),
+                "Day High": safe_float(day.get("h")),
+                "Day Low": safe_float(day.get("l")),
+                "Day Volume": safe_float(day.get("v")),
+                "Today Change %": change_pct,
+            })
+
+        gainers = sorted(
+            market_rows,
+            key=lambda row: row["Today Change %"],
+            reverse=True
+        )[:10]
+
+        losers = sorted(
+            market_rows,
+            key=lambda row: row["Today Change %"]
+        )[:10]
+
+        gainers_above_5 = sorted(
+            [row for row in market_rows if row["Current Price"] >= 5],
+            key=lambda row: row["Today Change %"],
+            reverse=True
+        )[:10]
+
+        losers_above_5 = sorted(
+            [row for row in market_rows if row["Current Price"] >= 5],
+            key=lambda row: row["Today Change %"]
+        )[:10]
+
+        buckets = {
+            "<-10%": 0,
+            "-10% to -5%": 0,
+            "-5% to -2%": 0,
+            "-2% to 0%": 0,
+            "0%": 0,
+            "0% to 2%": 0,
+            "2% to 5%": 0,
+            "5% to 10%": 0,
+            ">10%": 0,
+        }
+
+        advancers = 0
+        decliners = 0
+        unchanged = 0
+
+        for row in market_rows:
+            value = row["Today Change %"]
+
+            if value < 0:
+                decliners += 1
+            elif value > 0:
+                advancers += 1
+            else:
+                unchanged += 1
+
+            if value < -10:
+                buckets["<-10%"] += 1
+            elif value < -5:
+                buckets["-10% to -5%"] += 1
+            elif value < -2:
+                buckets["-5% to -2%"] += 1
+            elif value < 0:
+                buckets["-2% to 0%"] += 1
+            elif value == 0:
+                buckets["0%"] += 1
+            elif value <= 2:
+                buckets["0% to 2%"] += 1
+            elif value <= 5:
+                buckets["2% to 5%"] += 1
+            elif value <= 10:
+                buckets["5% to 10%"] += 1
+            else:
+                buckets[">10%"] += 1
+
+        summary_tickers = {"SPY", "QQQ", "DIA", "IBIT", "USO", "GLD", "VIXY"}
+        market_summary = {}
+
+        for item in snapshot_items:
+            ticker = item.get("ticker")
+
+            if ticker not in summary_tickers:
+                continue
+
+            day = item.get("day", {}) or {}
+            prev_day = item.get("prevDay", {}) or {}
+            min_bar = item.get("min", {}) or {}
+            last_trade = item.get("lastTrade", {}) or {}
+
+            current_price = (
+                safe_float(last_trade.get("p"))
+                or safe_float(min_bar.get("c"))
+                or safe_float(day.get("c"))
+                or safe_float(prev_day.get("c"))
+            )
+
+            market_summary[ticker] = {
+                "price": current_price,
+                "change": safe_float(item.get("todaysChangePerc")),
+            }
+
+        return {
+            "gainers": gainers,
+            "losers": losers,
+            "gainersAbove5": gainers_above_5,
+            "losersAbove5": losers_above_5,
+            "breadth": {
+                "buckets": buckets,
+                "advancers": advancers,
+                "decliners": decliners,
+                "unchanged": unchanged,
+                "total": len(market_rows),
+            },
+            "marketSummary": market_summary,
+            "source": "polygon_snapshot",
+        }
+
+    except Exception as e:
+        print(f"[ERROR] /market-outlook-snapshot -> {type(e).__name__}: {e}")
         return safe_server_error_message()
 
     finally:

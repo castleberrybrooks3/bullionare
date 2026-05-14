@@ -133,6 +133,7 @@ const sparklineBackgroundLoadStartedRef = useRef(false);
 const loadingWatchlistsRef = useRef(false);
 const livePriceCacheRef = useRef({});
 const LIVE_PRICE_CACHE_MS = 2 * 60 * 1000;
+const PRELOADED_DASHBOARD_CACHE_MS = 2 * 60 * 1000;
 
 const [chartModalOpen, setChartModalOpen] = useState(false);
 const [chartTicker, setChartTicker] = useState(null);
@@ -998,6 +999,35 @@ const buildBaseQueryParams = () => {
 
   return queryParams;
 };
+
+const getPreloadedDashboardRows = () => {
+  try {
+    const raw = localStorage.getItem("bullionaire_preloaded_dashboard_rows");
+    if (!raw) return null;
+
+    const cached = JSON.parse(raw);
+
+    if (!cached?.time || !cached?.data) return null;
+
+    const isFresh = Date.now() - cached.time < PRELOADED_DASHBOARD_CACHE_MS;
+    if (!isFresh) return null;
+
+    const rows = Array.isArray(cached.data?.rows) ? cached.data.rows : [];
+
+    if (!rows.length) return null;
+
+    return {
+      rows,
+      total: typeof cached.data.total === "number" ? cached.data.total : rows.length,
+      totalPages:
+        typeof cached.data.total_pages === "number" ? cached.data.total_pages : 1,
+    };
+  } catch (err) {
+    localStorage.removeItem("bullionaire_preloaded_dashboard_rows");
+    return null;
+  }
+};
+
 const saveScrollPosition = () => {
   const topScroll = document.querySelector(".top-scrollbar");
   const gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
@@ -1148,6 +1178,38 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
     setIsBackgroundLoading(false);
 
     const baseParams = buildBaseQueryParams();
+
+    const isDefaultDashboardRequest =
+      view !== "Watchlist" &&
+      !searchQuery?.trim() &&
+      !selectedSector &&
+      !selectedType &&
+      !selectedTickers?.length &&
+      !tickerFilter &&
+      !tickersParam &&
+      Object.keys(backendFilterModel || {}).length === 0;
+
+    if (isDefaultDashboardRequest) {
+      const preloaded = getPreloadedDashboardRows();
+
+      if (preloaded?.rows?.length) {
+        const initialCache = { 1: preloaded.rows };
+
+        setPageCache(initialCache);
+        setStocks(preloaded.rows);
+        restoreScrollPosition();
+        setDisplayedCount(preloaded.total);
+        setTotalPages(preloaded.totalPages);
+        setCurrentPage(1);
+        setLoading(false);
+
+        mergeLivePricesIntoRows(preloaded.rows).then((rowsWithLivePrices) => {
+          setPageCache((prev) => ({ ...prev, 1: rowsWithLivePrices }));
+          setStocks(rowsWithLivePrices);
+          localStorage.setItem("stocks", JSON.stringify(rowsWithLivePrices));
+        });
+      }
+    }
 
     // Load page 1 immediately
     const firstParams = new URLSearchParams(baseParams);
@@ -1408,7 +1470,7 @@ const technicalsColumns = [
   const columns = useMemo(() => {
     const cols = [
       {
-        headerName: "★",
+        headerName: "Save",
         colId: "star",
         field: "star",
         width: 60,
@@ -1915,6 +1977,9 @@ if (!user) return;
 
   const chartPerformance = getChartPerformance(chartData);
 
+  const shouldShowFullLoadingOverlay = loading && rowData.length === 0;
+  const shouldShowSmallRefreshNotice = loading && rowData.length > 0;
+
   return (
     <div className="stock-table-container">
       {showControls && (
@@ -2172,7 +2237,7 @@ setActiveList("Default");
 
       {showTable && (
   <div style={{ position: "relative" }}>
-    {loading && (
+    {shouldShowFullLoadingOverlay && (
       <div
         className="loading-container"
         style={{
@@ -2188,6 +2253,38 @@ setActiveList("Default");
       >
         <div className="spinner"></div>
         Loading stocks...
+      </div>
+    )}
+
+    {shouldShowSmallRefreshNotice && (
+      <div
+        style={{
+          position: "absolute",
+          top: "10px",
+          right: "14px",
+          zIndex: 25,
+          background: "rgba(15, 23, 42, 0.92)",
+          color: "#cbd5e1",
+          border: "1px solid rgba(255, 255, 255, 0.12)",
+          borderRadius: "999px",
+          padding: "6px 12px",
+          fontSize: "12px",
+          fontWeight: 700,
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+        }}
+      >
+        <span
+          style={{
+            width: "8px",
+            height: "8px",
+            borderRadius: "999px",
+            background: "#19C37D",
+            display: "inline-block",
+          }}
+        />
+        Refreshing data...
       </div>
     )}
 

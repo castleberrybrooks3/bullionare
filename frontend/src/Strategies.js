@@ -1,9 +1,15 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
 
-const API_BASE = "http://localhost:8000";
+const API_BASE =
+  process.env.NODE_ENV === "development"
+    ? "http://localhost:8000"
+    : process.env.REACT_APP_API_BASE;
 
 const RANGES = ["1D", "5D", "1M", "6M", "1Y", "5Y"];
+
+const BENCHMARK_CHART_CACHE = {};
+const BENCHMARK_CACHE_TTL_MS = 1000 * 60 * 15;
 
 const DEFAULT_ACTIVE_STRATEGIES = [
   {
@@ -1111,6 +1117,7 @@ const [openStrategyMenu, setOpenStrategyMenu] = useState(null);
   const [mode, setMode] = useState("strategy");
   const [backtest, setBacktest] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [benchmarkLoading, setBenchmarkLoading] = useState(true);
   const [hoverIndex, setHoverIndex] = useState(null);
   const [spyData, setSpyData] = useState([]);
   const [backtestError, setBacktestError] = useState("");
@@ -1258,10 +1265,63 @@ if (seededActiveStrategies.length > 0) {
 }, []);
 
   useEffect(() => {
-  const fetchSpyChart = async () => {
+  let cancelled = false;
+
+  const fetchBenchmarkChart = async () => {
+    const cleanBenchmark = (benchmark || "SPY").trim().toUpperCase();
+    const cacheKey = `${cleanBenchmark}:${range}`;
+    const now = Date.now();
+
     try {
-      const res = await fetch(`${API_BASE}/stocks/${benchmark}/chart?range=${range}`);
+      setBenchmarkLoading(true);
+
+      const memoryCached = BENCHMARK_CHART_CACHE[cacheKey];
+
+      if (
+        memoryCached &&
+        Array.isArray(memoryCached.data) &&
+        now - memoryCached.time < BENCHMARK_CACHE_TTL_MS
+      ) {
+        setSpyData(memoryCached.data);
+        setBenchmarkLoading(false);
+        return;
+      }
+
+      const localStorageKey = `bullionaire_benchmark_chart_${cacheKey}`;
+      const savedCachedRaw = localStorage.getItem(localStorageKey);
+
+      if (savedCachedRaw) {
+        try {
+          const savedCached = JSON.parse(savedCachedRaw);
+
+          if (
+            savedCached &&
+            Array.isArray(savedCached.data) &&
+            now - savedCached.time < BENCHMARK_CACHE_TTL_MS
+          ) {
+            BENCHMARK_CHART_CACHE[cacheKey] = savedCached;
+
+            if (!cancelled) {
+              setSpyData(savedCached.data);
+              setBenchmarkLoading(false);
+            }
+
+            return;
+          }
+        } catch (cacheErr) {
+          localStorage.removeItem(localStorageKey);
+        }
+      }
+
+      const res = await fetch(
+        `${API_BASE}/stocks/${cleanBenchmark}/chart?range=${range}`
+      );
+
       const data = await res.json();
+
+      if (!res.ok || data?.error) {
+        throw new Error(data?.error || "Failed to load benchmark chart.");
+      }
 
       const parsedData = Array.isArray(data)
         ? data
@@ -1272,14 +1332,35 @@ if (seededActiveStrategies.length > 0) {
           data.prices ||
           [];
 
-      setSpyData(parsedData);
+      if (!cancelled) {
+        setSpyData(parsedData);
+      }
+
+      const cacheValue = {
+        time: Date.now(),
+        data: parsedData,
+      };
+
+      BENCHMARK_CHART_CACHE[cacheKey] = cacheValue;
+      localStorage.setItem(localStorageKey, JSON.stringify(cacheValue));
     } catch (err) {
       console.error("Failed to load benchmark chart", err);
-      setSpyData([]);
+
+      if (!cancelled) {
+        setSpyData([]);
+      }
+    } finally {
+      if (!cancelled) {
+        setBenchmarkLoading(false);
+      }
     }
   };
 
-  fetchSpyChart();
+  fetchBenchmarkChart();
+
+  return () => {
+    cancelled = true;
+  };
 }, [benchmark, range]);
 
   const getPrice = (point) => {
@@ -2306,29 +2387,41 @@ setBacktestError("");
   const runBacktest = async () => {
     try {
       setLoading(true);
-setHoverIndex(null);
-setBacktestError("");
-setHoldingAttribution(null);
+      setHoverIndex(null);
+      setBacktestError("");
+      setHoldingAttribution(null);
 
-      let cleanPositions = positions
-  .filter((p) => p.ticker.trim() && Number(p.weight) !== 0)
-  .map((p) => ({
-    ticker: p.ticker.trim().toUpperCase(),
-    weight: Number(p.weight),
-  }));
+      const cleanPositions = positions
+        .filter((p) => p.ticker.trim() && Number(p.weight) !== 0)
+        .map((p) => ({
+          ticker: p.ticker.trim().toUpperCase(),
+          weight: Number(p.weight),
+        }));
 
-if (mode === "portfolio") {
-  const positiveTotal = cleanPositions
-    .filter((p) => p.weight > 0)
-    .reduce((sum, p) => sum + p.weight, 0);
+      if (!cleanPositions.length) {
+        setBacktest(null);
+        setBacktestError("Add at least one ticker before running a backtest.");
+        return;
+      }
 
-  cleanPositions = cleanPositions
-    .filter((p) => p.weight > 0)
-    .map((p) => ({
-      ...p,
-      weight: positiveTotal ? (p.weight / positiveTotal) * 100 : 0,
-    }));
-}
+      if (mode === "portfolio") {
+        const grossAllocation = cleanPositions.reduce(
+          (sum, p) => sum + Math.abs(Number(p.weight) || 0),
+          0
+        );
+
+        const roundedGrossAllocation = Math.round(grossAllocation * 100) / 100;
+
+        if (Math.abs(grossAllocation - 100) > 0.01) {
+          setBacktest(null);
+          setHoldingAttribution(null);
+          setHasRunBacktest(false);
+          setBacktestError(
+            `Portfolio Mode requires 100% total allocation. Current allocation is ${roundedGrossAllocation}%. Adjust weights or switch to Strategy Mode.`
+          );
+          return;
+        }
+      }
 
       const res = await fetch(`${API_BASE}/backtest-strategy`, {
         method: "POST",
@@ -2344,21 +2437,21 @@ if (mode === "portfolio") {
 
       const data = await res.json();
 
-if (!res.ok || data.error || data.detail) {
-  const message = data.detail || data.error || "Backtest failed.";
-  console.error("Backtest error:", data);
-  setBacktest(null);
-  setBacktestError(message);
-  return;
-  }
+      if (!res.ok || data.error || data.detail) {
+        const message = data.detail || data.error || "Backtest failed.";
+        console.error("Backtest error:", data);
+        setBacktest(null);
+        setBacktestError(message);
+        return;
+      }
 
-  setBacktest(data);
-setHoldingAttribution(data.holdingAttribution || null);
-setHasRunBacktest(true);
+      setBacktest(data);
+      setHoldingAttribution(data.holdingAttribution || null);
+      setHasRunBacktest(true);
     } catch (err) {
       console.error("Failed to run backtest", err);
-setBacktest(null);
-setBacktestError("Failed to connect to the backtest server.");
+      setBacktest(null);
+      setBacktestError("Failed to connect to the backtest server.");
     } finally {
       setLoading(false);
     }
@@ -2782,7 +2875,24 @@ const benchmarkDisplayedReturn =
           >
             + Add Position
           </button>
-
+{mode === "portfolio" && Math.abs(exposureStats.grossExposure - 100) > 0.01 && (
+  <div
+    style={{
+      background: "rgba(239, 68, 68, 0.12)",
+      border: "1px solid rgba(239, 68, 68, 0.35)",
+      color: "#fecaca",
+      borderRadius: "10px",
+      padding: "10px 12px",
+      fontSize: "13px",
+      fontWeight: 700,
+      marginBottom: "10px",
+    }}
+  >
+    Portfolio Mode requires 100% total allocation. Current allocation is{" "}
+    {exposureStats.grossExposure.toFixed(2)}%. Adjust weights or switch to
+    Strategy Mode.
+  </div>
+)}
           <button
             onClick={runBacktest}
             disabled={loading}
@@ -3087,6 +3197,16 @@ const benchmarkDisplayedReturn =
               <div style={{ color: "#ef4444", fontWeight: 800 }}>
                 {backtestError}
               </div>
+            ) : benchmarkLoading && !benchmarkSvgPoints ? (
+              <div
+                style={{
+                  color: "#9ca3af",
+                  fontSize: "15px",
+                  fontWeight: 700,
+                }}
+              >
+                Loading {benchmark || "SPY"} benchmark line...
+              </div>
             ) : benchmarkSvgPoints ? (
               <>
                 <svg
@@ -3206,7 +3326,7 @@ const benchmarkDisplayedReturn =
               </>
             ) : (
               <div style={{ color: "#9ca3af" }}>
-                Choose a preset or build a strategy, then run a backtest.
+                Benchmark chart unavailable. Try refreshing or changing the range.
               </div>
             )}
           </div>

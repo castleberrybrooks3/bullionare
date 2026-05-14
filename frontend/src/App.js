@@ -101,6 +101,47 @@ function AppContent() {
     return () => window.removeEventListener("resize", checkMobile);
   }, []);
 
+  useEffect(() => {
+    const API_BASE =
+      process.env.NODE_ENV === "development"
+        ? "http://localhost:8000"
+        : process.env.REACT_APP_API_BASE;
+
+    const preloadBullionaireData = async () => {
+      try {
+        const dashboardRowsUrl =
+          `${API_BASE}/stocks?page=1&page_size=100&sort_by=Market%20Cap&sort_order=desc`;
+
+        const marketOutlookUrl = `${API_BASE}/market-outlook-snapshot`;
+        const spyChartUrl = `${API_BASE}/stocks/SPY/chart?range=1Y`;
+        const sectorsUrl = `${API_BASE}/sector-performance`;
+
+        const [dashboardRowsRes] = await Promise.all([
+          fetch(dashboardRowsUrl),
+          fetch(marketOutlookUrl).catch(() => null),
+          fetch(spyChartUrl).catch(() => null),
+          fetch(sectorsUrl).catch(() => null),
+        ]);
+
+        if (dashboardRowsRes && dashboardRowsRes.ok) {
+          const dashboardRowsData = await dashboardRowsRes.json();
+
+          localStorage.setItem(
+            "bullionaire_preloaded_dashboard_rows",
+            JSON.stringify({
+              time: Date.now(),
+              data: dashboardRowsData,
+            })
+          );
+        }
+      } catch (err) {
+        console.warn("Bullionaire preload failed:", err);
+      }
+    };
+
+    preloadBullionaireData();
+  }, []);
+
   return (
     <>
       <PageTracker />

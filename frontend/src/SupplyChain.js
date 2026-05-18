@@ -281,13 +281,75 @@ function normalizeToGraph(data) {
   return { nodes: [], edges: [], root: null, name: data?.name || "" };
 }
 
-export default function SupplyChain() {
+export default function SupplyChain({ onBuildStrategy }) {
   const [selectedCompany, setSelectedCompany] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
 
   const handleTickerClick = (ticker) => {
     if (!ticker) return;
     window.location.href = `/dashboard?tickers=${ticker}`;
+  };
+
+  const handleBuildSupplyChainStrategy = () => {
+    if (!selectedCompany || !selectedData || !onBuildStrategy) return;
+
+    const normalized = normalizeToGraph(selectedData);
+    const allTickers = (normalized.nodes || [])
+      .map((node) => node.ticker)
+      .filter(Boolean)
+      .map((ticker) => String(ticker).trim().toUpperCase());
+
+    const uniqueTickers = [...new Set(allTickers)];
+
+    if (!uniqueTickers.length) return;
+
+    const rootTicker = String(selectedCompany).trim().toUpperCase();
+
+    let positions = [];
+
+    if (uniqueTickers.includes(rootTicker) && uniqueTickers.length > 1) {
+      const satelliteTickers = uniqueTickers.filter((ticker) => ticker !== rootTicker);
+      const satelliteWeight = 65 / satelliteTickers.length;
+
+      positions = [
+        { ticker: rootTicker, weight: 35 },
+        ...satelliteTickers.map((ticker, index) => {
+          const isLast = index === satelliteTickers.length - 1;
+          const roundedWeight = Number(satelliteWeight.toFixed(2));
+          const usedWeight = isLast
+            ? Number((65 - roundedWeight * (satelliteTickers.length - 1)).toFixed(2))
+            : roundedWeight;
+
+          return {
+            ticker,
+            weight: usedWeight,
+          };
+        }),
+      ];
+    } else {
+      const equalWeight = 100 / uniqueTickers.length;
+      const roundedWeight = Number(equalWeight.toFixed(2));
+
+      positions = uniqueTickers.map((ticker, index) => {
+        const isLast = index === uniqueTickers.length - 1;
+        const usedWeight = isLast
+          ? Number((100 - roundedWeight * (uniqueTickers.length - 1)).toFixed(2))
+          : roundedWeight;
+
+        return {
+          ticker,
+          weight: usedWeight,
+        };
+      });
+    }
+
+    onBuildStrategy({
+      name: `${selectedData?.name || selectedCompany} Supply Chain Basket`,
+      mode: "portfolio",
+      source: "Supply Chain",
+      notes: `Generated from Supply Chain map for ${selectedData?.name || selectedCompany}.`,
+      positions,
+    });
   };
 
   const filteredCompanies = companies.filter((ticker) => {
@@ -401,7 +463,7 @@ export default function SupplyChain() {
             {selectedData?.name || selectedCompany}
           </h1>
 
-          <div
+           <div
             style={{
               textAlign: "center",
               opacity: 0.7,
@@ -409,6 +471,23 @@ export default function SupplyChain() {
             }}
           >
             {selectedCompany}
+          </div>
+
+          <div style={{ textAlign: "center", marginBottom: "20px" }}>
+            <button
+              onClick={handleBuildSupplyChainStrategy}
+              style={{
+                padding: "10px 16px",
+                background: "#19C37D",
+                color: "#001f3f",
+                border: "none",
+                borderRadius: "8px",
+                fontWeight: "800",
+                cursor: "pointer"
+              }}
+            >
+              Build Supply Chain Strategy
+            </button>
           </div>
 
           <div

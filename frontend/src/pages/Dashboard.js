@@ -23,6 +23,7 @@ export default function Dashboard() {
   const isResizing = useRef(false);
   const [sectorOpen, setSectorOpen] = useState(false);
   const [sectorPerformance, setSectorPerformance] = useState({});
+  const [pendingStrategy, setPendingStrategy] = useState(null);
   const navigate = useNavigate();
 
   const shouldShowStartupOverlay =
@@ -124,7 +125,31 @@ export default function Dashboard() {
     document.removeEventListener("mousemove", resizeSidebar);
     document.removeEventListener("mouseup", stopResizing);
   };
+const openStrategyFromIdea = (strategyIdea) => {
+    if (!strategyIdea || !Array.isArray(strategyIdea.positions)) return;
 
+    const cleanPositions = strategyIdea.positions
+      .filter((position) => position.ticker && Number(position.weight) !== 0)
+      .map((position) => ({
+        ticker: String(position.ticker).trim().toUpperCase(),
+        weight: Number(position.weight),
+      }));
+
+    if (!cleanPositions.length) return;
+
+    setPendingStrategy({
+      id: `${Date.now()}-${strategyIdea.name || "strategy"}`,
+      name: strategyIdea.name || "Imported Strategy",
+      mode: strategyIdea.mode || "strategy",
+      source: strategyIdea.source || "Bullionaire",
+      notes: strategyIdea.notes || "",
+      positions: cleanPositions,
+    });
+
+    setActiveMenu("Strategies");
+    setSectorOpen(false);
+    navigate("/dashboard");
+  };
   return (
     <>
       <Navbar />
@@ -337,16 +362,16 @@ export default function Dashboard() {
           }}
         >
           {activeMenu === "DependencyMap" ? (
-            <DependencyMap />
+            <DependencyMap onBuildStrategy={openStrategyFromIdea} />
           ) : activeMenu === "SupplyChain" ? (
-            <SupplyChain />
+            <SupplyChain onBuildStrategy={openStrategyFromIdea} />
           ) : activeMenu === "HiddenPairs" ? (
-            <HiddenPairs />
+            <HiddenPairs onBuildStrategy={openStrategyFromIdea} />
           ) : activeMenu === "MarketOutlook" ? (
             <MarketOutlook />
           ) : activeMenu === "Strategies" ? (
-  <Strategies />
-) : activeMenu === "News" ? (
+            <Strategies importedStrategy={pendingStrategy} />
+          ) : activeMenu === "News" ? (
   <News />
 ) : activeMenu === "Feedback" ? (
   <Feedback />

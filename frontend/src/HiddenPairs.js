@@ -3,12 +3,38 @@ import hiddenPairsTree from "./data/hiddenPairsTree";
 
 const categories = Object.keys(hiddenPairsTree);
 
-export default function HiddenPairs() {
+export default function HiddenPairs({ onBuildStrategy }) {
   const [selectedCategory, setSelectedCategory] = useState(null);
 
   const handlePairClick = (pair) => {
     const tickers = pair.tickers.join(",");
     window.location.assign(`/dashboard?tickers=${tickers}`);
+  };
+
+  const handleBuildPairStrategy = (pair) => {
+    if (!pair?.tickers?.length || !onBuildStrategy) return;
+
+    const cleanTickers = pair.tickers
+      .filter(Boolean)
+      .map((ticker) => String(ticker).trim().toUpperCase());
+
+    if (cleanTickers.length < 2) return;
+
+    const longTicker = cleanTickers[0];
+    const shortTicker = cleanTickers[1];
+
+    onBuildStrategy({
+      name: `${longTicker} / ${shortTicker} Pair Trade`,
+      mode: "strategy",
+      source: "Hidden Pairs",
+      notes: `Generated from Hidden Pairs. Relationship: ${pair.relationship || "Highly correlated pair"}. Correlation: ${
+        pair.correlation != null ? `${(pair.correlation * 100).toFixed(0)}%` : "N/A"
+      }.`,
+      positions: [
+        { ticker: longTicker, weight: 50 },
+        { ticker: shortTicker, weight: -50 },
+      ],
+    });
   };
 
   return (
@@ -92,6 +118,26 @@ export default function HiddenPairs() {
                 <div style={{ fontSize: "11px", opacity: 0.6 }}>
                   {pair.relationship}
                 </div>
+
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleBuildPairStrategy(pair);
+                  }}
+                  style={{
+                    marginTop: "12px",
+                    padding: "7px 10px",
+                    background: "#19C37D",
+                    color: "#001f3f",
+                    border: "none",
+                    borderRadius: "6px",
+                    fontWeight: "800",
+                    cursor: "pointer",
+                    width: "100%"
+                  }}
+                >
+                  Build Pair Strategy
+                </button>
               </div>
             ))}
           </div>

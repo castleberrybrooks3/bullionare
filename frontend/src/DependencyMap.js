@@ -26,7 +26,7 @@ const speedDescriptions = {
   Delayed: "Usually several weeks to a few months"
 };
 
-export default function DependencyMap() {
+export default function DependencyMap({ onBuildStrategy }) {
   const [selectedDriver, setSelectedDriver] = useState(null);
   const [direction, setDirection] = useState(null);
   const [chain, setChain] = useState([]);
@@ -90,6 +90,42 @@ export default function DependencyMap() {
     if (!node?.stocks) return;
     const tickers = node.stocks.join(",");
     window.location.href = `/dashboard?tickers=${tickers}&focus=${ticker}`;
+  };
+
+  const handleBuildStrategyFromNode = (node) => {
+    if (!node?.stocks?.length || !onBuildStrategy) return;
+
+    const cleanTickers = [...new Set(node.stocks)]
+      .filter(Boolean)
+      .map((ticker) => String(ticker).trim().toUpperCase());
+
+    if (!cleanTickers.length) return;
+
+    const directionMultiplier = node.direction === "down" ? -1 : 1;
+    const rawWeight = 100 / cleanTickers.length;
+    const roundedWeight = Number(rawWeight.toFixed(2));
+
+    const positions = cleanTickers.map((ticker, index) => {
+      const isLast = index === cleanTickers.length - 1;
+      const usedWeight = isLast
+        ? Number((100 - roundedWeight * (cleanTickers.length - 1)).toFixed(2))
+        : roundedWeight;
+
+      return {
+        ticker,
+        weight: directionMultiplier * usedWeight,
+      };
+    });
+
+    onBuildStrategy({
+      name: `${selectedDriver || "Macro"} ${direction === "up" ? "↑" : "↓"} - ${node.name} Strategy`,
+      mode: "strategy",
+      source: "Dependency Map",
+      notes: `Generated from Dependency Map: ${selectedDriver || "Macro"} ${
+        direction === "up" ? "up" : "down"
+      } leading to ${node.name} ${node.direction === "up" ? "up" : "down"}.`,
+      positions,
+    });
   };
 
   const renderNodeCard = (node, clickable = false, onClick = null, idx = null) => (
@@ -437,26 +473,43 @@ export default function DependencyMap() {
 
               {node.stocks && node.stocks.length > 0 && (
                 <div>
-                  {node.stocks.map((ticker) => (
-                    <span
-  key={ticker}
-  onClick={() => handleTickerClick(ticker, node)}
-  className="hover-glow"
-  style={{
-    padding: "8px 12px",
-    border: "1px solid transparent",
-                        background: node.direction === "up" ? "#19C37D" : "#E5484D",
-                        color: "white",
-                        borderRadius: "6px",
-                        marginRight: "8px",
-                        display: "inline-block",
-                        fontWeight: "bold",
-                        cursor: "pointer"
-                      }}
-                    >
-                      {ticker}
-                    </span>
-                  ))}
+                  <div style={{ marginBottom: "12px" }}>
+                    {node.stocks.map((ticker) => (
+                      <span
+                        key={ticker}
+                        onClick={() => handleTickerClick(ticker, node)}
+                        className="hover-glow"
+                        style={{
+                          padding: "8px 12px",
+                          border: "1px solid transparent",
+                          background: node.direction === "up" ? "#19C37D" : "#E5484D",
+                          color: "white",
+                          borderRadius: "6px",
+                          marginRight: "8px",
+                          display: "inline-block",
+                          fontWeight: "bold",
+                          cursor: "pointer"
+                        }}
+                      >
+                        {ticker}
+                      </span>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={() => handleBuildStrategyFromNode(node)}
+                    style={{
+                      padding: "9px 14px",
+                      background: "#19C37D",
+                      color: "#001f3f",
+                      border: "none",
+                      borderRadius: "8px",
+                      fontWeight: "800",
+                      cursor: "pointer"
+                    }}
+                  >
+                    Build Strategy from These Tickers
+                  </button>
                 </div>
               )}
             </div>

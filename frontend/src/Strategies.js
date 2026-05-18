@@ -1096,7 +1096,7 @@ const STRESS_TESTS = [
   },
 ];
 
-export default function Strategies() {
+export default function Strategies({ importedStrategy = null }) {
   const [range, setRange] = useState("1Y");
   const [benchmark, setBenchmark] = useState("SPY");
   const [positions, setPositions] = useState(DEFAULT_ACTIVE_STRATEGIES[0].positions);
@@ -1127,6 +1127,35 @@ const [holdingAttribution, setHoldingAttribution] = useState(null);
 const [stressResult, setStressResult] = useState(null);
 const [showBullionaireScore, setShowBullionaireScore] = useState(true);
 const [showStressDetails, setShowStressDetails] = useState(true);
+
+useEffect(() => {
+  if (!importedStrategy || !Array.isArray(importedStrategy.positions)) return;
+
+  const cleanPositions = importedStrategy.positions
+    .filter((position) => position.ticker && Number(position.weight) !== 0)
+    .map((position) => ({
+      ticker: String(position.ticker).trim().toUpperCase(),
+      weight: Number(position.weight),
+    }));
+
+  if (!cleanPositions.length) return;
+
+  setPositions(cleanPositions);
+  setBuilderPositions(cleanPositions);
+  setSelectedStrategyId(null);
+  setSelectedStrategyName(importedStrategy.name || "Imported Strategy");
+  setCustomStrategyName(importedStrategy.name || "Imported Strategy");
+  setCustomStrategyNotes(importedStrategy.notes || "");
+  setMode(importedStrategy.mode || "strategy");
+
+  setBacktest(null);
+  setBacktestError("");
+  setHasRunBacktest(false);
+  setHoverIndex(null);
+  setHoldingAttribution(null);
+  setStrategyExplanation(null);
+  setStressResult(null);
+}, [importedStrategy]);
 
   useEffect(() => {
   const loadSavedStrategies = async () => {

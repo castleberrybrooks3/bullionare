@@ -26,3 +26,12 @@ task_log.txt
 # OS files
 .DS_Store
 Thumbs.db
+# Local development / generated caches
+.venv/
+financials_sec_fixtures/
+prediction_market_failed_snapshots/
+prediction_market_snapshots/
+prediction_market_terms_test/
+prediction_snapshot_test/
+sec_debug/
+repair_bullionaire_local_v2.py

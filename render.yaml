@@ -1,10 +1,67 @@
 services:
   - type: web
     name: bullionare
-    env: python
-    plan: free
+    runtime: python
+    plan: starter
+    numInstances: 1
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn api:app --host 0.0.0.0 --port 10000
+    startCommand: uvicorn api:app --host 0.0.0.0 --port $PORT --workers 1 --ws websockets-sansio --lifespan on
+    healthCheckPath: /api/prediction-markets/terminal/health
+    maxShutdownDelaySeconds: 60
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: 3.11.15
+      - key: DATABASE_URL
+        sync: false
+      - key: POLYGON_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: PREDICTION_REQUIRE_USER_AUTH
+        value: "true"
+      - key: PREDICTION_AUTH_CACHE_SECONDS
+        value: "120"
+      - key: PREDICTION_AUTH_CACHE_MAX_ENTRIES
+        value: "4096"
+      - key: PREDICTION_HTTP_REQUESTS_PER_MINUTE
+        value: "180"
+      - key: PREDICTION_WS_MAX_CONNECTIONS_PER_USER
+        value: "3"
+      - key: KALSHI_API_KEY_ID
+        sync: false
+      - key: KALSHI_PRIVATE_KEY_PEM
+        sync: false
+      - key: KALSHI_WS_ENV
+        value: production
+      - key: PREDICTION_REQUIRE_KALSHI_STREAMS
+        value: "true"
+      - key: POLYMARKET_WS_BATCH_SIZE
+        value: "250"
+      - key: KALSHI_WS_BATCH_SIZE
+        value: "200"
+      - key: PREDICTION_WS_MAX_RECONNECT_SECONDS
+        value: "60"
+      - key: PREDICTION_INITIAL_SNAPSHOT_TIMEOUT_SECONDS
+        value: "30"
+      - key: PREDICTION_WS_MAX_QUEUE
+        value: "512"
+      - key: PREDICTION_WS_MAX_SIZE_BYTES
+        value: "8388608"
+      - key: PREDICTION_TERMINAL_REPRICE_INTERVAL_SECONDS
+        value: "0.5"
+      - key: PREDICTION_TERMINAL_HEARTBEAT_SECONDS
+        value: "15"
+      - key: PREDICTION_TERMINAL_PAYLOAD_CACHE_MAX_ENTRIES
+        value: "8"
+      - key: PREDICTION_READINESS_DB_CACHE_SECONDS
+        value: "10"
+      - key: LIVE_MARKET_SNAPSHOT_CACHE_TTL_SECONDS
+        value: "10"
+      - key: STOCK_LIVE_PRICES_REQUESTS_PER_MINUTE
+        value: "120"
+      - key: SPARKLINE_CACHE_TTL_SECONDS
+        value: "60"
+      - key: MAX_BACKTEST_POSITIONS
+        value: "50"

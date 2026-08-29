@@ -1096,6 +1096,168 @@ const STRESS_TESTS = [
   },
 ];
 
+function QuantMetricTooltip({ title, help, guide }) {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: "10px",
+        right: "10px",
+        zIndex: isOpen ? 100 : 2,
+      }}
+      onMouseEnter={() => setIsOpen(true)}
+      onMouseLeave={() => setIsOpen(false)}
+    >
+      <button
+        type="button"
+        aria-label={`Learn more about ${title}`}
+        onFocus={() => setIsOpen(true)}
+        onBlur={() => setIsOpen(false)}
+        style={{
+          width: "20px",
+          height: "20px",
+          borderRadius: "50%",
+          display: "grid",
+          placeItems: "center",
+          padding: 0,
+          border: isOpen
+            ? "1px solid rgba(25,195,125,0.78)"
+            : "1px solid rgba(148,163,184,0.38)",
+          background: isOpen
+            ? "rgba(25,195,125,0.16)"
+            : "rgba(15,23,42,0.92)",
+          color: isOpen ? "#86efac" : "#94a3b8",
+          boxShadow: isOpen ? "0 0 16px rgba(25,195,125,0.22)" : "none",
+          fontSize: "11px",
+          fontWeight: 950,
+          lineHeight: 1,
+          cursor: "help",
+          transition: "all 140ms ease",
+        }}
+      >
+        ?
+      </button>
+
+      {isOpen && (
+        <div
+          role="tooltip"
+          style={{
+            position: "absolute",
+            top: "30px",
+            right: "-4px",
+            width: "270px",
+            padding: "13px 14px 14px",
+            borderRadius: "14px",
+            background:
+              "linear-gradient(145deg, rgba(2,6,23,0.995), rgba(15,23,42,0.995))",
+            border: "1px solid rgba(25,195,125,0.34)",
+            boxShadow:
+              "0 18px 48px rgba(0,0,0,0.58), 0 0 24px rgba(25,195,125,0.08)",
+            color: "#e5e7eb",
+            textAlign: "left",
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              position: "absolute",
+              top: "-6px",
+              right: "9px",
+              width: "11px",
+              height: "11px",
+              transform: "rotate(45deg)",
+              background: "rgba(4,10,25,0.995)",
+              borderLeft: "1px solid rgba(25,195,125,0.34)",
+              borderTop: "1px solid rgba(25,195,125,0.34)",
+            }}
+          />
+
+          <div
+            style={{
+              color: "#86efac",
+              fontSize: "9px",
+              fontWeight: 950,
+              letterSpacing: "0.75px",
+              textTransform: "uppercase",
+              marginBottom: "5px",
+            }}
+          >
+            Bullionaire Guide
+          </div>
+
+          <div
+            style={{
+              color: "#f8fafc",
+              fontSize: "13px",
+              fontWeight: 950,
+              marginBottom: "6px",
+            }}
+          >
+            {title}
+          </div>
+
+          <div
+            style={{
+              color: "#cbd5e1",
+              fontSize: "11px",
+              fontWeight: 700,
+              lineHeight: 1.5,
+            }}
+          >
+            {help}
+          </div>
+
+          <div
+            style={{
+              marginTop: "10px",
+              paddingTop: "9px",
+              borderTop: "1px solid rgba(148,163,184,0.16)",
+            }}
+          >
+            <div
+              style={{
+                color: "#94a3b8",
+                fontSize: "9px",
+                fontWeight: 950,
+                letterSpacing: "0.55px",
+                textTransform: "uppercase",
+                marginBottom: "4px",
+              }}
+            >
+              Common interpretation
+            </div>
+            <div
+              style={{
+                color: "#e2e8f0",
+                fontSize: "10px",
+                fontWeight: 800,
+                lineHeight: 1.5,
+              }}
+            >
+              {guide}
+            </div>
+          </div>
+
+          <div
+            style={{
+              marginTop: "8px",
+              color: "#64748b",
+              fontSize: "9px",
+              fontWeight: 700,
+              lineHeight: 1.4,
+            }}
+          >
+            Rule-of-thumb ranges only; interpretation depends on the strategy,
+            benchmark, and time period.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Strategies({ importedStrategy = null }) {
   const [range, setRange] = useState("1Y");
   const [benchmark, setBenchmark] = useState("SPY");
@@ -1451,6 +1613,7 @@ const chartLineColor = benchmarkIsPositive ? "#19C37D" : "#ef4444";
   const outperformance = backtest?.outperformance ?? 0;
   const maxDrawdown = backtest?.maxDrawdown ?? 0;
   const volatility = backtest?.volatility ?? 0;
+  const quantMetrics = backtest?.quantMetrics || null;
 
    const strategyScore = useMemo(() => {
     if (!backtest) {
@@ -1664,6 +1827,71 @@ const averageUnderperformancePenalty =
   if (value === null || value === undefined || Number.isNaN(value)) return "--";
   return `${value >= 0 ? "+" : ""}${Number(value).toFixed(2)}%`;
 };
+
+const formatQuantRatio = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  return Number(value).toFixed(2);
+};
+
+const formatQuantPercent = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  const numeric = Number(value);
+  return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`;
+};
+
+const quantSampleLabel =
+  quantMetrics?.status === "insufficient_history"
+    ? "Insufficient history"
+    : quantMetrics?.status === "limited_sample"
+    ? "Limited 1-month sample"
+    : quantMetrics
+    ? `${quantMetrics.observations || 0} return observations`
+    : "Run a backtest";
+
+const quantMetricCards = [
+  {
+    key: "sharpeRatio",
+    label: "Sharpe Ratio",
+    value: formatQuantRatio(quantMetrics?.sharpeRatio),
+    help: "Annualized excess return earned per unit of total volatility. Higher means the strategy was compensated more efficiently for the risk it took.",
+    guide: "Below 1: weak • 1–2: good • 2–3: very good • Above 3: excellent. Negative means returns did not compensate for risk.",
+  },
+  {
+    key: "sortinoRatio",
+    label: "Sortino Ratio",
+    value: formatQuantRatio(quantMetrics?.sortinoRatio),
+    help: "Similar to Sharpe, but it penalizes downside volatility instead of all volatility. It is especially useful when upside volatility should not count as risk.",
+    guide: "Below 1: weak • 1–2: acceptable/good • 2–3: strong • Above 3: excellent. Negative is unfavorable.",
+  },
+  {
+    key: "calmarRatio",
+    label: "Calmar Ratio",
+    value: formatQuantRatio(quantMetrics?.calmarRatio),
+    help: "Annualized return divided by maximum drawdown. It shows how much return the strategy produced relative to its worst peak-to-trough loss.",
+    guide: "Below 1: weak • 1–3: solid • Above 3: strong. Higher is generally better because more return was earned per unit of drawdown.",
+  },
+  {
+    key: "alpha",
+    label: `Alpha vs. ${benchmark}`,
+    value: formatQuantPercent(quantMetrics?.alpha),
+    help: `Annualized return above or below what would be expected from the strategy's beta to ${benchmark}.`,
+    guide: "> 0%: positive risk-adjusted alpha • 0%: neutral • < 0%: negative alpha. There is no universal 'good' percentage; magnitude depends on the strategy and horizon.",
+  },
+  {
+    key: "beta",
+    label: `Beta vs. ${benchmark}`,
+    value: formatQuantRatio(quantMetrics?.beta),
+    help: `Measures sensitivity to ${benchmark}. It describes market exposure, not whether the strategy itself is good or bad.`,
+    guide: "Around 1.0: market-like sensitivity • Below 1.0: lower sensitivity • Above 1.0: higher sensitivity • Below 0: tends to move inversely.",
+  },
+  {
+    key: "informationRatio",
+    label: "Information Ratio",
+    value: formatQuantRatio(quantMetrics?.informationRatio),
+    help: `Measures how consistently the strategy generated excess return versus ${benchmark} relative to its tracking error.`,
+    guide: "Below 0: unfavorable • 0–0.5: modest • 0.5–1.0: good • 1–2: strong • Above 2: exceptional consistency.",
+  },
+];
 
 const formatChartValue = (value) => {
   if (value === null || value === undefined || Number.isNaN(value)) return "--";
@@ -3361,183 +3589,201 @@ const benchmarkDisplayedReturn =
           </div>
 
           <div
-  style={{
-    marginTop: "18px",
-    padding: "16px",
-    borderRadius: "18px",
-    background: "rgba(255,255,255,0.035)",
-    border: "1px solid rgba(255,255,255,0.08)",
-  }}
->
-<div
-  style={{
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: "12px",
-  }}
->
-  <div>
-    <h3 style={{ margin: 0, fontSize: "18px" }}>Stress Tests</h3>
+            style={{
+              marginTop: "18px",
+              padding: "16px",
+              borderRadius: "16px",
+              background:
+                "linear-gradient(145deg, rgba(15,23,42,0.78), rgba(9,15,31,0.86))",
+              border: "1px solid rgba(255,255,255,0.08)",
+              boxShadow: "inset 0 1px 0 rgba(255,255,255,0.025)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: "12px",
+                flexWrap: "wrap",
+                marginBottom: "12px",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    color: "#94a3b8",
+                    fontSize: "10px",
+                    fontWeight: 950,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.55px",
+                  }}
+                >
+                  Institutional Performance Metrics
+                </div>
+                <h3 style={{ margin: "3px 0 3px", fontSize: "18px" }}>
+                  Risk-Adjusted Analytics
+                </h3>
+                <div
+                  style={{
+                    color: "#7f8da8",
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    lineHeight: 1.4,
+                  }}
+                >
+                  Return efficiency, downside risk, drawdown quality, and benchmark-relative performance.
+                </div>
+              </div>
 
-    <p style={{ margin: "6px 0 0", color: "#9ca3af", fontSize: "13px" }}>
-      Estimate how your current strategy could react to macro shocks.
-    </p>
+              <div
+                style={{
+                  padding: "5px 9px",
+                  borderRadius: "999px",
+                  background:
+                    quantMetrics?.status === "standard"
+                      ? "rgba(25,195,125,0.10)"
+                      : "rgba(148,163,184,0.10)",
+                  border:
+                    quantMetrics?.status === "standard"
+                      ? "1px solid rgba(25,195,125,0.24)"
+                      : "1px solid rgba(148,163,184,0.22)",
+                  color: quantMetrics?.status === "standard" ? "#86efac" : "#94a3b8",
+                  fontSize: "10px",
+                  fontWeight: 850,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {quantSampleLabel}
+              </div>
+            </div>
 
-    <p
-      style={{
-        margin: "5px 0 0",
-        color: "#64748b",
-        fontSize: "12px",
-        fontWeight: 750,
-      }}
-    >
-      Click a scenario to run it. Click the selected scenario again to show or hide details.
-    </p>
-  </div>
-</div>
-
-  <div
-    style={{
-      display: "flex",
-      flexWrap: "wrap",
-      gap: "8px",
-      marginTop: "14px",
-    }}
-  >
-    {STRESS_TESTS.map((test) => {
-  const isSelectedStressTest = stressResult?.id === test.id;
-
-  return (
-    <button
-      key={test.id}
-      onClick={() => handleStressTestClick(test)}
-      title={
-        isSelectedStressTest
-          ? "Click again to show or hide details"
-          : "Run this stress test"
-      }
-        style={{
-  padding: "10px 12px",
-  borderRadius: "12px",
-  background: isSelectedStressTest
-    ? "rgba(96,165,250,0.20)"
-    : "rgba(255,255,255,0.06)",
-  color: isSelectedStressTest ? "#93c5fd" : "#e5e7eb",
-  border: isSelectedStressTest
-    ? "1px solid rgba(96,165,250,0.48)"
-    : "1px solid rgba(255,255,255,0.12)",
-  cursor: "pointer",
-  fontWeight: 900,
-  boxShadow: isSelectedStressTest
-    ? "0 0 16px rgba(96,165,250,0.22)"
-    : "none",
-}}
-      >
-        {test.label}
-{isSelectedStressTest && (
-  <span style={{ marginLeft: "6px", fontSize: "11px", color: "#bfdbfe" }}>
-    {showStressDetails ? "▲" : "▼"}
-  </span>
-)}
-      </button>
-    );
-  })}
-  </div>
-
-  {stressResult && showStressDetails && (
-  <div
-    style={{
-      marginTop: "14px",
-      padding: "14px",
-      borderRadius: "14px",
-      background:
-        stressResult.estimatedReturn >= 0
-          ? "rgba(25,195,125,0.09)"
-          : "rgba(239,68,68,0.09)",
-      border:
-        stressResult.estimatedReturn >= 0
-          ? "1px solid rgba(25,195,125,0.22)"
-          : "1px solid rgba(239,68,68,0.22)",
-    }}
-  >
-      <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
-        {stressResult.label}:{" "}
-        <span
-          style={{
-            color: stressResult.estimatedReturn >= 0 ? "#19C37D" : "#f87171",
-          }}
-        >
-          {formatPercent(stressResult.estimatedReturn)}
-        </span>
-      </div>
-
-      <div style={{ color: "#9ca3af", fontSize: "13px", marginTop: "4px" }}>
-        {stressResult.description}
-      </div>
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: "10px",
-          marginTop: "12px",
-        }}
-      >
-        <div>
-          <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850 }}>
-            Best Impact
-          </div>
-          <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
-            {stressResult.bestImpact
-              ? `${stressResult.bestImpact.ticker} ${formatPercent(
-                  stressResult.bestImpact.impact
-                )}`
-              : "--"}
-          </div>
-        </div>
-
-        <div>
-          <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850 }}>
-            Worst Impact
-          </div>
-          <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
-            {stressResult.worstImpact
-              ? `${stressResult.worstImpact.ticker} ${formatPercent(
-                  stressResult.worstImpact.impact
-                )}`
-              : "--"}
-          </div>
-        </div>
-      </div>
-    </div>
-  )}
-
-            {holdingAttribution && (
             <div
               style={{
                 display: "grid",
-                gridTemplateColumns: "repeat(3, 1fr)",
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                gap: "9px",
+              }}
+            >
+              {quantMetricCards.map((metric) => (
+                <div
+                  key={metric.key}
+                  style={{
+                    position: "relative",
+                    minHeight: "88px",
+                    padding: "12px",
+                    borderRadius: "13px",
+                    background: "rgba(7,13,29,0.72)",
+                    border: "1px solid rgba(148,163,184,0.12)",
+                    boxShadow: "0 8px 20px rgba(0,0,0,0.14)",
+                  }}
+                >
+                  <QuantMetricTooltip
+                    title={metric.label}
+                    help={metric.help}
+                    guide={metric.guide}
+                  />
+
+                  <div
+                    style={{
+                      color: "#94a3b8",
+                      fontSize: "11px",
+                      fontWeight: 850,
+                      paddingRight: "26px",
+                    }}
+                  >
+                    {metric.label}
+                  </div>
+                  <div
+                    style={{
+                      color: "#f8fafc",
+                      fontSize: "20px",
+                      fontWeight: 950,
+                      marginTop: "9px",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {metric.value}
+                  </div>
+                  <div
+                    style={{
+                      color: "#64748b",
+                      fontSize: "9px",
+                      fontWeight: 750,
+                      marginTop: "6px",
+                    }}
+                  >
+                    {quantMetrics?.status === "insufficient_history"
+                      ? "Use 1M or longer"
+                      : quantMetrics?.status === "limited_sample"
+                      ? "Limited sample"
+                      : backtest
+                      ? "Selected range"
+                      : "Run a backtest"}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {quantMetrics?.status === "limited_sample" && (
+              <div
+                style={{
+                  marginTop: "9px",
+                  color: "#94a3b8",
+                  fontSize: "10px",
+                  lineHeight: 1.45,
+                }}
+              >
+                One-month ratios can move sharply with a short sample. Use 6M, 1Y, or 5Y for a more stable comparison.
+              </div>
+            )}
+            {quantMetrics?.status === "insufficient_history" && (
+              <div
+                style={{
+                  marginTop: "9px",
+                  color: "#94a3b8",
+                  fontSize: "10px",
+                  lineHeight: 1.45,
+                }}
+              >
+                These ratios are intentionally withheld for 1D and 5D because the history is too short for a useful annualized interpretation.
+              </div>
+            )}
+          </div>
+
+          </div>
+        </div>
+
+
+
+        {holdingAttribution && (
+          <div
+            style={{
+              marginTop: "18px",
+              padding: "18px",
+              borderRadius: "18px",
+              background: "rgba(255,255,255,0.035)",
+              border: "1px solid rgba(255,255,255,0.08)",
+            }}
+          >
+            <div style={{ marginBottom: "12px" }}>
+              <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.45px" }}>
+                Backtest Attribution
+              </div>
+              <h3 style={{ margin: "4px 0 0", fontSize: "18px" }}>Portfolio Attribution</h3>
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
                 gap: "10px",
-                margin: "18px 0 18px 0",
               }}
             >
               {[
-                {
-                  label: "Best Contributor",
-                  item: holdingAttribution.bestContributor,
-                  valueKey: "contribution",
-                },
-                {
-                  label: "Worst Contributor",
-                  item: holdingAttribution.worstContributor,
-                  valueKey: "contribution",
-                },
-                {
-                  label: "Most Volatile",
-                  item: holdingAttribution.mostVolatile,
-                  valueKey: "volatility",
-                },
+                { label: "Best Contributor", item: holdingAttribution.bestContributor, valueKey: "contribution" },
+                { label: "Worst Contributor", item: holdingAttribution.worstContributor, valueKey: "contribution" },
+                { label: "Most Volatile", item: holdingAttribution.mostVolatile, valueKey: "volatility" },
               ].map(({ label, item, valueKey }) => (
                 <div
                   key={label}
@@ -3545,31 +3791,15 @@ const benchmarkDisplayedReturn =
                     background: "rgba(15,23,42,0.72)",
                     border: "1px solid rgba(255,255,255,0.08)",
                     borderRadius: "14px",
-                    padding: "12px",
+                    padding: "13px",
                   }}
                 >
-                  <div
-                    style={{
-                      color: "#94a3b8",
-                      fontSize: "12px",
-                      fontWeight: 850,
-                      marginBottom: "6px",
-                    }}
-                  >
+                  <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850, marginBottom: "6px" }}>
                     {label}
                   </div>
-
-                  <div
-                    style={{
-                      color: "#e5e7eb",
-                      fontSize: "18px",
-                      fontWeight: 950,
-                      marginBottom: "4px",
-                    }}
-                  >
+                  <div style={{ color: "#e5e7eb", fontSize: "18px", fontWeight: 950, marginBottom: "4px" }}>
                     {item?.ticker || "--"}
                   </div>
-
                   <div
                     style={{
                       color:
@@ -3584,28 +3814,119 @@ const benchmarkDisplayedReturn =
                   >
                     {item ? formatPercent(item[valueKey]) : "--"}
                   </div>
-
                   {item && (
-                    <div
-                      style={{
-                        color: "#64748b",
-                        fontSize: "11px",
-                        fontWeight: 750,
-                        marginTop: "5px",
-                      }}
-                    >
-                      Weight: {item.weight}% | Return:{" "}
-                      {formatPercent(item.holdingReturn)}
+                    <div style={{ color: "#64748b", fontSize: "11px", fontWeight: 750, marginTop: "5px" }}>
+                      Weight: {item.weight}% | Return: {formatPercent(item.holdingReturn)}
                     </div>
                   )}
                 </div>
               ))}
             </div>
-          )}
+          </div>
+        )}
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+            gap: "18px",
+            marginTop: "18px",
+            alignItems: "stretch",
+          }}
+        >
+          <div
+            style={{
+              padding: "18px",
+              borderRadius: "18px",
+              background: "rgba(255,255,255,0.035)",
+              border: "1px solid rgba(255,255,255,0.08)",
+            }}
+          >
+            <h3 style={{ margin: 0, fontSize: "18px" }}>Stress Tests</h3>
+            <p style={{ margin: "6px 0 0", color: "#9ca3af", fontSize: "13px" }}>
+              Estimate how your current strategy could react to macro shocks.
+            </p>
+            <p style={{ margin: "5px 0 0", color: "#64748b", fontSize: "12px", fontWeight: 750 }}>
+              Click a scenario to run it. Click the selected scenario again to show or hide details.
+            </p>
+
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "8px", marginTop: "14px" }}>
+              {STRESS_TESTS.map((test) => {
+                const isSelectedStressTest = stressResult?.id === test.id;
+                return (
+                  <button
+                    key={test.id}
+                    onClick={() => handleStressTestClick(test)}
+                    title={isSelectedStressTest ? "Click again to show or hide details" : "Run this stress test"}
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: "12px",
+                      background: isSelectedStressTest ? "rgba(96,165,250,0.20)" : "rgba(255,255,255,0.06)",
+                      color: isSelectedStressTest ? "#93c5fd" : "#e5e7eb",
+                      border: isSelectedStressTest
+                        ? "1px solid rgba(96,165,250,0.48)"
+                        : "1px solid rgba(255,255,255,0.12)",
+                      cursor: "pointer",
+                      fontWeight: 900,
+                      boxShadow: isSelectedStressTest ? "0 0 16px rgba(96,165,250,0.22)" : "none",
+                    }}
+                  >
+                    {test.label}
+                    {isSelectedStressTest && (
+                      <span style={{ marginLeft: "6px", fontSize: "11px", color: "#bfdbfe" }}>
+                        {showStressDetails ? "▲" : "▼"}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {stressResult && showStressDetails && (
+              <div
+                style={{
+                  marginTop: "14px",
+                  padding: "14px",
+                  borderRadius: "14px",
+                  background: stressResult.estimatedReturn >= 0 ? "rgba(25,195,125,0.09)" : "rgba(239,68,68,0.09)",
+                  border: stressResult.estimatedReturn >= 0
+                    ? "1px solid rgba(25,195,125,0.22)"
+                    : "1px solid rgba(239,68,68,0.22)",
+                }}
+              >
+                <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
+                  {stressResult.label}:{" "}
+                  <span style={{ color: stressResult.estimatedReturn >= 0 ? "#19C37D" : "#f87171" }}>
+                    {formatPercent(stressResult.estimatedReturn)}
+                  </span>
+                </div>
+                <div style={{ color: "#9ca3af", fontSize: "13px", marginTop: "4px" }}>
+                  {stressResult.description}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "12px" }}>
+                  <div>
+                    <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850 }}>Best Impact</div>
+                    <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
+                      {stressResult.bestImpact
+                        ? `${stressResult.bestImpact.ticker} ${formatPercent(stressResult.bestImpact.impact)}`
+                        : "--"}
+                    </div>
+                  </div>
+                  <div>
+                    <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850 }}>Worst Impact</div>
+                    <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
+                      {stressResult.worstImpact
+                        ? `${stressResult.worstImpact.ticker} ${formatPercent(stressResult.worstImpact.impact)}`
+                        : "--"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           <div
             style={{
-              margin: "22px 0 12px 0",
               padding: "18px",
               borderRadius: "18px",
               background:
@@ -3624,202 +3945,151 @@ const benchmarkDisplayedReturn =
                   : strategyScore.score >= 58
                   ? "1px solid rgba(245,158,11,0.35)"
                   : "1px solid rgba(239,68,68,0.32)",
-              display: "grid",
-              gridTemplateColumns: "160px 1fr",
-              gap: "18px",
-              alignItems: "center",
             }}
           >
             <div
+              onClick={() => setShowBullionaireScore((prev) => !prev)}
               style={{
-                width: "132px",
-                height: "132px",
-                borderRadius: "50%",
-                display: "grid",
-                placeItems: "center",
-                background: "rgba(2,6,23,0.78)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                boxShadow:
-                  strategyScore.score !== null
-                    ? "0 0 28px rgba(25,195,125,0.16)"
-                    : "none",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: "12px",
+                cursor: "pointer",
+                userSelect: "none",
+                marginBottom: "14px",
               }}
             >
-              <div style={{ textAlign: "center" }}>
-                <div
-                  style={{
-                    fontSize: "34px",
-                    fontWeight: 950,
-                    color:
-                      strategyScore.score === null
-                        ? "#94a3b8"
-                        : strategyScore.score >= 72
-                        ? "#19C37D"
-                        : strategyScore.score >= 58
-                        ? "#f59e0b"
-                        : "#ef4444",
-                    lineHeight: 1,
-                  }}
-                >
-                  {strategyScore.score === null ? "--" : strategyScore.score}
+              <div>
+                <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.4px" }}>
+                  Bullionaire Score
                 </div>
-
-                <div
-                  style={{
-                    color: "#94a3b8",
-                    fontSize: "12px",
-                    fontWeight: 850,
-                    marginTop: "5px",
-                  }}
-                >
-                  / 100
+                <div style={{ color: "#64748b", fontSize: "11px", fontWeight: 750, marginTop: "3px" }}>
+                  Proprietary strategy quality score
                 </div>
               </div>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowBullionaireScore((prev) => !prev);
+                }}
+                style={{
+                  padding: "5px 9px",
+                  borderRadius: "999px",
+                  border: "1px solid rgba(148,163,184,0.28)",
+                  background: "rgba(148,163,184,0.10)",
+                  color: "#94a3b8",
+                  cursor: "pointer",
+                  fontSize: "11px",
+                  fontWeight: 900,
+                }}
+              >
+                {showBullionaireScore ? "Hide" : "Show"}
+              </button>
             </div>
 
-            <div>
-  <div
-  onClick={() => setShowBullionaireScore((prev) => !prev)}
-  style={{
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: "12px",
-    marginBottom: "6px",
-    cursor: "pointer",
-    userSelect: "none",
-  }}
->
-    <div
-      style={{
-        color: "#94a3b8",
-        fontSize: "12px",
-        fontWeight: 900,
-        letterSpacing: "0.4px",
-        textTransform: "uppercase",
-      }}
-    >
-      Bullionaire Score
-    </div>
+            <div style={{ display: "grid", gridTemplateColumns: "132px minmax(0, 1fr)", gap: "18px", alignItems: "center" }}>
+              <div
+                style={{
+                  width: "132px",
+                  height: "132px",
+                  borderRadius: "50%",
+                  display: "grid",
+                  placeItems: "center",
+                  background: "rgba(2,6,23,0.78)",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  boxShadow: strategyScore.score !== null ? "0 0 28px rgba(25,195,125,0.16)" : "none",
+                }}
+              >
+                <div style={{ textAlign: "center" }}>
+                  <div
+                    style={{
+                      fontSize: "34px",
+                      fontWeight: 950,
+                      color:
+                        strategyScore.score === null
+                          ? "#94a3b8"
+                          : strategyScore.score >= 72
+                          ? "#19C37D"
+                          : strategyScore.score >= 58
+                          ? "#f59e0b"
+                          : "#ef4444",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {strategyScore.score === null ? "--" : strategyScore.score}
+                  </div>
+                  <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850, marginTop: "5px" }}>/ 100</div>
+                </div>
+              </div>
 
-    <button
-  onClick={(e) => {
-    e.stopPropagation();
-    setShowBullionaireScore((prev) => !prev);
-  }}
-      style={{
-        padding: "5px 9px",
-        borderRadius: "999px",
-        border: "1px solid rgba(148,163,184,0.28)",
-        background: "rgba(148,163,184,0.10)",
-        color: "#94a3b8",
-        cursor: "pointer",
-        fontSize: "11px",
-        fontWeight: 900,
-      }}
-    >
-      {showBullionaireScore ? "Hide" : "Show"}
-    </button>
-  </div>
-
-              {showBullionaireScore ? (
-  <>
-    <div
-      style={{
-        fontSize: "26px",
-        fontWeight: 950,
-        color:
-          strategyScore.score === null
-            ? "#e5e7eb"
-            : strategyScore.score >= 72
-            ? "#19C37D"
-            : strategyScore.score >= 58
-            ? "#f59e0b"
-            : "#ef4444",
-        marginBottom: "8px",
-      }}
-    >
-      {strategyScore.label}
-    </div>
-
-    <div
-      style={{
-        color: "#cbd5e1",
-        fontSize: "14px",
-        lineHeight: 1.55,
-        maxWidth: "680px",
-      }}
-    >
-      {strategyScore.description}
-    </div>
-
-    <div
-      style={{
-        display: "flex",
-        gap: "8px",
-        flexWrap: "wrap",
-        marginTop: "14px",
-      }}
-    >
-      {[
-        "Return",
-        "Outperformance",
-        "Time Above Benchmark",
-        "Drawdown",
-        "Volatility",
-        "Risk/Reward",
-      ].map((item) => (
-        <span
-          key={item}
-          style={{
-            padding: "6px 9px",
-            borderRadius: "999px",
-            background: "rgba(255,255,255,0.06)",
-            border: "1px solid rgba(255,255,255,0.1)",
-            color: "#94a3b8",
-            fontSize: "12px",
-            fontWeight: 800,
-          }}
-        >
-          {item}
-        </span>
-      ))}
-    </div>
-  </>
-) : (
-  <div
-    style={{
-      color: "#94a3b8",
-      fontSize: "13px",
-      fontWeight: 800,
-      lineHeight: 1.5,
-    }}
-  >
-    Score details hidden.
-  </div>
-)}
+              <div>
+                {showBullionaireScore ? (
+                  <>
+                    <div
+                      style={{
+                        fontSize: "25px",
+                        fontWeight: 950,
+                        color:
+                          strategyScore.score === null
+                            ? "#e5e7eb"
+                            : strategyScore.score >= 72
+                            ? "#19C37D"
+                            : strategyScore.score >= 58
+                            ? "#f59e0b"
+                            : "#ef4444",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      {strategyScore.label}
+                    </div>
+                    <div style={{ color: "#cbd5e1", fontSize: "13px", lineHeight: 1.55 }}>
+                      {strategyScore.description}
+                    </div>
+                    <div style={{ display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "12px" }}>
+                      {["Return", "Outperformance", "Time Above Benchmark", "Drawdown", "Volatility", "Risk/Reward"].map((item) => (
+                        <span
+                          key={item}
+                          style={{
+                            padding: "5px 8px",
+                            borderRadius: "999px",
+                            background: "rgba(255,255,255,0.06)",
+                            border: "1px solid rgba(255,255,255,0.1)",
+                            color: "#94a3b8",
+                            fontSize: "11px",
+                            fontWeight: 800,
+                          }}
+                        >
+                          {item}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ color: "#94a3b8", fontSize: "13px", fontWeight: 800, lineHeight: 1.5 }}>
+                    Score details hidden.
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-
-          <div
-            style={{
-              margin: "8px 0 4px 0",
-              padding: "9px 12px",
-              borderRadius: "12px",
-              background: "rgba(15,23,42,0.72)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              color: "#94a3b8",
-              fontSize: "11px",
-              fontWeight: 700,
-              lineHeight: 1.45,
-            }}
-          >
-            Past performance is not a guarantee of future results. A strategy that looks strong over{" "}
-            {range} may perform differently across other time ranges or market conditions.
           </div>
         </div>
-      </div>
-    </div>
+
+        <div
+          style={{
+            margin: "14px 0 4px 0",
+            padding: "9px 12px",
+            borderRadius: "12px",
+            background: "rgba(15,23,42,0.72)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            color: "#94a3b8",
+            fontSize: "11px",
+            fontWeight: 700,
+            lineHeight: 1.45,
+          }}
+        >
+          Past performance is not a guarantee of future results. A strategy that looks strong over{" "}
+          {range} may perform differently across other time ranges or market conditions.
+        </div>
 
     <div
       style={{

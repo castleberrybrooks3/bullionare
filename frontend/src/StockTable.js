@@ -7,6 +7,7 @@ import "./StockTable.css";
 import { useLocation, useNavigate } from "react-router-dom";
 import WatchlistAnalytics from "./components/WatchlistAnalytics";
 import { supabase } from "./lib/supabaseClient";
+import StockChartModal from "./components/charts/StockChartModal";
 
 const saveWatchlists = async (updated) => {
   const {
@@ -48,12 +49,51 @@ if (!user) return;
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
+const SPARKLINE_STORAGE_KEY = "bullionaire_sparkline_cache_v1";
+const SPARKLINE_REFRESH_MS = 2 * 60 * 1000;
+const SPARKLINE_STORAGE_LIMIT = 750;
+
+const loadPersistentSparklineCache = () => {
+  try {
+    const raw = localStorage.getItem(SPARKLINE_STORAGE_KEY);
+    if (!raw) return {};
+
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (err) {
+    console.error("Failed to load cached dashboard graphs", err);
+    return {};
+  }
+};
+
+const persistSparklineCache = (cache) => {
+  try {
+    const trimmedEntries = Object.entries(cache || {})
+      .filter(([, value]) => Array.isArray(value?.points) && value.points.length)
+      .sort(
+        (a, b) =>
+          Number(b[1]?.cached_at || 0) - Number(a[1]?.cached_at || 0)
+      )
+      .slice(0, SPARKLINE_STORAGE_LIMIT);
+
+    localStorage.setItem(
+      SPARKLINE_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(trimmedEntries))
+    );
+  } catch (err) {
+    console.error("Failed to persist dashboard graphs", err);
+  }
+};
+
 const metricTooltips = {
   "Day Volume": "The number of shares traded during the current trading day.",
   "Market Cap": "The total market value of the company. Calculated as share price times shares outstanding.",
   "EPS (TTM)": "Earnings per share over the trailing twelve months. A profitability measure showing earnings for each share.",
   "P/E (TTM)": "Price-to-earnings ratio over the trailing twelve months. Shows how much investors pay for each dollar of earnings.",
-  "Beta": "Measures how volatile the stock is compared to the overall market. Above 1 means more volatile than the market.",
+"PEG Ratio": "Growth-adjusted PEG ratio. It compares valuation to expected earnings growth, so it is more forward-looking than a pure trailing metric. Around 1 is often viewed as fair, under 1 may look cheaper relative to growth, and above 2 can look expensive unless growth quality is strong.",
+"P/S Ratio": "Trailing twelve-month price-to-sales ratio. It compares the company’s market value to its last 12 months of revenue. Under 1 can look inexpensive, 1-3 is often reasonable, 3-10 is growth-priced, and above 10 can be expensive unless margins and growth are very strong.",
+"Beta": "Measures how volatile the stock is compared to the overall market. Above 1 means more volatile than the market.",
+"Standard Deviation (1Y)": "Measures the historical variability of the stock over the trailing one-year period using Bullionaire's calculated standard deviation. Higher values indicate greater price volatility.",
   "EBITDA": "Earnings before interest, taxes, depreciation, and amortization. Often used to compare operating performance.",
   "Short % of Float": "The percentage of tradable shares currently sold short. A high value may suggest bearish sentiment or short-squeeze potential.",
   "Gross Profit": "Revenue minus the direct cost of goods sold. Shows how much money remains after production costs.",
@@ -114,8 +154,9 @@ const StockTable = ({
   const [notification, setNotification] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const [pageSize] = useState(100);
+  const [pageSize] = useState(50);
 const [currentPage, setCurrentPage] = useState(1);
+const currentPageRef = useRef(1);
 const [totalPages, setTotalPages] = useState(1);
 const [backendFilterModel, setBackendFilterModel] = useState({});
 const [gridFilterModel, setGridFilterModel] = useState({});
@@ -125,10 +166,11 @@ const activeRequestRef = useRef(0);
 const stocksAbortRef = useRef(null);
 const isRestoringFilterModelRef = useRef(false);
 const [viewMode, setViewMode] = useState("all data");
-const [sparklines, setSparklines] = useState({});
-const sparklineCacheRef = useRef({});
-const sparklineRequestIdRef = useRef(0);
+const [initialSparklineCache] = useState(() => loadPersistentSparklineCache());
+const sparklineCacheRef = useRef(initialSparklineCache);
+const sparklineInFlightRef = useRef(new Set());
 const sparklineDebounceRef = useRef(null);
+const sparklineBackgroundTimerRef = useRef(null);
 const sparklineBackgroundLoadStartedRef = useRef(false);
 const loadingWatchlistsRef = useRef(false);
 const livePriceCacheRef = useRef({});
@@ -137,20 +179,21 @@ const PRELOADED_DASHBOARD_CACHE_MS = 2 * 60 * 1000;
 
 const [chartModalOpen, setChartModalOpen] = useState(false);
 const [chartTicker, setChartTicker] = useState(null);
-const [chartRange, setChartRange] = useState("1D");
-const [chartType, setChartType] = useState("candles");
-const [chartData, setChartData] = useState([]);
-const [chartLoading, setChartLoading] = useState(false);
-const [chartHover, setChartHover] = useState(null);
-const [selectedRangePopup, setSelectedRangePopup] = useState(null);
+const [chartStockContext, setChartStockContext] = useState(null);
 
   const [watchlists, setWatchlists] = useState({});
+const [watchlistAllocations, setWatchlistAllocations] = useState({});
 
-  const [activeList, setActiveList] = useState("Default");
+const [activeList, setActiveList] = useState("Default");
 
   const gridRef = useRef(null);
-  const savedHorizontalScrollRef = useRef(0);
-  const savedTopScrollRef = useRef(0);
+const savedHorizontalScrollRef = useRef(0);
+const savedTopScrollRef = useRef(0);
+
+const [allocationFloatingStyle, setAllocationFloatingStyle] = useState({
+  left: 0,
+  width: 135,
+});
 
   const location = useLocation();
   const navigate = useNavigate();
@@ -301,391 +344,6 @@ const renderSparklinePlaceholder = () => {
   );
 };
 
-const formatChartTimeLabel = (timestamp, range) => {
-  const date = new Date(timestamp);
-
-  if (range === "1D" || range === "5D") {
-    return date.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  }
-
-  if (range === "1M" || range === "6M" || range === "1Y") {
-    return date.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-    });
-  }
-
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    year: "2-digit",
-  });
-};
-
-const getChartPerformance = (points = []) => {
-  if (!points.length) return null;
-
-  const first = points[0]?.close;
-  const last = points[points.length - 1]?.close;
-
-  if (first == null || last == null) return null;
-
-  const change = last - first;
-  const pct = first !== 0 ? (change / first) * 100 : 0;
-
-  return {
-    change,
-    pct,
-    isUp: change >= 0,
-  };
-};
-
-const renderLargeChartSvg = (points = []) => {
-  if (!points.length) {
-    return <div style={{ color: "#9ca3af" }}>No chart data available</div>;
-  }
-
-  const width = 950;
-  const height = 420;
-  const leftPad = 18;
-  const rightPad = 64;
-  const topPad = 18;
-  const bottomPad = 38;
-
-  const chartWidth = width - leftPad - rightPad;
-  const chartHeight = height - topPad - bottomPad;
-
-  const highs = points.map((p) => p.high ?? p.close);
-  const lows = points.map((p) => p.low ?? p.close);
-  const opens = points.map((p) => p.open ?? p.close);
-  const closes = points.map((p) => p.close);
-
-  const max = Math.max(...highs);
-  const min = Math.min(...lows);
-  const range = max - min || 1;
-  const first = closes[0];
-  const last = closes[closes.length - 1];
-
-  const getX = (index) =>
-    leftPad + (index / Math.max(points.length - 1, 1)) * chartWidth;
-
-  const getY = (price) =>
-    topPad + ((max - price) / range) * chartHeight;
-
-  const baselineY = getY(first);
-
-  const linePath = points
-  .map((point, index) => {
-    const x = getX(index);
-    const y = getY(point.close);
-    return `${index === 0 ? "M" : "L"} ${x} ${y}`;
-  })
-  .join(" ");
-
-const areaPath = `
-  ${linePath}
-  L ${getX(points.length - 1)} ${height - bottomPad}
-  L ${getX(0)} ${height - bottomPad}
-  Z
-`;
-
-const priceTicks = Array.from({ length: 5 }, (_, i) => {
-    const value = min + ((4 - i) / 4) * range;
-    return Number(value.toFixed(2));
-  });
-
-  const bottomTickIndexes = [0, 0.25, 0.5, 0.75, 1].map((pct) =>
-    Math.min(points.length - 1, Math.round((points.length - 1) * pct))
-  );
-
-  return (
-    <div style={{ position: "relative", width: "100%", height: "100%" }}>
-      {chartHover && (
-        <div
-          style={{
-            position: "absolute",
-            top: "12px",
-            left: "12px",
-            background: "rgba(17, 24, 39, 0.92)",
-            border: "1px solid #374151",
-            borderRadius: "8px",
-            padding: "10px 12px",
-            color: "white",
-            zIndex: 5,
-            fontSize: "13px",
-            lineHeight: "1.5",
-            pointerEvents: "none",
-          }}
-        >
-          <div><strong>{chartHover.label}</strong></div>
-          <div>Open: {chartHover.open.toFixed(2)}</div>
-          <div>High: {chartHover.high.toFixed(2)}</div>
-          <div>Low: {chartHover.low.toFixed(2)}</div>
-          <div>Close: {chartHover.close.toFixed(2)}</div>
-        </div>
-      )}
-
-      <svg width="100%" height="100%" viewBox={`0 0 ${width} ${height}`}>
-  {/* baseline */}
-  <line
-    x1={leftPad}
-    y1={baselineY}
-    x2={width - rightPad}
-    y2={baselineY}
-    stroke="#9ca3af"
-    strokeWidth="1"
-    strokeDasharray="4 4"
-    opacity="0.45"
-  />
-
-  {/* horizontal price grid + right labels */}
-  {priceTicks.map((value, idx) => {
-    const y = getY(value);
-    return (
-      <g key={idx}>
-        <line
-          x1={leftPad}
-          y1={y}
-          x2={width - rightPad}
-          y2={y}
-          stroke="#334155"
-          strokeWidth="1"
-          opacity="0.5"
-        />
-        <text
-          x={width - rightPad + 8}
-          y={y + 4}
-          fill="#cbd5e1"
-          fontSize="12"
-        >
-          {value.toFixed(2)}
-        </text>
-      </g>
-    );
-  })}
-
-  {/* bottom timestamps */}
-  {bottomTickIndexes.map((pointIndex, idx) => {
-    const point = points[pointIndex];
-    const x = getX(pointIndex);
-    return (
-      <g key={idx}>
-        <line
-          x1={x}
-          y1={height - bottomPad}
-          x2={x}
-          y2={height - bottomPad + 4}
-          stroke="#64748b"
-          strokeWidth="1"
-        />
-        <text
-          x={x}
-          y={height - 10}
-          textAnchor="middle"
-          fill="#cbd5e1"
-          fontSize="12"
-        >
-          {formatChartTimeLabel(point.time, chartRange)}
-        </text>
-      </g>
-    );
-  })}
-
-  {/* chart */}
-  {chartType === "line" ? (
-    <path
-      d={linePath}
-      fill="none"
-      stroke={last < first ? "#dc2626" : "#19C37D"}
-      strokeWidth="3"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-  ) : chartType === "mountain" ? (
-    <>
-      <path
-        d={areaPath}
-        fill={last < first ? "rgba(220, 38, 38, 0.18)" : "rgba(25, 195, 125, 0.18)"}
-        stroke="none"
-      />
-      <path
-        d={linePath}
-        fill="none"
-        stroke={last < first ? "#dc2626" : "#19C37D"}
-        strokeWidth="3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </>
-  ) : (
-    points.map((point, index) => {
-      const x = getX(index);
-      const openY = getY(point.open);
-      const highY = getY(point.high);
-      const lowY = getY(point.low);
-      const closeY = getY(point.close);
-
-      const candleWidth = Math.max(3, Math.min(8, chartWidth / points.length * 0.65));
-      const isUp = point.close >= point.open;
-      const color = isUp ? "#19C37D" : "#dc2626";
-      const bodyY = Math.min(openY, closeY);
-      const bodyHeight = Math.max(1.5, Math.abs(closeY - openY));
-
-      return (
-        <g key={index}>
-          <line
-            x1={x}
-            y1={highY}
-            x2={x}
-            y2={lowY}
-            stroke={color}
-            strokeWidth="1.5"
-          />
-          <rect
-            x={x - candleWidth / 2}
-            y={bodyY}
-            width={candleWidth}
-            height={bodyHeight}
-            fill={color}
-            rx="1"
-          />
-        </g>
-      );
-    })
-  )}
-
-  {/* crosshair */}
-  {chartHover && (
-    <>
-      <line
-        x1={chartHover.x}
-        y1={topPad}
-        x2={chartHover.x}
-        y2={height - bottomPad}
-        stroke="#94a3b8"
-        strokeWidth="1"
-        strokeDasharray="4 4"
-        opacity="0.8"
-      />
-      <line
-        x1={leftPad}
-        y1={chartHover.y}
-        x2={width - rightPad}
-        y2={chartHover.y}
-        stroke="#94a3b8"
-        strokeWidth="1"
-        strokeDasharray="4 4"
-        opacity="0.8"
-      />
-    </>
-  )}
-
-  {/* hover price label on right */}
-  {chartHover && (
-    <g>
-      <rect
-        x={width - rightPad + 6}
-        y={chartHover.y - 10}
-        width={60}
-        height={20}
-        rx={4}
-        fill="#2563eb"
-      />
-      <text
-        x={width - rightPad + 36}
-        y={chartHover.y + 4}
-        fill="white"
-        fontSize="12"
-        textAnchor="middle"
-        fontWeight="bold"
-      >
-        {chartHover.close.toFixed(2)}
-      </text>
-    </g>
-  )}
-
-  {/* current price label on right */}
-  {points.length > 0 && (
-    <g>
-      <rect
-        x={width - rightPad + 6}
-        y={getY(last) - 10}
-        width={60}
-        height={20}
-        rx={4}
-        fill={last >= first ? "#19C37D" : "#dc2626"}
-      />
-      <text
-        x={width - rightPad + 36}
-        y={getY(last) + 4}
-        fill="white"
-        fontSize="12"
-        textAnchor="middle"
-        fontWeight="bold"
-      >
-        {last.toFixed(2)}
-      </text>
-    </g>
-  )}
-
-  {/* hover date label on bottom */}
-  {chartHover && (
-    <g>
-      <rect
-        x={chartHover.x - 50}
-        y={height - bottomPad + 6}
-        width={100}
-        height={22}
-        rx={4}
-        fill="#475569"
-      />
-      <text
-        x={chartHover.x}
-        y={height - bottomPad + 21}
-        fill="white"
-        fontSize="12"
-        textAnchor="middle"
-        fontWeight="bold"
-      >
-        {chartHover.label}
-      </text>
-    </g>
-  )}
-
-  {/* hover zones */}
-  {points.map((point, index) => {
-    const x = getX(index);
-    return (
-      <rect
-        key={index}
-        x={x - Math.max(chartWidth / Math.max(points.length, 1) / 2, 4)}
-        y={topPad}
-        width={Math.max(chartWidth / Math.max(points.length, 1), 8)}
-        height={chartHeight}
-        fill="transparent"
-        onMouseEnter={() =>
-          setChartHover({
-            label: formatChartTimeLabel(point.time, chartRange),
-            time: point.time,
-            open: point.open,
-            high: point.high,
-            low: point.low,
-            close: point.close,
-            x: getX(index),
-            y: getY(point.close),
-          })
-        }
-        onMouseLeave={() => setChartHover(null)}
-      />
-    );
-  })}
-</svg>
-    </div>
-  );
-};
-
 const rowData = useMemo(() => {
   if (!processedStocks.length) return [];
 
@@ -705,6 +363,122 @@ const activeWatchlistTickers = useMemo(() => {
 const watchlistAnalyticsWatchlists = useMemo(() => {
   return { [activeList]: activeWatchlistTickers };
 }, [activeList, activeWatchlistTickers]);
+
+const allocationStorageKey = useMemo(() => {
+  return `bullionaire_watchlist_allocations_${activeList || "Default"}`;
+}, [activeList]);
+
+useEffect(() => {
+  if (view !== "Watchlist") return;
+
+  try {
+    const saved = localStorage.getItem(allocationStorageKey);
+    setWatchlistAllocations(saved ? JSON.parse(saved) : {});
+  } catch (err) {
+    console.error("Failed to load watchlist allocations", err);
+    setWatchlistAllocations({});
+  }
+}, [allocationStorageKey, view]);
+
+useEffect(() => {
+  if (view !== "Watchlist") return;
+
+  try {
+    localStorage.setItem(
+      allocationStorageKey,
+      JSON.stringify(watchlistAllocations)
+    );
+  } catch (err) {
+    console.error("Failed to save watchlist allocations", err);
+  }
+}, [allocationStorageKey, watchlistAllocations, view]);
+
+const getEqualWeightAllocation = useCallback(() => {
+  const tickers = watchlists[activeList] ?? [];
+  if (!tickers.length) return 0;
+  return Number((100 / tickers.length).toFixed(2));
+}, [watchlists, activeList]);
+
+const getAllocationForTicker = useCallback(
+  (ticker) => {
+    const rawValue = watchlistAllocations[ticker];
+
+    if (rawValue === "" || rawValue == null) {
+      return getEqualWeightAllocation();
+    }
+
+    const num = Number(rawValue);
+    return Number.isNaN(num) ? getEqualWeightAllocation() : num;
+  },
+  [watchlistAllocations, getEqualWeightAllocation]
+);
+
+const saveAllocationForTicker = useCallback((ticker, value) => {
+  const cleaned = String(value || "").replace(/[^\d.]/g, "");
+  const numericValue = Number(cleaned);
+
+  if (!ticker) return;
+
+  setWatchlistAllocations((prev) => ({
+    ...prev,
+    [ticker]: Number.isNaN(numericValue) ? "" : cleaned,
+  }));
+}, []);
+
+const resetAllocationsToEqual = useCallback(() => {
+  const tickers = watchlists[activeList] ?? [];
+  if (!tickers.length) return;
+
+  const equalWeight = Number((100 / tickers.length).toFixed(2));
+  const updated = {};
+
+  tickers.forEach((ticker, index) => {
+    if (index === tickers.length - 1) {
+      const used = equalWeight * (tickers.length - 1);
+      updated[ticker] = Number((100 - used).toFixed(2)).toString();
+    } else {
+      updated[ticker] = equalWeight.toString();
+    }
+  });
+
+  setWatchlistAllocations(updated);
+
+  setTimeout(() => {
+    if (gridRef.current?.api) {
+      gridRef.current.api.refreshCells({ force: true });
+    }
+  }, 0);
+}, [watchlists, activeList]);
+
+const allocationTotal = useMemo(() => {
+  if (view !== "Watchlist") return 0;
+
+  const tickers = watchlists[activeList] ?? [];
+
+  return tickers.reduce((sum, ticker) => {
+    return sum + getAllocationForTicker(ticker);
+  }, 0);
+}, [view, watchlists, activeList, getAllocationForTicker]);
+
+const allocationTotalIsValid = Math.abs(allocationTotal - 100) < 0.05;
+
+const updateAllocationFloatingPosition = useCallback(() => {
+  if (view !== "Watchlist") return;
+
+  const api = gridRef.current?.api;
+  if (!api) return;
+
+  const allocationColumn = api.getColumn("Allocation %");
+  if (!allocationColumn) return;
+
+  const left = allocationColumn.getLeft();
+  const width = allocationColumn.getActualWidth();
+
+  setAllocationFloatingStyle({
+    left,
+    width,
+  });
+}, [view]);
 
 const getVisibleSparklineTickers = useCallback(() => {
   if (!rowData.length) return [];
@@ -768,6 +542,22 @@ const getVisibleSparklineTickers = useCallback(() => {
     .filter(Boolean);
 }, [rowData, view]);
 
+const refreshSparklineCells = useCallback((tickers = []) => {
+  if (!gridRef.current?.api || !tickers.length) return;
+
+  const rowNodes = tickers
+    .map((ticker) => gridRef.current.api.getRowNode(String(ticker)))
+    .filter(Boolean);
+
+  if (!rowNodes.length) return;
+
+  gridRef.current.api.refreshCells({
+    rowNodes,
+    columns: ["Today"],
+    force: true,
+  });
+}, []);
+
 const loadVisibleSparklines = useCallback(async () => {
   if (!showTable) return;
   if (!rowData.length) return;
@@ -775,65 +565,83 @@ const loadVisibleSparklines = useCallback(async () => {
   const targetTickers = getVisibleSparklineTickers();
   if (!targetTickers.length) return;
 
-  const cachedRows = {};
-  const missingTickers = [];
+  const now = Date.now();
+  const cachedTickers = [];
+  const tickersToFetch = [];
 
   targetTickers.forEach((ticker) => {
-    if (sparklineCacheRef.current[ticker]) {
-      cachedRows[ticker] = sparklineCacheRef.current[ticker];
-    } else {
-      missingTickers.push(ticker);
+    const cached = sparklineCacheRef.current[ticker];
+    const hasCachedGraph = Array.isArray(cached?.points) && cached.points.length > 0;
+
+    if (hasCachedGraph) {
+      cachedTickers.push(ticker);
+    }
+
+    const cacheAge = now - Number(cached?.cached_at || 0);
+    const needsRefresh = !hasCachedGraph || cacheAge >= SPARKLINE_REFRESH_MS;
+
+    if (needsRefresh && !sparklineInFlightRef.current.has(ticker)) {
+      tickersToFetch.push(ticker);
     }
   });
 
-  if (Object.keys(cachedRows).length) {
-    setSparklines((prev) => ({
-      ...prev,
-      ...cachedRows,
-    }));
+  // Paint anything we already have immediately. This is what makes returning
+  // to the dashboard feel instant instead of showing empty placeholders again.
+  if (cachedTickers.length) {
+    refreshSparklineCells(cachedTickers);
   }
 
-  if (!missingTickers.length) return;
+  if (!tickersToFetch.length) return;
 
-  const requestId = ++sparklineRequestIdRef.current;
+  tickersToFetch.forEach((ticker) => sparklineInFlightRef.current.add(ticker));
 
   try {
     const res = await fetch(
       `${API_BASE}/stocks/sparklines?tickers=${encodeURIComponent(
-        missingTickers.join(",")
+        tickersToFetch.join(",")
       )}`
     );
 
     const data = await res.json();
-
-    if (sparklineRequestIdRef.current !== requestId) return;
-
     const newRows = data?.rows || {};
+    const cachedAt = Date.now();
 
     Object.entries(newRows).forEach(([ticker, value]) => {
-      sparklineCacheRef.current[ticker] = value;
+      if (!Array.isArray(value?.points) || !value.points.length) return;
+
+      sparklineCacheRef.current[ticker] = {
+        ...value,
+        cached_at: cachedAt,
+      };
     });
 
-    setSparklines((prev) => ({
-      ...prev,
-      ...cachedRows,
-      ...newRows,
-    }));
+    persistSparklineCache(sparklineCacheRef.current);
+    refreshSparklineCells(Object.keys(newRows));
   } catch (err) {
     console.error("Failed to load visible sparklines", err);
+  } finally {
+    tickersToFetch.forEach((ticker) => sparklineInFlightRef.current.delete(ticker));
   }
-}, [API_BASE, getVisibleSparklineTickers, rowData, showTable, view]);
+}, [
+  API_BASE,
+  getVisibleSparklineTickers,
+  refreshSparklineCells,
+  rowData,
+  showTable,
+]);
 
 const loadRemainingSparklinesInBackground = useCallback(async () => {
   if (!rowData.length) return;
-
   if (sparklineBackgroundLoadStartedRef.current) return;
+
   sparklineBackgroundLoadStartedRef.current = true;
 
   const allTickers = rowData.map((row) => row.Ticker).filter(Boolean);
-  const missingTickers = allTickers.filter(
-    (ticker) => !sparklineCacheRef.current[ticker]
-  );
+  const missingTickers = allTickers.filter((ticker) => {
+    const cached = sparklineCacheRef.current[ticker];
+    const hasCachedGraph = Array.isArray(cached?.points) && cached.points.length > 0;
+    return !hasCachedGraph && !sparklineInFlightRef.current.has(ticker);
+  });
 
   if (!missingTickers.length) return;
 
@@ -841,6 +649,7 @@ const loadRemainingSparklinesInBackground = useCallback(async () => {
 
   for (let i = 0; i < missingTickers.length; i += chunkSize) {
     const chunk = missingTickers.slice(i, i + chunkSize);
+    chunk.forEach((ticker) => sparklineInFlightRef.current.add(ticker));
 
     try {
       await new Promise((resolve) => setTimeout(resolve, 60));
@@ -853,20 +662,26 @@ const loadRemainingSparklinesInBackground = useCallback(async () => {
 
       const data = await res.json();
       const newRows = data?.rows || {};
+      const cachedAt = Date.now();
 
       Object.entries(newRows).forEach(([ticker, value]) => {
-        sparklineCacheRef.current[ticker] = value;
+        if (!Array.isArray(value?.points) || !value.points.length) return;
+
+        sparklineCacheRef.current[ticker] = {
+          ...value,
+          cached_at: cachedAt,
+        };
       });
 
-      setSparklines((prev) => ({
-        ...prev,
-        ...newRows,
-      }));
+      persistSparklineCache(sparklineCacheRef.current);
+      refreshSparklineCells(Object.keys(newRows));
     } catch (err) {
       console.error("Failed background sparkline batch", err);
+    } finally {
+      chunk.forEach((ticker) => sparklineInFlightRef.current.delete(ticker));
     }
   }
-}, [API_BASE, rowData, view]);
+}, [API_BASE, refreshSparklineCells, rowData, view]);
 
 const scheduleVisibleSparklineLoad = useCallback(() => {
   if (sparklineDebounceRef.current) {
@@ -899,9 +714,13 @@ const scheduleVisibleSparklineLoad = useCallback(() => {
     case "EPS (TTM)":
       return { min: "min_eps", max: "max_eps" };
     case "P/E (TTM)":
-      return { min: "min_pe", max: "max_pe" };
-    case "Dividend Yield":
-      return { min: "min_dividend", max: "max_dividend" };
+  return { min: "min_pe", max: "max_pe" };
+case "PEG Ratio":
+  return { min: "min_peg", max: "max_peg" };
+case "P/S Ratio":
+  return { min: "min_ps", max: "max_ps" };
+case "Dividend Yield":
+  return { min: "min_dividend", max: "max_dividend" };
     case "RSI":
       return { min: "min_rsi", max: "max_rsi" };
     case "MACD":
@@ -913,9 +732,11 @@ const scheduleVisibleSparklineLoad = useCallback(() => {
     case "SMA 20":
       return { min: "min_sma20", max: "max_sma20" };
     case "Beta":
-      return { min: "min_beta", max: "max_beta" };
-    case "EBITDA":
-      return { min: "min_ebitda", max: "max_ebitda" };
+  return { min: "min_beta", max: "max_beta" };
+case "Standard Deviation (1Y)":
+  return { min: "min_std_dev", max: "max_std_dev" };
+case "EBITDA":
+  return { min: "min_ebitda", max: "max_ebitda" };
     case "Short % of Float":
       return { min: "min_short_float", max: "max_short_float" };
     case "Gross Profit":
@@ -1052,6 +873,26 @@ const restoreScrollPosition = () => {
   });
 };
 
+const setCurrentPageTracked = (page) => {
+  currentPageRef.current = page;
+  setCurrentPage(page);
+};
+
+const showRowsForPage = (rows, page) => {
+  // A live-price snapshot for an older page may finish after the user has
+  // already clicked Next/Previous. Never let that stale async result replace
+  // the rows for the page currently on screen.
+  if (view !== "Watchlist" && currentPageRef.current !== page) return false;
+
+  // AG Grid can recreate its horizontal viewport when immutable row data is
+  // refreshed. Capture both synchronized scrollbars immediately before the
+  // update and restore them after layout so snapshots never jump back left.
+  saveScrollPosition();
+  setStocks(rows);
+  restoreScrollPosition();
+  return true;
+};
+
 const cancelStockRequest = () => {
   if (stocksAbortRef.current) {
     stocksAbortRef.current.abort();
@@ -1163,7 +1004,9 @@ setDisplayedCount(rows.length);
 setLoading(false);
 
 mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
+  saveScrollPosition();
   setStocks(rowsWithLivePrices);
+  restoreScrollPosition();
 });
   setTotalPages(1);
   setPageCache({});
@@ -1200,12 +1043,12 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
         restoreScrollPosition();
         setDisplayedCount(preloaded.total);
         setTotalPages(preloaded.totalPages);
-        setCurrentPage(1);
+        setCurrentPageTracked(1);
         setLoading(false);
 
         mergeLivePricesIntoRows(preloaded.rows).then((rowsWithLivePrices) => {
           setPageCache((prev) => ({ ...prev, 1: rowsWithLivePrices }));
-          setStocks(rowsWithLivePrices);
+          showRowsForPage(rowsWithLivePrices, 1);
           localStorage.setItem("stocks", JSON.stringify(rowsWithLivePrices));
         });
       }
@@ -1229,17 +1072,16 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
     const initialCache = { 1: firstRows };
 
 setPageCache(initialCache);
-setStocks(firstRows);
-restoreScrollPosition();
+showRowsForPage(firstRows, 1);
 setDisplayedCount(total);
 setTotalPages(pages);
-setCurrentPage(1);
+setCurrentPageTracked(1);
 localStorage.setItem("stocks", JSON.stringify(firstRows));
 setLoading(false);
 
 mergeLivePricesIntoRows(firstRows).then((rowsWithLivePrices) => {
   setPageCache((prev) => ({ ...prev, 1: rowsWithLivePrices }));
-  setStocks(rowsWithLivePrices);
+  showRowsForPage(rowsWithLivePrices, 1);
   localStorage.setItem("stocks", JSON.stringify(rowsWithLivePrices));
 });
 
@@ -1259,12 +1101,10 @@ mergeLivePricesIntoRows(firstRows).then((rowsWithLivePrices) => {
 const changePage = async (nextPage) => {
   if (nextPage < 1 || nextPage > totalPages) return;
 
-  setCurrentPage(nextPage);
+  setCurrentPageTracked(nextPage);
 
   if (pageCache[nextPage]) {
-  saveScrollPosition();
-  setStocks(pageCache[nextPage]);
-  restoreScrollPosition();
+  showRowsForPage(pageCache[nextPage], nextPage);
   return;
 }
 
@@ -1280,13 +1120,12 @@ const changePage = async (nextPage) => {
     const rows = Array.isArray(data?.rows) ? data.rows : [];
 
 setPageCache((prev) => ({ ...prev, [nextPage]: rows }));
-setStocks(rows);
-restoreScrollPosition();
+showRowsForPage(rows, nextPage);
 setLoading(false);
 
 mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
   setPageCache((prev) => ({ ...prev, [nextPage]: rowsWithLivePrices }));
-  setStocks(rowsWithLivePrices);
+  showRowsForPage(rowsWithLivePrices, nextPage);
 });
   } catch (err) {
     console.error(`Failed to load page ${nextPage}`, err);
@@ -1319,36 +1158,48 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
 ]);
 
 useEffect(() => {
-  setCurrentPage(1);
+  setCurrentPageTracked(1);
 }, [searchQuery, selectedSector, selectedType, tickerFilter, tickersParam, backendFilterModel, view]);
 
  useEffect(() => {
+  // Watchlist search already uses AG Grid's local quick-filter immediately, so
+  // do not trigger an unnecessary backend reload for that view.
+  if (view === "Watchlist") return undefined;
+
+  const nextQuery = typedQuery.trim();
+  const delay = nextQuery ? 400 : 0;
+
   const handler = setTimeout(() => {
-    setSearchQuery(typedQuery);
-  }, 650);
+    setSearchQuery((current) => (current === nextQuery ? current : nextQuery));
+  }, delay);
 
   return () => clearTimeout(handler);
-}, [typedQuery]);
+}, [typedQuery, view]);
 
   useEffect(() => {
+    let topScroll = null;
+    let gridViewport = null;
+    let syncTop = null;
+    let syncBottom = null;
+
     const setupScrollSync = () => {
-      const topScroll = document.querySelector(".top-scrollbar");
+      topScroll = document.querySelector(".top-scrollbar");
       const topContent = document.querySelector(".top-scroll-content");
-      const gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
+      gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
       const gridCenter = document.querySelector(".ag-center-cols-container");
 
       if (!topScroll || !topContent || !gridViewport || !gridCenter) return;
 
       topContent.style.width = gridCenter.scrollWidth + "px";
 
-      const syncTop = () => {
+      syncTop = () => {
         const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
         const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
         const ratio = maxTop > 0 ? topScroll.scrollLeft / maxTop : 0;
         gridViewport.scrollLeft = ratio * maxGrid;
       };
 
-      const syncBottom = () => {
+      syncBottom = () => {
         const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
         const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
         const ratio = maxGrid > 0 ? gridViewport.scrollLeft / maxGrid : 0;
@@ -1360,7 +1211,16 @@ useEffect(() => {
     };
 
     const timer = setTimeout(setupScrollSync, 200);
-    return () => clearTimeout(timer);
+
+    return () => {
+      clearTimeout(timer);
+      if (topScroll && syncTop) {
+        topScroll.removeEventListener("scroll", syncTop);
+      }
+      if (gridViewport && syncBottom) {
+        gridViewport.removeEventListener("scroll", syncBottom);
+      }
+    };
   }, [processedStocks]);
 
   useEffect(() => {
@@ -1441,6 +1301,8 @@ const fundamentalsColumns = [
   "Market Cap",
   "EPS (TTM)",
   "P/E (TTM)",
+  "PEG Ratio",
+  "P/S Ratio",
   "EBITDA",
   "Gross Profit",
   "Dividend Yield",
@@ -1448,7 +1310,8 @@ const fundamentalsColumns = [
   "Mean Target",
   "Analyst Upside",
   "Analyst Downside",
-  "Beta"
+  "Beta",
+  "Standard Deviation (1Y)"
 ];
 
 const technicalsColumns = [
@@ -1465,6 +1328,7 @@ const technicalsColumns = [
   "MACD Histogram",
   "SMA 20",
   "Beta",
+  "Standard Deviation (1Y)",
 ];
 
   const columns = useMemo(() => {
@@ -1522,7 +1386,7 @@ const technicalsColumns = [
   sortable: true,
   filter: view === "Watchlist" ? "agTextColumnFilter" : false,
 
-    tooltipValueGetter: (params) => {
+  tooltipValueGetter: (params) => {
     const name = params.data?.["Company Name"] || "";
     const description = params.data?.["Description"] || "";
 
@@ -1537,6 +1401,26 @@ const technicalsColumns = [
     debounceMs: 200,
     suppressAndOrCondition: true,
   },
+
+  cellRenderer: (params) => {
+    const ticker = params.value || params.data?.Ticker;
+    if (!ticker) return "";
+
+    return (
+      <button
+        type="button"
+        className="ticker-link-button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          navigate(`/stocks/${String(ticker).toUpperCase()}`, { state: { stock: params?.data || null } });
+        }}
+      >
+        {ticker}
+      </button>
+    );
+  },
+
   cellClass: "column-border",
   headerClass: "column-border",
 },
@@ -1552,7 +1436,7 @@ const technicalsColumns = [
   headerClass: "column-border",
   cellRenderer: (params) => {
     const ticker = params.data?.Ticker;
-    const spark = sparklines[ticker];
+    const spark = sparklineCacheRef.current[ticker];
 
     if (!spark || !spark.points?.length) {
   return (
@@ -1573,13 +1457,10 @@ const technicalsColumns = [
     return (
   <div
   onClick={() => {
-  setChartTicker(ticker);
-  setChartRange("1D");
-  setChartType("candles");
-  setChartHover(null);
-  setSelectedRangePopup(null);
-  setChartModalOpen(true);
-}}
+    setChartTicker(ticker);
+setChartStockContext(params?.data || null);
+setChartModalOpen(true);
+  }}
   style={{
     display: "flex",
     alignItems: "center",
@@ -1595,6 +1476,92 @@ const technicalsColumns = [
   },
 },
     ];
+    if (view === "Watchlist") {
+  cols.push({
+    headerName: "Allocation %",
+colId: "Allocation %",
+field: "Allocation %",
+width: 135,
+pinned: "left",
+sortable: true,
+filter: false,
+suppressMenu: true,
+headerClass: "column-border",
+cellClass: "column-border numeric",
+    valueGetter: (params) => {
+      const ticker = params.data?.Ticker;
+      if (!ticker) return null;
+      return getAllocationForTicker(ticker);
+    },
+    cellRenderer: (params) => {
+      const ticker = params.data?.Ticker;
+      if (!ticker) return "";
+
+      const currentValue = getAllocationForTicker(ticker);
+
+      const commitValue = (rawValue) => {
+        saveAllocationForTicker(ticker, rawValue);
+
+        setTimeout(() => {
+          if (gridRef.current?.api) {
+            gridRef.current.api.refreshCells({
+              columns: ["Allocation %"],
+              force: false,
+            });
+          }
+        }, 0);
+      };
+
+      return (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            height: "100%",
+            gap: "4px",
+          }}
+        >
+          <input
+  defaultValue={currentValue.toFixed(2)}
+  onBlur={(e) => commitValue(e.target.value)}
+  onKeyDown={(e) => {
+    e.stopPropagation();
+
+    if (e.key === "Enter") {
+      commitValue(e.currentTarget.value);
+      e.currentTarget.blur();
+    }
+  }}
+  onClick={(e) => e.stopPropagation()}
+  style={{
+    width: "62px",
+    background: "transparent",
+    border: "none",
+    color: "inherit",
+    borderRadius: "0px",
+    padding: "4px 6px",
+    textAlign: "right",
+    fontSize: "12px",
+    fontWeight: 700,
+    outline: "none",
+  }}
+/>
+
+          <span
+            style={{
+  color: "inherit",
+  fontSize: "12px",
+  fontWeight: 700,
+}}
+          >
+            %
+          </span>
+        </div>
+      );
+    },
+  });
+}
 
     const orderedColumns = [
       "Current Price",
@@ -1606,10 +1573,13 @@ const technicalsColumns = [
       "Day Volume",
       "Today Change %",
       "Market Cap",
-      "EPS (TTM)",
-      "P/E (TTM)",
-      "Beta",
-      "EBITDA",
+"EPS (TTM)",
+"P/E (TTM)",
+"PEG Ratio",
+"P/S Ratio",
+"Beta",
+"Standard Deviation (1Y)",
+"EBITDA",
       "Short % of Float",
       "Gross Profit",
       "Dividend Yield",
@@ -1646,7 +1616,7 @@ const technicalsColumns = [
   })
   .forEach((col) => {
       const columnDef = {
-  headerName: col,
+  headerName: col === "Standard Deviation (1Y)" ? "1Y Std Dev" : col,
   headerTooltip: metricTooltips[col],
   field: col,
   sortable: true,
@@ -1654,6 +1624,9 @@ const technicalsColumns = [
   minWidth: 130,
   headerClass: "column-border",
   cellClass: "column-border",
+
+  suppressHeaderFilterButton: false,
+  suppressHeaderMenuButton: false,
 
   tooltipValueGetter:
     col === "Type"
@@ -1703,26 +1676,30 @@ const technicalsColumns = [
 
           if (
   [
-    "Today Change %",
-    "Dividend Yield",
-    "Short % of Float",
-    "Analyst Upside",
-    "Analyst Downside",
-  ].includes(col)
+  "Today Change %",
+  "Dividend Yield",
+  "Short % of Float",
+  "Analyst Upside",
+  "Analyst Downside",
+  "Standard Deviation (1Y)",
+].includes(col)
 ) {
   return typeof val === "number" ? `${val.toFixed(2)}%` : val;
 }
 
           if (
-            [
-              "EPS (TTM)",
-              "P/E (TTM)",
-              "RSI",
+  [
+    "EPS (TTM)",
+    "P/E (TTM)",
+    "PEG Ratio",
+    "P/S Ratio",
+    "RSI",
               "MACD",
               "MACD Signal",
               "MACD Histogram",
               "SMA 20",
               "Beta",
+              "Standard Deviation (1Y)",
               "EBITDA",
               "Gross Profit",
             ].includes(col)
@@ -1804,14 +1781,17 @@ const technicalsColumns = [
           "Day Volume",
           "Today Change %",
           "EPS (TTM)",
-          "P/E (TTM)",
-          "Dividend Yield",
+"P/E (TTM)",
+"PEG Ratio",
+"P/S Ratio",
+"Dividend Yield",
           "RSI",
           "MACD",
           "MACD Signal",
           "MACD Histogram",
           "SMA 20",
           "Beta",
+          "Standard Deviation (1Y)",
           "EBITDA",
           "Short % of Float",
           "Gross Profit",
@@ -1845,11 +1825,25 @@ const technicalsColumns = [
     });
 
     return cols;
-  }, [watchlists, activeList, view, viewMode, sparklines]);
+  }, [
+  watchlists,
+  activeList,
+  view,
+  viewMode,
+  watchlistAllocations,
+  getAllocationForTicker,
+  saveAllocationForTicker,
+]);
 
-  useEffect(() => {
-  restoreScrollPosition();
-}, [processedStocks]);
+useEffect(() => {
+  if (view !== "Watchlist") return;
+
+  const timer = setTimeout(() => {
+    updateAllocationFloatingPosition();
+  }, 150);
+
+  return () => clearTimeout(timer);
+}, [view, rowData, columns, updateAllocationFloatingPosition]);
 
   useEffect(() => {
     if (view === "Watchlist" && gridRef.current?.api) {
@@ -1858,57 +1852,36 @@ const technicalsColumns = [
   }, [rowData, view]);
 
 useEffect(() => {
-  if (!showTable) return;
+  if (!showTable) return undefined;
 
-  if (!rowData.length) {
-    setSparklines({});
-    sparklineCacheRef.current = {};
-    sparklineBackgroundLoadStartedRef.current = false;
-    return;
-  }
+  sparklineBackgroundLoadStartedRef.current = false;
 
+  if (!rowData.length) return undefined;
+
+  // Paint cached graphs first, refresh what is visible, then quietly fill the
+  // rest of the current page so a later return to the dashboard is instant.
   scheduleVisibleSparklineLoad();
+
+  sparklineBackgroundTimerRef.current = setTimeout(() => {
+    loadRemainingSparklinesInBackground();
+  }, 800);
 
   return () => {
     if (sparklineDebounceRef.current) {
       clearTimeout(sparklineDebounceRef.current);
     }
-  };
-}, [rowData, showTable, view, scheduleVisibleSparklineLoad]);
-
-useEffect(() => {
-  if (view === "Watchlist") return;
-
-  setSparklines({});
-  sparklineCacheRef.current = {};
-  sparklineBackgroundLoadStartedRef.current = false;
-}, [searchQuery, selectedSector, selectedType, tickerFilter, tickersParam, backendFilterModel, view]);
-
-useEffect(() => {
-  if (!chartModalOpen || !chartTicker) return;
-
-  const fetchChart = async () => {
-    try {
-      setChartLoading(true);
-      setChartHover(null);
-      setSelectedRangePopup(null);
-
-      const res = await fetch(
-        `${API_BASE}/stocks/${chartTicker}/chart?range=${encodeURIComponent(chartRange)}`
-      );
-      const data = await res.json();
-
-      setChartData(Array.isArray(data?.points) ? data.points : []);
-    } catch (err) {
-      console.error("Failed to load chart", err);
-      setChartData([]);
-    } finally {
-      setChartLoading(false);
+    if (sparklineBackgroundTimerRef.current) {
+      clearTimeout(sparklineBackgroundTimerRef.current);
+      sparklineBackgroundTimerRef.current = null;
     }
   };
+}, [
+  loadRemainingSparklinesInBackground,
+  rowData,
+  scheduleVisibleSparklineLoad,
+  showTable,
+]);
 
-  fetchChart();
-}, [chartModalOpen, chartTicker, chartRange, API_BASE]);
 
   useEffect(() => {
   if (view === "Watchlist") return;
@@ -1974,8 +1947,6 @@ if (!user) return;
     }),
     []
   );
-
-  const chartPerformance = getChartPerformance(chartData);
 
   const shouldShowFullLoadingOverlay = loading && rowData.length === 0;
   const shouldShowSmallRefreshNotice = loading && rowData.length > 0;
@@ -2144,6 +2115,7 @@ setActiveList("Default");
   activeList={activeList}
   watchlists={watchlistAnalyticsWatchlists}
   stocks={rowData}
+  allocations={watchlistAllocations}
 />
                 </div>
               )}
@@ -2163,6 +2135,7 @@ setActiveList("Default");
       placeholder="Search company or ticker..."
       value={typedQuery}
       onChange={(e) => {
+        cancelStockRequest();
         setTypedQuery(e.target.value);
       }}
       className="search-input"
@@ -2236,7 +2209,56 @@ setActiveList("Default");
       )}
 
       {showTable && (
-  <div style={{ position: "relative" }}>
+  <div style={{ position: "relative", overflow: "visible" }}>
+  {view === "Watchlist" && rowData.length > 0 && (
+  <div
+    style={{
+  position: "absolute",
+  left: `${allocationFloatingStyle.left}px`,
+  top: `${92 + Math.min(rowData.length, 10) * 30}px`,
+  zIndex: 999,
+  width: `${allocationFloatingStyle.width}px`,
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "center",
+  gap: "6px",
+  pointerEvents: "auto",
+}}
+  >
+    <div
+      style={{
+        background: allocationTotalIsValid ? "#22c55e" : "#f97316",
+        color: "white",
+        borderRadius: "999px",
+        padding: "5px 10px",
+        fontSize: "11px",
+        fontWeight: 800,
+        boxShadow: "0 8px 18px rgba(0,0,0,0.28)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      Total: {allocationTotal.toFixed(1)}%
+    </div>
+
+    <button
+      onClick={resetAllocationsToEqual}
+      style={{
+        background: "#22c55e",
+        color: "white",
+        border: "none",
+        borderRadius: "999px",
+        padding: "7px 12px",
+        fontSize: "12px",
+        fontWeight: 900,
+        cursor: "pointer",
+        boxShadow: "0 8px 18px rgba(0,0,0,0.35)",
+        whiteSpace: "nowrap",
+      }}
+    >
+      Reset Equal
+    </button>
+  </div>
+)}
     {shouldShowFullLoadingOverlay && (
       <div
         className="loading-container"
@@ -2248,7 +2270,8 @@ setActiveList("Default");
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          flexDirection: "column"
+          flexDirection: "column",
+          transform: "translateY(-70px)"
         }}
       >
         <div className="spinner"></div>
@@ -2294,7 +2317,7 @@ setActiveList("Default");
 
     <div
       className={`ag-theme-alpine ${view === "Watchlist" ? "ag-watchlist" : ""}`}
-      style={{ width: "100%", height: "700px" }}
+      style={{ width: "100%", height: "700px", overflow: "visible" }}
     >
 <AgGridReact
   ref={gridRef}
@@ -2303,12 +2326,19 @@ setActiveList("Default");
   rowData={rowData}
   columnDefs={columns}
   defaultColDef={defaultColDef}
+  overlayNoRowsTemplate={`
+    <div class="bullionaire-no-rows-overlay">
+      <div class="bullionaire-no-rows-title">Let’s get rich</div>
+      <div class="bullionaire-no-rows-subtitle">Loading market data...</div>
+    </div>
+  `}
   immutableData={true}
   getRowId={(params) => params.data.Ticker}
   suppressScrollOnNewData={true}
   rowBuffer={0}
   animateRows={true}
   rowSelection="multiple"
+  suppressRowClickSelection={true}
   rowHeight={30}
   tooltipShowDelay={0}
   tooltipHideDelay={25000}
@@ -2317,6 +2347,10 @@ setActiveList("Default");
 
   if (view === "Watchlist") {
     setDisplayedCount(params.api.getDisplayedRowCount());
+
+    setTimeout(() => {
+      updateAllocationFloatingPosition();
+    }, 0);
   } else {
     scheduleVisibleSparklineLoad();
   }
@@ -2347,7 +2381,7 @@ setActiveList("Default");
 
   const backendParams = buildBackendFilterParams(model);
   setBackendFilterModel(backendParams);
-  setCurrentPage(1);
+  setCurrentPageTracked(1);
 
   restoreScrollPosition();
   scheduleVisibleSparklineLoad();
@@ -2357,6 +2391,10 @@ onBodyScroll={() => {
     scheduleVisibleSparklineLoad();
   }
 }}
+onColumnResized={updateAllocationFloatingPosition}
+onColumnMoved={updateAllocationFloatingPosition}
+onColumnPinned={updateAllocationFloatingPosition}
+onDisplayedColumnsChanged={updateAllocationFloatingPosition}
 />
     </div>
 
@@ -2478,227 +2516,13 @@ setTimeout(() => setNotification(null), 2000);
     )}
   </div>
 )}
-{chartModalOpen && (
-  <div
-    style={{
-      position: "fixed",
-      inset: 0,
-      backgroundColor: "rgba(0, 0, 0, 0.65)",
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      zIndex: 2000,
-      padding: "20px",
-    }}
-    onClick={() => setChartModalOpen(false)}
-  >
-    <div
-      onClick={(e) => e.stopPropagation()}
-      style={{
-        width: "90%",
-        maxWidth: "1100px",
-        height: "75vh",
-        background: "#111827",
-        borderRadius: "14px",
-        padding: "20px",
-        boxSizing: "border-box",
-        color: "white",
-        display: "flex",
-        flexDirection: "column",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: "16px",
-        }}
-      >
-        <h2 style={{ margin: 0 }}>{chartTicker} Chart</h2>
-
-        <button
-          onClick={() => setChartModalOpen(false)}
-          style={{
-            padding: "8px 12px",
-            borderRadius: "6px",
-            border: "none",
-            background: "#1f2937",
-            color: "white",
-            cursor: "pointer",
-            fontWeight: "bold",
-          }}
-        >
-          Close
-        </button>
-      </div>
-
-      <div
-  style={{
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: "12px",
-    marginBottom: "16px",
-    flexWrap: "wrap",
-  }}
->
-  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-    {["1D", "5D", "1M", "6M", "1Y", "5Y", "Max"].map((range) => {
-  const isSelected = chartRange === range;
-
-  return (
-    <div
-      key={range}
-      style={{
-        position: "relative",
-        display: "inline-flex",
-        flexDirection: "column",
-        alignItems: "center",
-      }}
-    >
-      <button
-        onClick={() => {
-          setChartRange(range);
-
-          if (chartPerformance) {
-            setSelectedRangePopup({
-              range,
-              pct: chartPerformance.pct,
-              isUp: chartPerformance.pct >= 0,
-            });
-          }
-        }}
-        style={{
-          padding: "6px 10px",
-          borderRadius: "6px",
-          cursor: "pointer",
-          border: "none",
-          background: isSelected ? "#19C37D" : "#1f2937",
-          color: "white",
-          fontWeight: isSelected ? "bold" : "normal",
-        }}
-      >
-        {range}
-      </button>
-
-      {selectedRangePopup?.range === range && isSelected && (
-        <div
-          style={{
-            position: "absolute",
-            top: "110%",
-            marginTop: "6px",
-            background: "#111827",
-            border: "1px solid #374151",
-            borderRadius: "8px",
-            padding: "6px 10px",
-            fontSize: "12px",
-            fontWeight: "bold",
-            color: selectedRangePopup.isUp ? "#19C37D" : "#dc2626",
-            whiteSpace: "nowrap",
-            zIndex: 10,
-          }}
-        >
-          {selectedRangePopup.pct >= 0 ? "+" : ""}
-          {selectedRangePopup.pct.toFixed(2)}%
-        </div>
-      )}
-    </div>
-  );
-})}
-  </div>
-
-  {chartPerformance && (
-    <div
-      style={{
-        padding: "6px 12px",
-        borderRadius: "8px",
-        background: "#0f172a",
-        color: chartPerformance.isUp ? "#19C37D" : "#dc2626",
-        fontWeight: "bold",
-        border: "1px solid #1f2937",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {chartPerformance.change >= 0 ? "+" : ""}
-      {chartPerformance.change.toFixed(2)} (
-      {chartPerformance.pct >= 0 ? "+" : ""}
-      {chartPerformance.pct.toFixed(2)}%)
-    </div>
-  )}
-
-  <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-  <button
-    onClick={() => setChartType("mountain")}
-    style={{
-      padding: "6px 10px",
-      borderRadius: "6px",
-      cursor: "pointer",
-      border: "none",
-      background: chartType === "mountain" ? "#19C37D" : "#1f2937",
-      color: "white",
-      fontWeight: chartType === "mountain" ? "bold" : "normal",
-    }}
-  >
-    Mountain
-  </button>
-
-  <button
-    onClick={() => setChartType("line")}
-    style={{
-      padding: "6px 10px",
-      borderRadius: "6px",
-      cursor: "pointer",
-      border: "none",
-      background: chartType === "line" ? "#19C37D" : "#1f2937",
-      color: "white",
-      fontWeight: chartType === "line" ? "bold" : "normal",
-    }}
-  >
-    Line
-  </button>
-
-  <button
-    onClick={() => setChartType("candles")}
-    style={{
-      padding: "6px 10px",
-      borderRadius: "6px",
-      cursor: "pointer",
-      border: "none",
-      background: chartType === "candles" ? "#19C37D" : "#1f2937",
-      color: "white",
-      fontWeight: chartType === "candles" ? "bold" : "normal",
-    }}
-  >
-    Candles
-  </button>
-</div>
-</div>
-
-      <div
-  style={{
-    flex: 1,
-    background: "#0f172a",
-    borderRadius: "10px",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    color: "#9ca3af",
-    fontSize: "18px",
-    border: "1px solid #1f2937",
-    padding: "12px",
-    boxSizing: "border-box",
-  }}
->
-  {chartLoading ? (
-    <div>Loading chart for {chartTicker}...</div>
-  ) : (
-    renderLargeChartSvg(chartData)
-  )}
-</div>
-    </div>
-  </div>
-)}
+<StockChartModal
+  isOpen={chartModalOpen}
+  ticker={chartTicker}
+  stockContext={chartStockContext}
+  onClose={() => setChartModalOpen(false)}
+  API_BASE={API_BASE}
+/>
     </div>
   );
 };

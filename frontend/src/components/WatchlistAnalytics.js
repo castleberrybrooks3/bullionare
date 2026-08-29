@@ -25,44 +25,93 @@ const getSectorColor = (sector) => {
 
 ChartJS.register(ArcElement, Tooltip, Legend);
 
-function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
-  const { chartData, avgBeta } = useMemo(() => {
+function WatchlistAnalytics({
+  activeList,
+  watchlists,
+  stocks = [],
+  allocations = {},
+}) {
+  const { chartData, avgBeta, avgStdDev } = useMemo(() => {
     const tickers = watchlists?.[activeList] || [];
 
     const stockMap = Object.fromEntries(
       stocks.map((stock) => [stock.Ticker, stock])
     );
 
+    const equalWeight = tickers.length > 0 ? 100 / tickers.length : 0;
+
+    const getAllocationForTicker = (ticker) => {
+      const rawValue = allocations[ticker];
+
+      if (rawValue === "" || rawValue == null) {
+        return Number(equalWeight.toFixed(2));
+      }
+
+      const num = Number(rawValue);
+
+      return Number.isNaN(num)
+        ? Number(equalWeight.toFixed(2))
+        : num;
+    };
+
     const breakdown = {};
-    const betaValues = [];
+
+    let betaWeightedSum = 0;
+    let betaWeightTotal = 0;
+
+    let stdDevWeightedSum = 0;
+    let stdDevWeightTotal = 0;
 
     tickers.forEach((ticker) => {
       const stock = stockMap[ticker];
       if (!stock) return;
 
+      const allocation = getAllocationForTicker(ticker);
       const sector = stock.Sector || "Unknown";
-      breakdown[sector] = (breakdown[sector] || 0) + 1;
 
+      breakdown[sector] = (breakdown[sector] || 0) + allocation;
+
+      // Allocation-weighted Beta
       const rawBeta = Number(stock.Beta);
+
       if (!Number.isNaN(rawBeta) && rawBeta !== 0) {
-        betaValues.push(rawBeta);
+        betaWeightedSum += rawBeta * (allocation / 100);
+        betaWeightTotal += allocation / 100;
       }
+
+      // Allocation-weighted 1Y standard deviation
+const rawStdDevValue = stock["Standard Deviation (1Y)"];
+
+if (rawStdDevValue !== null && rawStdDevValue !== "") {
+  const rawStdDev = Number(rawStdDevValue);
+
+  if (
+    Number.isFinite(rawStdDev) &&
+    rawStdDev >= 0 &&
+    Number.isFinite(allocation) &&
+    allocation >= 0
+  ) {
+    stdDevWeightedSum += rawStdDev * (allocation / 100);
+    stdDevWeightTotal += allocation / 100;
+  }
+}
     });
 
     const labels = Object.keys(breakdown);
-    const counts = Object.values(breakdown);
-    const total = counts.reduce((sum, count) => sum + count, 0);
+    const values = Object.values(breakdown);
 
     const chartData =
-      total > 0
+      values.length > 0
         ? {
             labels,
             datasets: [
               {
-                data: counts.map((count) =>
-                  Number(((count / total) * 100).toFixed(1))
+                data: values.map((value) =>
+                  Number(value.toFixed(1))
                 ),
-                backgroundColor: labels.map((sector) => getSectorColor(sector)),
+                backgroundColor: labels.map((sector) =>
+                  getSectorColor(sector)
+                ),
                 borderWidth: 0,
               },
             ],
@@ -70,12 +119,21 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
         : null;
 
     const avgBeta =
-      betaValues.length > 0
-        ? betaValues.reduce((sum, value) => sum + value, 0) / betaValues.length
+      betaWeightTotal > 0
+        ? betaWeightedSum / betaWeightTotal
         : null;
 
-    return { chartData, avgBeta };
-  }, [activeList, watchlists, stocks]);
+    const avgStdDev =
+  stdDevWeightTotal > 0
+    ? stdDevWeightedSum / stdDevWeightTotal
+    : null;
+
+    return {
+      chartData,
+      avgBeta,
+      avgStdDev,
+    };
+  }, [activeList, watchlists, stocks, allocations]);
 
   const options = {
     responsive: true,
@@ -97,9 +155,16 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
     },
   };
 
-  const betaDisplay = avgBeta != null ? avgBeta.toFixed(2) : "--";
+  const betaDisplay =
+    avgBeta != null ? avgBeta.toFixed(2) : "--";
+
+  const stdDevDisplay =
+    avgStdDev != null ? `${avgStdDev.toFixed(2)}%` : "--";
+
   const betaPosition =
-    avgBeta != null ? Math.max(0, Math.min((avgBeta / 5) * 100, 100)) : 0;
+    avgBeta != null
+      ? Math.max(0, Math.min((avgBeta / 5) * 100, 100))
+      : 0;
 
   return (
     <div
@@ -107,8 +172,8 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
         width: "100%",
         maxWidth: "650px",
         minWidth: 0,
-        height: "220px",
-        minHeight: "220px",
+        height: "245px",
+        minHeight: "245px",
         display: "flex",
         flexWrap: "nowrap",
         flexDirection: "row",
@@ -194,7 +259,12 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
         </div>
 
         <div style={{ width: "100%" }}>
-          <div style={{ position: "relative", paddingTop: "14px" }}>
+          <div
+            style={{
+              position: "relative",
+              paddingTop: "14px",
+            }}
+          >
             {avgBeta != null && (
               <div
                 style={{
@@ -206,7 +276,8 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
                   height: "14px",
                   backgroundColor: "#ffffff",
                   borderRadius: "2px",
-                  boxShadow: "0 0 6px rgba(255,255,255,0.6)",
+                  boxShadow:
+                    "0 0 6px rgba(255,255,255,0.6)",
                 }}
               />
             )}
@@ -218,7 +289,8 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
                 borderRadius: "999px",
                 background:
                   "linear-gradient(90deg, #22c55e 0%, #84cc16 20%, #eab308 40%, #f97316 65%, #ef4444 100%)",
-                boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.08)",
+                boxShadow:
+                  "inset 0 0 0 1px rgba(255,255,255,0.08)",
               }}
             />
 
@@ -240,6 +312,41 @@ function WatchlistAnalytics({ activeList, watchlists, stocks = [] }) {
               <span>4</span>
               <span>5</span>
             </div>
+          </div>
+        </div>
+
+        <div
+          style={{
+            marginTop: "12px",
+            paddingTop: "10px",
+            borderTop:
+              "1px solid rgba(255,255,255,0.10)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "16px",
+          }}
+        >
+          <div
+            style={{
+              color: "#cbd5e1",
+              fontSize: "13px",
+              fontWeight: "600",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Avg 1Y Std Dev
+          </div>
+
+          <div
+            style={{
+              color: "#ffffff",
+              fontSize: "20px",
+              fontWeight: "700",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {stdDevDisplay}
           </div>
         </div>
       </div>

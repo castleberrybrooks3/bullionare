@@ -1,5 +1,5 @@
-import React, { useState, useRef, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { Suspense, lazy, useState, useRef, useEffect } from "react";
+import { useNavigate, useLocation } from "react-router-dom";
 import { supabase } from "../lib/supabaseClient";
 import Navbar from "../components/Navbar";
 import StockTable from "../StockTable";
@@ -12,7 +12,9 @@ import MarketOutlook from "../MarketOutlook";
 import Feedback from "../Feedback";
 import Strategies from "../Strategies";
 import News from "../News";
+import SmartMoney from "./SmartMoney";
 import logo from "../assets/logo.png";
+const PredictionMarkets = lazy(() => import("../PredictionMarkets"));
 
 export default function Dashboard() {
   const [activeMenu, setActiveMenu] = useState("Stocks");
@@ -25,6 +27,7 @@ export default function Dashboard() {
   const [sectorPerformance, setSectorPerformance] = useState({});
   const [pendingStrategy, setPendingStrategy] = useState(null);
   const navigate = useNavigate();
+  const location = useLocation();
 
   const shouldShowStartupOverlay =
     sessionStorage.getItem("showEmailConfirmedOverlay") === "true";
@@ -38,6 +41,38 @@ export default function Dashboard() {
     await supabase.auth.signOut();
     navigate("/login");
   };
+
+  useEffect(() => {
+  const dashboardPathMap = {
+    "/dashboard": "Stocks",
+    "/dashboard/market-outlook": "MarketOutlook",
+    "/dashboard/dependency-map": "DependencyMap",
+    "/dashboard/supply-chain": "SupplyChain",
+    "/dashboard/hidden-pairs": "HiddenPairs",
+    "/dashboard/watchlist": "Watchlist",
+    "/dashboard/strategies": "Strategies",
+    "/dashboard/smart-money": "SmartMoney",
+    "/dashboard/news": "News",
+    "/dashboard/feedback": "Feedback",
+  };
+
+  if (location.pathname.startsWith("/prediction-markets")) {
+    setActiveMenu("PredictionMarkets");
+    setSectorOpen(false);
+    return;
+  }
+
+  const menuFromPath = dashboardPathMap[location.pathname];
+
+  if (menuFromPath) {
+    setActiveMenu(menuFromPath);
+    setSectorOpen(false);
+
+    if (menuFromPath !== "Stocks") {
+      setSelectedSector(null);
+    }
+  }
+}, [location.pathname]);
 
   const API_BASE =
     process.env.NODE_ENV === "development"
@@ -148,7 +183,7 @@ const openStrategyFromIdea = (strategyIdea) => {
 
     setActiveMenu("Strategies");
     setSectorOpen(false);
-    navigate("/dashboard");
+    navigate("/dashboard/strategies");
   };
   return (
     <>
@@ -267,10 +302,10 @@ const openStrategyFromIdea = (strategyIdea) => {
             <div
               className={`sidebar-item ${activeMenu === "MarketOutlook" ? "active" : ""}`}
               onClick={() => {
-                navigate("/dashboard");
-                setActiveMenu("MarketOutlook");
-                setSectorOpen(false);
-              }}
+              navigate("/dashboard/market-outlook");
+              setActiveMenu("MarketOutlook");
+              setSectorOpen(false);
+            }}
             >
               Market Outlook
             </div>
@@ -278,9 +313,10 @@ const openStrategyFromIdea = (strategyIdea) => {
             <div
               className={`sidebar-item ${activeMenu === "DependencyMap" ? "active" : ""}`}
               onClick={() => {
-                setActiveMenu("DependencyMap");
-                setSectorOpen(false);
-              }}
+              navigate("/dashboard/dependency-map");
+              setActiveMenu("DependencyMap");
+              setSectorOpen(false);
+            }}
             >
               Dependency Map
             </div>
@@ -288,9 +324,10 @@ const openStrategyFromIdea = (strategyIdea) => {
             <div
               className={`sidebar-item ${activeMenu === "SupplyChain" ? "active" : ""}`}
               onClick={() => {
-                setActiveMenu("SupplyChain");
-                setSectorOpen(false);
-              }}
+            navigate("/dashboard/supply-chain");
+            setActiveMenu("SupplyChain");
+            setSectorOpen(false);
+            }}
             >
               Supply Chain
             </div>
@@ -298,9 +335,10 @@ const openStrategyFromIdea = (strategyIdea) => {
             <div
               className={`sidebar-item ${activeMenu === "HiddenPairs" ? "active" : ""}`}
               onClick={() => {
-                setActiveMenu("HiddenPairs");
-                setSectorOpen(false);
-              }}
+            navigate("/dashboard/hidden-pairs");
+            setActiveMenu("HiddenPairs");
+            setSectorOpen(false);
+            }}
             >
               Hidden Pairs
             </div>
@@ -308,10 +346,10 @@ const openStrategyFromIdea = (strategyIdea) => {
             <div
   className={`sidebar-item ${activeMenu === "Watchlist" ? "active" : ""}`}
   onClick={() => {
-    navigate("/dashboard");
-    setActiveMenu("Watchlist");
-    setSectorOpen(false);
-  }}
+  navigate("/dashboard/watchlist");
+  setActiveMenu("Watchlist");
+  setSectorOpen(false);
+}}
 >
   Watchlist
 </div>
@@ -319,21 +357,43 @@ const openStrategyFromIdea = (strategyIdea) => {
 <div
   className={`sidebar-item ${activeMenu === "Strategies" ? "active" : ""}`}
   onClick={() => {
-    navigate("/dashboard");
-    setActiveMenu("Strategies");
-    setSectorOpen(false);
-  }}
+  navigate("/dashboard/strategies");
+  setActiveMenu("Strategies");
+  setSectorOpen(false);
+}}
 >
   Strategies
 </div>
 
 <div
-  className={`sidebar-item ${activeMenu === "News" ? "active" : ""}`}
+  className={`sidebar-item ${activeMenu === "SmartMoney" ? "active" : ""}`}
   onClick={() => {
-    navigate("/dashboard");
-    setActiveMenu("News");
+  navigate("/dashboard/smart-money");
+  setActiveMenu("SmartMoney");
+  setSectorOpen(false);
+}}
+>
+  Smart Money
+</div>
+
+<div
+  className={`sidebar-item ${activeMenu === "PredictionMarkets" ? "active" : ""}`}
+  onClick={() => {
+    navigate("/prediction-markets");
+    setActiveMenu("PredictionMarkets");
     setSectorOpen(false);
   }}
+>
+  Prediction Markets
+</div>
+
+<div
+  className={`sidebar-item ${activeMenu === "News" ? "active" : ""}`}
+  onClick={() => {
+  navigate("/dashboard/news");
+  setActiveMenu("News");
+  setSectorOpen(false);
+}}
 >
   News
 </div>
@@ -341,10 +401,10 @@ const openStrategyFromIdea = (strategyIdea) => {
 <div
   className={`sidebar-item ${activeMenu === "Feedback" ? "active" : ""}`}
   onClick={() => {
-    navigate("/dashboard");
-    setActiveMenu("Feedback");
-    setSectorOpen(false);
-  }}
+  navigate("/dashboard/feedback");
+  setActiveMenu("Feedback");
+  setSectorOpen(false);
+}}
 >
   Feedback
 </div>
@@ -354,34 +414,40 @@ const openStrategyFromIdea = (strategyIdea) => {
         </aside>
 
         <main
-          className="main-content"
-          style={{
-            backgroundColor: "#0E1424",
-            padding: "40px",
-            position: "relative",
-          }}
-        >
-          {activeMenu === "DependencyMap" ? (
-            <DependencyMap onBuildStrategy={openStrategyFromIdea} />
-          ) : activeMenu === "SupplyChain" ? (
-            <SupplyChain onBuildStrategy={openStrategyFromIdea} />
-          ) : activeMenu === "HiddenPairs" ? (
-            <HiddenPairs onBuildStrategy={openStrategyFromIdea} />
-          ) : activeMenu === "MarketOutlook" ? (
-            <MarketOutlook />
-          ) : activeMenu === "Strategies" ? (
-            <Strategies importedStrategy={pendingStrategy} />
-          ) : activeMenu === "News" ? (
-  <News />
-) : activeMenu === "Feedback" ? (
-  <Feedback />
-) : (
-            <StockTable
-              view={activeMenu}
-              selectedSector={selectedSector}
-            />
-          )}
-        </main>
+  className="main-content"
+  style={{
+    backgroundColor: "#0E1424",
+    padding: "40px",
+    position: "relative",
+  }}
+>
+  {activeMenu === "PredictionMarkets" ? (
+    <Suspense fallback={<div>Loading prediction markets…</div>}>
+      <PredictionMarkets />
+    </Suspense>
+  ) : activeMenu === "DependencyMap" ? (
+    <DependencyMap onBuildStrategy={openStrategyFromIdea} />
+  ) : activeMenu === "SupplyChain" ? (
+    <SupplyChain onBuildStrategy={openStrategyFromIdea} />
+  ) : activeMenu === "HiddenPairs" ? (
+    <HiddenPairs onBuildStrategy={openStrategyFromIdea} />
+  ) : activeMenu === "MarketOutlook" ? (
+    <MarketOutlook />
+  ) : activeMenu === "Strategies" ? (
+    <Strategies importedStrategy={pendingStrategy} />
+  ) : activeMenu === "SmartMoney" ? (
+    <SmartMoney />
+  ) : activeMenu === "News" ? (
+    <News />
+  ) : activeMenu === "Feedback" ? (
+    <Feedback />
+  ) : (
+    <StockTable
+      view={activeMenu}
+      selectedSector={selectedSector}
+    />
+  )}
+</main>
       </div>
 
       {showOverlay && (

@@ -111,22 +111,24 @@ export default function MarketOutlook() {
       <h1 style={{ marginBottom: "8px" }}>Market Outlook</h1>
 
       <div
-        style={{
-          display: "flex",
-          gap: "18px",
-          flexWrap: "wrap",
-          marginBottom: "24px",
-        }}
-      >
+  style={{
+    display: "grid",
+    gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
+    gap: "10px",
+    marginBottom: "24px",
+    width: "100%",
+  }}
+>
         {[
-          { label: "S&P 500", ticker: "SPY", title: "S&P 500 ETF" },
-          { label: "NASDAQ", ticker: "QQQ", title: "Nasdaq 100 ETF" },
-          { label: "DOW", ticker: "DIA", title: "Dow Jones ETF" },
-          { label: "BTC", ticker: "IBIT", title: "Bitcoin ETF (BlackRock)" },
-          { label: "OIL", ticker: "USO", title: "Oil ETF" },
-          { label: "GOLD", ticker: "GLD", title: "Gold ETF" },
-          { label: "VIX", ticker: "VIXY", title: "Volatility ETF" },
-        ].map(({ label, ticker, title }) => {
+  { label: "S&P 500", ticker: "SPY", title: "S&P 500 ETF" },
+  { label: "NASDAQ", ticker: "QQQ", title: "Nasdaq 100 ETF" },
+  { label: "DOW", ticker: "DIA", title: "Dow Jones ETF" },
+  { label: "RUSSELL 2000", ticker: "IWM", title: "Russell 2000 ETF" },
+  { label: "BTC", ticker: "IBIT", title: "Bitcoin ETF (BlackRock)" },
+  { label: "OIL", ticker: "USO", title: "Oil ETF" },
+  { label: "GOLD", ticker: "GLD", title: "Gold ETF" },
+  { label: "VIX", ticker: "VIXY", title: "Volatility ETF" },
+].map(({ label, ticker, title }) => {
           const data = marketSummary[ticker];
           const rawChange = data?.change;
           const change =
@@ -147,14 +149,15 @@ export default function MarketOutlook() {
               title={title}
               onClick={() => goToDashboardTickers(ticker, ticker)}
               style={{
-                background: "#111827",
-                border: "1px solid #1f2937",
-                borderRadius: "10px",
-                padding: "10px 14px",
-                minWidth: "110px",
-                cursor: "pointer",
-                transition: "all 0.15s ease",
-              }}
+  background: "#111827",
+  border: "1px solid #1f2937",
+  borderRadius: "10px",
+  padding: "8px 10px",
+  minWidth: 0,
+  cursor: "pointer",
+  transition: "all 0.15s ease",
+  overflow: "hidden",
+}}
               onMouseEnter={(e) => {
                 e.currentTarget.style.background = "#1a2236";
                 e.currentTarget.style.transform = "translateY(-2px)";
@@ -164,15 +167,31 @@ export default function MarketOutlook() {
                 e.currentTarget.style.transform = "translateY(0px)";
               }}
             >
-              <div style={{ fontSize: "12px", color: "#9ca3af" }}>{label}</div>
+              <div
+  style={{
+    fontSize: "11px",
+    color: "#9ca3af",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  }}
+>
+  {label}
+</div>
 
-              <div style={{ fontWeight: 700 }}>
-                {data?.price != null ? `$${Number(data.price).toFixed(2)}` : "--"}
-              </div>
+<div
+  style={{
+    fontWeight: 700,
+    fontSize: "18px",
+    whiteSpace: "nowrap",
+  }}
+>
+  {data?.price != null ? `$${Number(data.price).toFixed(2)}` : "--"}
+</div>
 
-              <div style={{ color, fontSize: "13px", fontWeight: 600 }}>
-                {hasChange ? `${change > 0 ? "+" : ""}${change.toFixed(2)}%` : "--"}
-              </div>
+<div style={{ color, fontSize: "12px", fontWeight: 600 }}>
+  {hasChange ? `${change > 0 ? "+" : ""}${change.toFixed(2)}%` : "--"}
+</div>
             </div>
           );
         })}

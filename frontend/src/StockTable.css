@@ -451,3 +451,62 @@
     width: 100%;
   }
 }
+
+.ag-theme-alpine .ag-row-selected,
+.ag-theme-alpine .ag-row-selected::before,
+.ag-theme-alpine .ag-row-focus,
+.ag-theme-alpine .ag-row-focus::before {
+  background-color: inherit !important;
+  background: inherit !important;
+}
+
+.ag-theme-alpine .ag-row.ag-row-selected .ag-cell,
+.ag-theme-alpine .ag-row.ag-row-focus .ag-cell {
+  background-color: inherit !important;
+}
+
+/* ====================== BULLIONAIRE GRID EMPTY / NO ROWS STATE ====================== */
+
+.ag-theme-alpine,
+.ag-theme-alpine .ag-root-wrapper,
+.ag-theme-alpine .ag-root,
+.ag-theme-alpine .ag-body,
+.ag-theme-alpine .ag-body-viewport,
+.ag-theme-alpine .ag-center-cols-viewport,
+.ag-theme-alpine .ag-center-cols-container,
+.ag-theme-alpine .ag-pinned-left-cols-container,
+.ag-theme-alpine .ag-pinned-right-cols-container {
+  background-color: #0E1424 !important;
+}
+
+.ag-theme-alpine .ag-overlay,
+.ag-theme-alpine .ag-overlay-wrapper {
+  background-color: #0E1424 !important;
+}
+
+.bullionaire-no-rows-overlay {
+  width: 100%;
+  height: 100%;
+  min-height: 240px;
+  background-color: #0E1424;
+  color: #ffffff;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.bullionaire-no-rows-title {
+  color: #ffffff;
+  font-size: 30px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+  margin-bottom: 6px;
+}
+
+.bullionaire-no-rows-subtitle {
+  color: #ffffff;
+  font-size: 15px;
+  font-weight: 600;
+  opacity: 0.85;
+}

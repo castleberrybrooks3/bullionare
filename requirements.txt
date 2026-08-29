@@ -1,6 +1,9 @@
 fastapi==0.111.0
-uvicorn==0.25.0
+uvicorn==0.52.1
 pandas==2.2.2
 python-dotenv==1.0.1
-requests==2.31.0
-psycopg2-binary==2.9.9
+requests==2.34.2
+psycopg2-binary==2.9.12
+websockets==15.0.1
+cryptography==45.0.7
+pypdf==5.9.0

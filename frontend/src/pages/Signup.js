@@ -29,9 +29,11 @@ export default function Signup() {
     }
 
     if (!agreedToLegal) {
-      setErrorMsg("You must agree to the Terms of Service and Privacy Policy.");
-      return;
-    }
+  setErrorMsg(
+    "You must agree to the Terms of Service and acknowledge the Privacy Policy."
+  );
+  return;
+}
 
     if (password !== confirmPassword) {
       setErrorMsg("Passwords do not match.");
@@ -40,16 +42,20 @@ export default function Signup() {
 
     setLoading(true);
 
+    const legalAcceptedAt = new Date().toISOString();
     const { error } = await supabase.auth.signUp({
       email,
       password,
       options: {
-        emailRedirectTo: "https://bullionaireiq.com/welcome",
-        data: {
-          full_name: fullName,
-          account_type: accountType,
-        },
-      },
+  emailRedirectTo: "https://bullionaireiq.com/welcome",
+  data: {
+    full_name: fullName,
+    account_type: accountType,
+    terms_version: "2026-08-08",
+    privacy_version: "2026-08-08",
+    legal_accepted_at: legalAcceptedAt,
+  },
+},
     });
 
     setLoading(false);
@@ -134,9 +140,24 @@ export default function Signup() {
               onChange={(e) => setAgreedToLegal(e.target.checked)}
             />
             <span>
-              I agree to the <Link to="/terms">Terms of Service</Link> and{" "}
-              <Link to="/privacy">Privacy Policy</Link>.
-            </span>
+  I agree to the{" "}
+  <Link
+    to="/terms"
+    target="_blank"
+    rel="noopener noreferrer"
+  >
+    Terms of Service
+  </Link>{" "}
+  and acknowledge the{" "}
+  <Link
+    to="/privacy"
+    target="_blank"
+    rel="noopener noreferrer"
+  >
+    Privacy Policy
+  </Link>
+  .
+</span>
           </label>
 
           <button type="submit" disabled={loading}>

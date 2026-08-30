@@ -72,6 +72,15 @@ SEC_WWW_HEADERS = {
 
 SEC_CACHE = {}
 SEC_CACHE_TTL_SECONDS = 60 * 60 * 24
+SEC_CACHE_MAX_ENTRIES = max(
+    16, int(os.getenv("SEC_CACHE_MAX_ENTRIES", "64"))
+)
+# Companyfacts / fresh merged facts / submissions / filing-XBRL payloads can each
+# be large Python object graphs. Keep the heavy subset much tighter than the
+# overall metadata cache so a broad stock scan cannot crowd out the 2 GB process.
+SEC_CACHE_HEAVY_MAX_ENTRIES = max(
+    4, int(os.getenv("SEC_CACHE_HEAVY_MAX_ENTRIES", "12"))
+)
 SEC_CACHE_LOCK = threading.Lock()
 
 # Financials-only freshness cache. This prevents the two Financials-tab SEC
@@ -80,8 +89,16 @@ SEC_CACHE_LOCK = threading.Lock()
 SEC_FINANCIALS_FRESH_CACHE_TTL_SECONDS = max(
     60, int(os.getenv("SEC_FINANCIALS_FRESH_CACHE_TTL_SECONDS", "600"))
 )
-SEC_FINANCIALS_CIK_LOCKS = {}
-SEC_FINANCIALS_CIK_LOCKS_GUARD = threading.Lock()
+
+# Use a fixed striped-lock pool instead of retaining one Lock forever for every
+# CIK ever requested. The same CIK always maps to the same stripe; unrelated CIKs
+# can very occasionally share a stripe, which only serializes those requests.
+SEC_FINANCIALS_CIK_LOCK_STRIPES = max(
+    16, int(os.getenv("SEC_FINANCIALS_CIK_LOCK_STRIPES", "128"))
+)
+SEC_FINANCIALS_CIK_LOCKS = tuple(
+    threading.Lock() for _ in range(SEC_FINANCIALS_CIK_LOCK_STRIPES)
+)
 
 # Rare SEC successor-registrant events can move a public ticker to a new CIK
 # without carrying the predecessor's historical Companyfacts into that new CIK.
@@ -115,6 +132,12 @@ SMART_MONEY_CACHE_TTL_SECONDS = 60 * 30
 
 RATE_LIMIT_STORAGE = defaultdict(deque)
 RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT_STORAGE_MAX_KEYS = max(
+    1000, int(os.getenv("RATE_LIMIT_STORAGE_MAX_KEYS", "5000"))
+)
+RATE_LIMIT_STORAGE_STALE_SECONDS = max(
+    120, int(os.getenv("RATE_LIMIT_STORAGE_STALE_SECONDS", "300"))
+)
 
 SPARKLINES_RATE_LIMIT = (180, 60)   # 180 requests per 60 seconds per IP
 CHART_RATE_LIMIT = (240, 60)        # 240 requests per 60 seconds per IP
@@ -123,6 +146,9 @@ BACKTEST_RATE_LIMIT = (120, 60)  # 120 backtests per minute per IP
 CHART_CACHE = {}
 CHART_CACHE_LOCK = threading.Lock()
 CHART_CACHE_TTL_SECONDS = 60 * 15
+CHART_CACHE_MAX_ENTRIES = max(
+    32, int(os.getenv("CHART_CACHE_MAX_ENTRIES", "128"))
+)
 
 # Shared stock-data guards. These do not change the response contract; they
 # prevent every browser from multiplying paid/upstream market-data calls.
@@ -140,6 +166,9 @@ SPARKLINE_CACHE = {}
 SPARKLINE_CACHE_LOCK = threading.Lock()
 SPARKLINE_CACHE_TTL_SECONDS = max(
     15, int(os.getenv("SPARKLINE_CACHE_TTL_SECONDS", "60"))
+)
+SPARKLINE_CACHE_MAX_ENTRIES = max(
+    500, int(os.getenv("SPARKLINE_CACHE_MAX_ENTRIES", "5000"))
 )
 MAX_BACKTEST_POSITIONS = max(
     1, int(os.getenv("MAX_BACKTEST_POSITIONS", "50"))
@@ -164,6 +193,90 @@ def get_client_ip(request):
         return request.client.host
 
     return "unknown"
+
+
+SEC_CACHE_HEAVY_PREFIXES = (
+    "companyfacts:",
+    "fresh_companyfacts:",
+    "sec_submissions:",
+    "sec_filing_xbrl:",
+)
+
+
+def _cache_entry_time(entry):
+    if not isinstance(entry, dict):
+        return 0.0
+    try:
+        return float(entry.get("time") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _sec_cache_ttl_for_key(cache_key):
+    if str(cache_key).startswith("fresh_companyfacts:"):
+        return SEC_FINANCIALS_FRESH_CACHE_TTL_SECONDS
+    return SEC_CACHE_TTL_SECONDS
+
+
+def _prune_sec_cache_locked(now=None):
+    """Bound SEC object graphs while preserving the existing response contract."""
+    current = time.time() if now is None else float(now)
+
+    expired = [
+        key
+        for key, value in SEC_CACHE.items()
+        if current - _cache_entry_time(value) >= _sec_cache_ttl_for_key(key)
+    ]
+    for key in expired:
+        SEC_CACHE.pop(key, None)
+
+    heavy_keys = [
+        key
+        for key in SEC_CACHE
+        if str(key).startswith(SEC_CACHE_HEAVY_PREFIXES)
+    ]
+    heavy_overflow = len(heavy_keys) - SEC_CACHE_HEAVY_MAX_ENTRIES
+    if heavy_overflow > 0:
+        heavy_keys.sort(key=lambda key: _cache_entry_time(SEC_CACHE.get(key)))
+        for key in heavy_keys[:heavy_overflow]:
+            SEC_CACHE.pop(key, None)
+
+    overflow = len(SEC_CACHE) - SEC_CACHE_MAX_ENTRIES
+    if overflow > 0:
+        oldest = sorted(
+            SEC_CACHE,
+            key=lambda key: _cache_entry_time(SEC_CACHE.get(key)),
+        )
+        for key in oldest[:overflow]:
+            SEC_CACHE.pop(key, None)
+
+
+def _store_sec_cache_locked(cache_key, data, now=None):
+    timestamp = time.time() if now is None else float(now)
+    SEC_CACHE[cache_key] = {
+        "time": timestamp,
+        "data": data,
+    }
+    _prune_sec_cache_locked(timestamp)
+
+
+def _prune_timed_cache_locked(cache, now, ttl_seconds, max_entries):
+    expired = [
+        key
+        for key, value in cache.items()
+        if now - _cache_entry_time(value) >= ttl_seconds
+    ]
+    for key in expired:
+        cache.pop(key, None)
+
+    overflow = len(cache) - max_entries
+    if overflow > 0:
+        oldest = sorted(
+            cache,
+            key=lambda key: _cache_entry_time(cache.get(key)),
+        )
+        for key in oldest[:overflow]:
+            cache.pop(key, None)
 
 def get_sec_json(url, headers=None, timeout=20):
     try:
@@ -192,10 +305,7 @@ def get_cik_for_ticker(ticker: str):
 
         if company_tickers:
             with SEC_CACHE_LOCK:
-                SEC_CACHE[cache_key] = {
-                    "time": now,
-                    "data": company_tickers,
-                }
+                _store_sec_cache_locked(cache_key, company_tickers, now)
 
     if not company_tickers:
         return None
@@ -244,10 +354,7 @@ def get_companyfacts_for_cik(cik: str):
 
     if data:
         with SEC_CACHE_LOCK:
-            SEC_CACHE[cache_key] = {
-                "time": now,
-                "data": data,
-            }
+            _store_sec_cache_locked(cache_key, data, now)
 
     return data
 
@@ -273,12 +380,8 @@ def _latest_companyfacts_period_for_forms(companyfacts, allowed_forms):
 
 def _get_sec_financials_cik_lock(cik):
     clean_cik = str(cik)
-    with SEC_FINANCIALS_CIK_LOCKS_GUARD:
-        lock = SEC_FINANCIALS_CIK_LOCKS.get(clean_cik)
-        if lock is None:
-            lock = threading.Lock()
-            SEC_FINANCIALS_CIK_LOCKS[clean_cik] = lock
-        return lock
+    stripe = hash(clean_cik) % len(SEC_FINANCIALS_CIK_LOCKS)
+    return SEC_FINANCIALS_CIK_LOCKS[stripe]
 
 
 def _get_sec_submissions_for_cik(cik):
@@ -301,10 +404,7 @@ def _get_sec_submissions_for_cik(cik):
 
     if submissions:
         with SEC_CACHE_LOCK:
-            SEC_CACHE[cache_key] = {
-                "time": now,
-                "data": submissions,
-            }
+            _store_sec_cache_locked(cache_key, submissions, now)
 
     return submissions
 
@@ -420,10 +520,7 @@ def _get_latest_sec_filing_metadata(cik, allowed_forms, submissions=None):
     latest = candidates[0]
 
     with SEC_CACHE_LOCK:
-        SEC_CACHE[cache_key] = {
-            "time": now,
-            "data": latest,
-        }
+        _store_sec_cache_locked(cache_key, latest, now)
 
     return latest
 
@@ -472,10 +569,7 @@ def _sec_filing_instance_filename(cik, filing):
             filename = primary[:-5] + "_htm.xml"
 
     with SEC_CACHE_LOCK:
-        SEC_CACHE[cache_key] = {
-            "time": now,
-            "data": filename,
-        }
+        _store_sec_cache_locked(cache_key, filename, now)
 
     return filename
 
@@ -721,10 +815,7 @@ def _load_latest_filing_xbrl_rows(cik, filing):
     }
 
     with SEC_CACHE_LOCK:
-        SEC_CACHE[cache_key] = {
-            "time": now,
-            "data": parsed,
-        }
+        _store_sec_cache_locked(cache_key, parsed, now)
 
     return parsed
 
@@ -955,10 +1046,7 @@ def get_fresh_companyfacts_for_cik(cik: str):
             )
 
         with SEC_CACHE_LOCK:
-            SEC_CACHE[cache_key] = {
-                "time": time.time(),
-                "data": merged,
-            }
+            _store_sec_cache_locked(cache_key, merged, time.time())
 
         return merged
 
@@ -3597,6 +3685,34 @@ def is_route_rate_limited(request, route_key, limit, window_seconds):
 
         dq.append(now)
 
+        if len(RATE_LIMIT_STORAGE) > RATE_LIMIT_STORAGE_MAX_KEYS:
+            stale_cutoff = now - RATE_LIMIT_STORAGE_STALE_SECONDS
+            stale_keys = [
+                storage_key
+                for storage_key, timestamps in RATE_LIMIT_STORAGE.items()
+                if storage_key != key
+                and (not timestamps or timestamps[-1] < stale_cutoff)
+            ]
+            for storage_key in stale_keys:
+                RATE_LIMIT_STORAGE.pop(storage_key, None)
+
+            overflow = len(RATE_LIMIT_STORAGE) - RATE_LIMIT_STORAGE_MAX_KEYS
+            if overflow > 0:
+                oldest_keys = sorted(
+                    (
+                        storage_key
+                        for storage_key in RATE_LIMIT_STORAGE
+                        if storage_key != key
+                    ),
+                    key=lambda storage_key: (
+                        RATE_LIMIT_STORAGE[storage_key][-1]
+                        if RATE_LIMIT_STORAGE[storage_key]
+                        else 0.0
+                    ),
+                )
+                for storage_key in oldest_keys[:overflow]:
+                    RATE_LIMIT_STORAGE.pop(storage_key, None)
+
     return False
 # =========================================================
 # DB HELPERS
@@ -3745,24 +3861,20 @@ def fetch_intraday_sparkline_cached(ticker: str):
 
     with SPARKLINE_CACHE_LOCK:
         cached = SPARKLINE_CACHE.get(clean_ticker)
-        if cached and now - float(cached.get("time") or 0.0) < SPARKLINE_CACHE_TTL_SECONDS:
+        if cached and now - _cache_entry_time(cached) < SPARKLINE_CACHE_TTL_SECONDS:
             return cached.get("data")
+        if cached:
+            SPARKLINE_CACHE.pop(clean_ticker, None)
 
     data = fetch_intraday_sparkline(clean_ticker)
     with SPARKLINE_CACHE_LOCK:
         SPARKLINE_CACHE[clean_ticker] = {"time": now, "data": data}
-        # Keep the single-process cache bounded even under broad ticker scans.
-        if len(SPARKLINE_CACHE) > 20_000:
-            cutoff = now - SPARKLINE_CACHE_TTL_SECONDS
-            expired = [
-                key
-                for key, value in SPARKLINE_CACHE.items()
-                if float(value.get("time") or 0.0) < cutoff
-            ]
-            for key in expired:
-                SPARKLINE_CACHE.pop(key, None)
-            if len(SPARKLINE_CACHE) > 20_000:
-                SPARKLINE_CACHE.clear()
+        _prune_timed_cache_locked(
+            SPARKLINE_CACHE,
+            now,
+            SPARKLINE_CACHE_TTL_SECONDS,
+            SPARKLINE_CACHE_MAX_ENTRIES,
+        )
 
     return data
 
@@ -3898,11 +4010,12 @@ def fetch_chart_data_cached(ticker: str, range_key: str):
         cached = CHART_CACHE.get(cache_key)
 
         if cached:
-            cached_time = cached.get("time", 0)
+            cached_time = _cache_entry_time(cached)
             cached_data = cached.get("data")
 
             if cached_data and now - cached_time < CHART_CACHE_TTL_SECONDS:
                 return cached_data
+            CHART_CACHE.pop(cache_key, None)
 
     data = fetch_chart_data(ticker.upper(), range_key)
 
@@ -3912,6 +4025,12 @@ def fetch_chart_data_cached(ticker: str, range_key: str):
                 "time": now,
                 "data": data,
             }
+            _prune_timed_cache_locked(
+                CHART_CACHE,
+                now,
+                CHART_CACHE_TTL_SECONDS,
+                CHART_CACHE_MAX_ENTRIES,
+            )
 
     return data
 

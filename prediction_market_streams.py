@@ -1,7 +1,7 @@
 """
 Bullionaire Prediction Terminal — real-time market stream layer.
 
-Version: live-streams-v3.6-positive-edge-depth-self-healing
+Version: live-streams-v3.8-retired-runtime-release
 
 Purpose
 -------
@@ -84,7 +84,7 @@ except ImportError as exc:  # pragma: no cover - dependency guidance
         'pip install "websockets>=12,<16" "cryptography>=42,<46"'
     ) from exc
 
-STREAMS_VERSION = "live-streams-v3.6-positive-edge-depth-self-healing"
+STREAMS_VERSION = "live-streams-v3.8-retired-runtime-release"
 POLYMARKET_MARKET_WS_URL = (
     "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 )
@@ -641,10 +641,102 @@ class LiveBookStore:
         self.pricing_revision: int = 0
         self._started_at = iso_now()
 
+        # Incremental terminal pricing: map each live instrument to only the
+        # matched pair(s) whose executable economics can change when that
+        # instrument updates. The shared terminal publisher consumes this set
+        # every cycle, so a single book tick no longer forces all matched pairs
+        # to be snapshotted and repriced.
+        self._pairs_by_id: Dict[str, PairSubscription] = {
+            pair.id: pair for pair in manifest.pairs
+        }
+        self._pair_ids_by_polymarket_asset: Dict[str, Set[str]] = defaultdict(set)
+        self._pair_ids_by_kalshi_ticker: Dict[str, Set[str]] = defaultdict(set)
+        for pair in manifest.pairs:
+            self._pair_ids_by_polymarket_asset[
+                pair.polymarket_yes_asset_id
+            ].add(pair.id)
+            self._pair_ids_by_polymarket_asset[
+                pair.polymarket_no_asset_id
+            ].add(pair.id)
+            self._pair_ids_by_kalshi_ticker[
+                pair.kalshi_market_ticker
+            ].add(pair.id)
+
+        # The first publisher pass must establish a complete baseline.
+        self._dirty_pair_ids: Set[str] = set(self._pairs_by_id)
+
+    def release_memory(self) -> None:
+        """Drop heavy live-book references after this store is retired."""
+        self.polymarket.clear()
+        self.kalshi.clear()
+        self.errors.clear()
+        self.batch_members.clear()
+        self.connected_batches.clear()
+        self._pairs_by_id.clear()
+        self._pair_ids_by_polymarket_asset.clear()
+        self._pair_ids_by_kalshi_ticker.clear()
+        self._dirty_pair_ids.clear()
+        self.manifest = None  # type: ignore[assignment]
+
     def _bump_revision(self, *, pricing: bool = True) -> None:
         self.revision += 1
         if pricing:
             self.pricing_revision += 1
+
+    def _mark_pair_ids_dirty(self, pair_ids: Iterable[str]) -> None:
+        self._dirty_pair_ids.update(
+            pair_id
+            for pair_id in pair_ids
+            if pair_id in self._pairs_by_id
+        )
+
+    def _mark_instrument_dirty(self, venue: str, instrument_id: str) -> None:
+        clean_id = str(instrument_id or "")
+        if not clean_id:
+            return
+        if venue == "polymarket":
+            self._mark_pair_ids_dirty(
+                self._pair_ids_by_polymarket_asset.get(clean_id, ())
+            )
+        elif venue == "kalshi":
+            self._mark_pair_ids_dirty(
+                self._pair_ids_by_kalshi_ticker.get(clean_id, ())
+            )
+
+    def _mark_batch_dirty(self, venue: str, batch_id: str) -> None:
+        for instrument_id in self.batch_members.get((venue, batch_id), ()):
+            self._mark_instrument_dirty(venue, instrument_id)
+
+    def mark_all_pairs_dirty(self) -> None:
+        self._dirty_pair_ids.update(self._pairs_by_id)
+
+    def consume_dirty_pairs(
+        self,
+        *,
+        force_all: bool = False,
+    ) -> Tuple[PairSubscription, ...]:
+        """Atomically consume the currently dirty matched pairs.
+
+        WebSocket mutation and the publisher run on the same asyncio event-loop
+        thread, so a plain set swap is sufficient here. Any tick arriving while
+        pricing runs in a worker thread marks the pair dirty again for the next
+        publication cycle instead of being lost.
+        """
+        if force_all:
+            pair_ids = set(self._pairs_by_id)
+            self._dirty_pair_ids.clear()
+        else:
+            pair_ids = self._dirty_pair_ids
+            self._dirty_pair_ids = set()
+
+        if not pair_ids:
+            return ()
+
+        return tuple(
+            pair
+            for pair in self.manifest.pairs
+            if pair.id in pair_ids
+        )
 
     def _collection(self, venue: str) -> Dict[str, Any]:
         if venue == "polymarket":
@@ -711,6 +803,7 @@ class LiveBookStore:
                 book.unavailable_reason = "venue_disconnected"
             self._refresh_book_health(book)
 
+        self._mark_batch_dirty(venue, batch_id)
         self._bump_revision()
 
     def mark_batch_resyncing(
@@ -727,17 +820,20 @@ class LiveBookStore:
             book.sequence_valid = False
             book.unavailable_reason = reason
             self._refresh_book_health(book)
+        self._mark_batch_dirty(venue, batch_id)
         self._bump_revision()
 
     def record_error(self, key: str, error: BaseException | str) -> None:
         value = str(error)
         if self.errors.get(key) != value:
             self.errors[key] = value
+            self.mark_all_pairs_dirty()
             self._bump_revision()
 
     def clear_error(self, key: str) -> None:
         if key in self.errors:
             self.errors.pop(key, None)
+            self.mark_all_pairs_dirty()
             self._bump_revision()
 
     def _poly_book(self, asset_id: str) -> TokenBook:
@@ -802,12 +898,14 @@ class LiveBookStore:
         event_type = str(payload.get("event_type") or payload.get("type") or "")
         source_timestamp = payload.get("timestamp")
         pricing_changed = event_type != "last_trade_price"
+        dirty_assets: Set[str] = set()
 
         if event_type == "book":
             asset_id = str(payload.get("asset_id") or "")
             if not asset_id:
                 return
             book = self._poly_book(asset_id)
+            dirty_assets.add(asset_id)
             book.market_id = str(payload.get("market") or "") or book.market_id
             book.bids = normalize_levels(payload.get("bids"))
             book.asks = normalize_levels(payload.get("asks"))
@@ -826,6 +924,7 @@ class LiveBookStore:
                 if not asset_id:
                     continue
                 book = self._poly_book(asset_id)
+                dirty_assets.add(asset_id)
                 book.market_id = str(payload.get("market") or "") or book.market_id
                 price = float_or_none(change.get("price"))
                 size = float_or_none(change.get("size"))
@@ -851,6 +950,7 @@ class LiveBookStore:
             if not asset_id:
                 return
             book = self._poly_book(asset_id)
+            dirty_assets.add(asset_id)
             book.market_id = str(payload.get("market") or "") or book.market_id
             book.best_bid = float_or_none(payload.get("best_bid"))
             book.best_ask = float_or_none(payload.get("best_ask"))
@@ -872,7 +972,9 @@ class LiveBookStore:
             assets = payload.get("assets_ids") or payload.get("token_ids") or []
             if isinstance(assets, list):
                 for asset in assets:
-                    book = self._poly_book(str(asset))
+                    asset_id = str(asset)
+                    book = self._poly_book(asset_id)
+                    dirty_assets.add(asset_id)
                     book.market_status = "resolved"
                     book.touch(source_timestamp, book_changed=False)
                     self._refresh_book_health(book)
@@ -880,6 +982,9 @@ class LiveBookStore:
             return
 
         self.last_message_at["polymarket"] = iso_now()
+        if pricing_changed:
+            for asset_id in dirty_assets:
+                self._mark_instrument_dirty("polymarket", asset_id)
         self._bump_revision(pricing=pricing_changed)
 
     def apply_kalshi(self, payload: Mapping[str, Any]) -> None:
@@ -995,6 +1100,8 @@ class LiveBookStore:
             return
 
         self.last_message_at["kalshi"] = iso_now()
+        if pricing_changed:
+            self._mark_instrument_dirty("kalshi", ticker)
         self._bump_revision(pricing=pricing_changed)
 
     @staticmethod
@@ -1288,8 +1395,11 @@ class LiveBookStore:
     def pair_snapshots(
         self,
         pairs: Optional[Sequence[PairSubscription]] = None,
+        *,
+        refresh_health: bool = True,
     ) -> List[Dict[str, Any]]:
-        self.refresh_health()
+        if refresh_health:
+            self.refresh_health()
         selected_pairs = self.manifest.pairs if pairs is None else pairs
         return [
             self.pair_snapshot(pair, refresh_health=False)
@@ -1880,6 +1990,12 @@ class PredictionMarketStreamManager:
             await asyncio.gather(*self.tasks, return_exceptions=True)
         self.tasks.clear()
 
+        # A stopped manager is never restarted. Sever the old full-book graph
+        # immediately so a hot reload does not depend on allocator timing.
+        self.streams.clear()
+        self.store.release_memory()
+        self.manifest = None  # type: ignore[assignment]
+
     async def run_until_stopped(self) -> None:
         await self.start()
         stop_event = asyncio.Event()
@@ -1929,6 +2045,9 @@ def self_test() -> Dict[str, Any]:
     store.register_batch("kalshi", "batch-1", ("KXTEST",))
     store.set_batch_connected("polymarket", "batch-1", True)
     store.set_batch_connected("kalshi", "batch-1", True)
+
+    initial_dirty = store.consume_dirty_pairs()
+    assert [item.id for item in initial_dirty] == ["test-pair"]
 
     for asset_id, bid, ask in (
         ("poly-yes", "0.48", "0.51"),
@@ -2088,6 +2207,11 @@ def self_test() -> Dict[str, Any]:
         for route in timed_out_snapshot["routeStates"]
     )
 
+    # Clear the book/connectivity changes accumulated above. A pure trade
+    # telemetry update must neither advance pricing_revision nor dirty a pair.
+    dirty_before_trade = store.consume_dirty_pairs()
+    assert [item.id for item in dirty_before_trade] == ["test-pair"]
+
     pricing_revision_before_trade = store.pricing_revision
     store.apply_polymarket(
         {
@@ -2108,6 +2232,19 @@ def self_test() -> Dict[str, Any]:
         }
     )
     assert store.pricing_revision == pricing_revision_before_trade
+    assert store.consume_dirty_pairs() == ()
+
+    # A single executable-book update dirties exactly the affected matched pair.
+    store.apply_polymarket(
+        {
+            "event_type": "best_bid_ask",
+            "asset_id": "poly-yes",
+            "best_bid": "0.49",
+            "best_ask": "0.50",
+        }
+    )
+    incremental_dirty = store.consume_dirty_pairs()
+    assert [item.id for item in incremental_dirty] == ["test-pair"]
 
     return {
         "streamsVersion": STREAMS_VERSION,
@@ -2119,6 +2256,7 @@ def self_test() -> Dict[str, Any]:
         "kalshiFloatDustRemoved": True,
         "tinyValidDepthPreserved": True,
         "tradeOnlyDoesNotReprice": True,
+        "incrementalDirtyPairTracking": True,
         "readyRouteCount": recovered["readyRouteCount"],
         "polymarketBestBid": poly.best_bid,
         "polymarketBestAsk": poly.best_ask,

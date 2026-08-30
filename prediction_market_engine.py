@@ -36,7 +36,7 @@ from prediction_market_settlement import (
 )
 
 
-ENGINE_VERSION = "native-exact-v20.5-positive-edge-depth"
+ENGINE_VERSION = "native-exact-v20.6-compact-live-runtime"
 
 POLYMARKET_CLOB_URL = "https://clob.polymarket.com"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -766,6 +766,13 @@ class ExactPairContext:
 
 @dataclass
 class LiveFeePricingContext:
+    # IMPORTANT: exact_context is intentionally a COMPACT runtime context.
+    # build_exact_pair_context() may temporarily load tens of thousands of
+    # candidate events/markets to perform matching and settlement verification.
+    # The live terminal only needs the final matched markets, so
+    # build_live_fee_pricing_context() replaces the build context with a compact
+    # one before returning. Keeping this field preserves the existing public
+    # interface while preventing the full build catalog from being pinned in RAM.
     exact_context: ExactPairContext
     pair_lookup: Dict[
         Tuple[str, str, str],
@@ -780,11 +787,27 @@ class LiveFeePricingContext:
         return self.exact_context.snapshot_marker
 
     def summary(self) -> Dict[str, Any]:
+        diagnostics = self.exact_context.diagnostics or {}
         return {
             "engineVersion": ENGINE_VERSION,
             "generatedAt": self.generated_at,
             "snapshotMarker": self.snapshot_marker,
             "exactPairs": len(self.pair_lookup),
+            "runtimeCompacted": bool(
+                diagnostics.get("runtimeCompacted")
+            ),
+            "retainedRuntimeEvents": len(
+                self.exact_context.events
+            ),
+            "retainedRuntimeMarkets": len(
+                self.exact_context.markets
+            ),
+            "sourceCandidateEvents": diagnostics.get(
+                "sourceCandidateEvents"
+            ),
+            "sourceCandidateMarkets": diagnostics.get(
+                "sourceCandidateMarkets"
+            ),
             "polymarketFeeRatesLoaded": (
                 self.polymarket_fee_rates_loaded
             ),
@@ -9437,6 +9460,99 @@ def build_exact_pair_context(
 
 
 
+def compact_exact_pair_context_for_live(
+    context: ExactPairContext,
+) -> ExactPairContext:
+    """
+    Return the smallest context needed by the live WebSocket pricing terminal.
+
+    Matching requires the broad candidate catalog, but live pricing does not.
+    Retaining the full build context can pin tens of thousands of Event/Market
+    objects (including raw JSON payloads) in memory for the lifetime of the
+    FastAPI process. This function keeps only markets referenced by finalized
+    exact pairs plus any synthetic macro contracts retained for compatibility.
+
+    The returned Market objects are the authoritative matched objects from the
+    build context; they are not deep-copied, so fee metadata written immediately
+    before compaction remains available to live pricing.
+    """
+    retained_market_ids: Set[int] = set()
+
+    for poly_contract, kalshi_contract in context.exact_pairs:
+        retained_market_ids.add(poly_contract.market_id)
+        retained_market_ids.add(kalshi_contract.market_id)
+
+    # Synthetic macro candidates are not part of ExactPairContext.exact_pairs,
+    # but preserve their referenced markets so callers inspecting the compact
+    # context never receive dangling market IDs.
+    for candidate in context.macro_synthetic_candidates:
+        retained_market_ids.add(candidate.polymarket_contract.market_id)
+        retained_market_ids.add(candidate.lower_kalshi_contract.market_id)
+        retained_market_ids.add(candidate.upper_kalshi_contract.market_id)
+
+    retained_markets: Dict[int, Market] = {
+        market_id: context.markets[market_id]
+        for market_id in retained_market_ids
+        if market_id in context.markets
+    }
+
+    retained_event_ids: Set[int] = {
+        market.event.id
+        for market in retained_markets.values()
+        if market.event is not None
+    }
+    retained_events: Dict[int, Event] = {
+        event_id: context.events[event_id]
+        for event_id in retained_event_ids
+        if event_id in context.events
+    }
+
+    # A Market already owns its Event object. Include any event that was not in
+    # context.events defensively so the compact context remains self-consistent.
+    for market in retained_markets.values():
+        if market.event is not None:
+            retained_events.setdefault(
+                market.event.id,
+                market.event,
+            )
+
+    retained_markets_by_event: Dict[int, List[Market]] = defaultdict(list)
+    for market in retained_markets.values():
+        retained_markets_by_event[market.event.id].append(market)
+
+    source_diagnostics = context.diagnostics or {}
+    compact_diagnostics: Dict[str, Any] = {
+        "runtimeCompacted": True,
+        "sourceCandidateEvents": source_diagnostics.get(
+            "candidateEventsLoaded",
+            len(context.events),
+        ),
+        "sourceCandidateMarkets": source_diagnostics.get(
+            "candidateMarketsLoaded",
+            len(context.markets),
+        ),
+        "retainedRuntimeEvents": len(retained_events),
+        "retainedRuntimeMarkets": len(retained_markets),
+        "retainedRuntimePairs": len(context.exact_pairs),
+    }
+
+    return ExactPairContext(
+        events=retained_events,
+        markets=retained_markets,
+        markets_by_event=dict(retained_markets_by_event),
+        venue_counts=dict(context.venue_counts),
+        sports_pairs=list(context.sports_pairs),
+        macro_pairs=list(context.macro_pairs),
+        macro_synthetic_candidates=list(
+            context.macro_synthetic_candidates
+        ),
+        weather_pairs=list(context.weather_pairs),
+        generic_pairs=list(context.generic_pairs),
+        diagnostics=compact_diagnostics,
+        snapshot_marker=context.snapshot_marker,
+    )
+
+
 def build_live_fee_pricing_context(
     exact_context: Optional[ExactPairContext] = None,
     *,
@@ -9525,8 +9641,16 @@ def build_live_fee_pricing_context(
             "_livePolymarketFeeRate"
         ] = live_rate
 
+    # Do not let the live fee context retain the broad matching catalog.
+    # This is the critical production-memory boundary: after this function
+    # returns, callers may release their original build context and the live
+    # terminal will keep only finalized matched markets/events.
+    live_context = compact_exact_pair_context_for_live(
+        context
+    )
+
     return LiveFeePricingContext(
-        exact_context=context,
+        exact_context=live_context,
         pair_lookup=pair_lookup,
         kalshi_fee_configuration=(
             kalshi_fee_configuration

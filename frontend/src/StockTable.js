@@ -1948,11 +1948,57 @@ if (!user) return;
     []
   );
 
-  const shouldShowFullLoadingOverlay = loading && rowData.length === 0;
+  const shouldShowWatchlistEmptyLoading =
+    view === "Watchlist" && loading && rowData.length === 0;
+  const shouldShowFullLoadingOverlay =
+    view !== "Watchlist" && loading && rowData.length === 0;
   const shouldShowSmallRefreshNotice = loading && rowData.length > 0;
 
   return (
     <div className="stock-table-container">
+      <style>{`
+        /*
+         * Keep every scrollbar inside StockTable visually consistent.
+         * This also catches AG Grid's pinned-left / spacer scroll areas,
+         * which can otherwise fall back to the native white Windows scrollbar.
+         */
+        .stock-table-container,
+        .stock-table-container * {
+          scrollbar-color: #19c37d #111827;
+          scrollbar-width: thin;
+        }
+
+        .stock-table-container *::-webkit-scrollbar {
+          width: 9px;
+          height: 8px;
+          background: #111827;
+        }
+
+        .stock-table-container *::-webkit-scrollbar-track {
+          background: #111827;
+          border-radius: 10px;
+        }
+
+        .stock-table-container *::-webkit-scrollbar-thumb {
+          background: #19c37d;
+          border-radius: 10px;
+          border: 1px solid #111827;
+        }
+
+        .stock-table-container *::-webkit-scrollbar-thumb:hover {
+          background: #22c55e;
+        }
+
+        .stock-table-container *::-webkit-scrollbar-corner {
+          background: #111827;
+        }
+
+        .stock-table-container *::-webkit-scrollbar-button {
+          width: 0;
+          height: 0;
+          display: none;
+        }
+      `}</style>
       {showControls && (
         <>
           {notification && (
@@ -2210,55 +2256,6 @@ setActiveList("Default");
 
       {showTable && (
   <div style={{ position: "relative", overflow: "visible" }}>
-  {view === "Watchlist" && rowData.length > 0 && (
-  <div
-    style={{
-  position: "absolute",
-  left: `${allocationFloatingStyle.left}px`,
-  top: `${92 + Math.min(rowData.length, 10) * 30}px`,
-  zIndex: 999,
-  width: `${allocationFloatingStyle.width}px`,
-  display: "flex",
-  flexDirection: "column",
-  alignItems: "center",
-  gap: "6px",
-  pointerEvents: "auto",
-}}
-  >
-    <div
-      style={{
-        background: allocationTotalIsValid ? "#22c55e" : "#f97316",
-        color: "white",
-        borderRadius: "999px",
-        padding: "5px 10px",
-        fontSize: "11px",
-        fontWeight: 800,
-        boxShadow: "0 8px 18px rgba(0,0,0,0.28)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      Total: {allocationTotal.toFixed(1)}%
-    </div>
-
-    <button
-      onClick={resetAllocationsToEqual}
-      style={{
-        background: "#22c55e",
-        color: "white",
-        border: "none",
-        borderRadius: "999px",
-        padding: "7px 12px",
-        fontSize: "12px",
-        fontWeight: 900,
-        cursor: "pointer",
-        boxShadow: "0 8px 18px rgba(0,0,0,0.35)",
-        whiteSpace: "nowrap",
-      }}
-    >
-      Reset Equal
-    </button>
-  </div>
-)}
     {shouldShowFullLoadingOverlay && (
       <div
         className="loading-container"
@@ -2317,7 +2314,16 @@ setActiveList("Default");
 
     <div
       className={`ag-theme-alpine ${view === "Watchlist" ? "ag-watchlist" : ""}`}
-      style={{ width: "100%", height: "700px", overflow: "visible" }}
+      style={{
+        width: "100%",
+        height:
+          view === "Watchlist"
+            ? shouldShowWatchlistEmptyLoading
+              ? "260px"
+              : `${70 + Math.max(displayedCount || rowData.length, 1) * 30 + 18}px`
+            : "700px",
+        overflow: "visible",
+      }}
     >
 <AgGridReact
   ref={gridRef}
@@ -2397,6 +2403,53 @@ onColumnPinned={updateAllocationFloatingPosition}
 onDisplayedColumnsChanged={updateAllocationFloatingPosition}
 />
     </div>
+
+    {view === "Watchlist" && (displayedCount > 0 || rowData.length > 0) && (
+      <div
+        style={{
+          marginTop: "8px",
+          marginLeft: `${allocationFloatingStyle.left}px`,
+          width: `${allocationFloatingStyle.width}px`,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: "6px",
+        }}
+      >
+        <div
+          style={{
+            background: allocationTotalIsValid ? "#22c55e" : "#f97316",
+            color: "white",
+            borderRadius: "999px",
+            padding: "5px 10px",
+            fontSize: "11px",
+            fontWeight: 800,
+            boxShadow: "0 8px 18px rgba(0,0,0,0.28)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Total: {allocationTotal.toFixed(1)}%
+        </div>
+
+        <button
+          onClick={resetAllocationsToEqual}
+          style={{
+            background: "#22c55e",
+            color: "white",
+            border: "none",
+            borderRadius: "999px",
+            padding: "7px 12px",
+            fontSize: "12px",
+            fontWeight: 900,
+            cursor: "pointer",
+            boxShadow: "0 8px 18px rgba(0,0,0,0.35)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          Reset Equal
+        </button>
+      </div>
+    )}
 
     {view !== "Watchlist" && totalPages > 1 && (
       <div

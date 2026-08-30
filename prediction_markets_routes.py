@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ctypes
+import gc
 import hashlib
 import json
 import logging
@@ -91,9 +93,22 @@ _terminal_state_signature_value: Optional[str] = None
 _terminal_state_revision: int = 0
 _terminal_state_error: Optional[str] = None
 _terminal_publisher_task: Optional[asyncio.Task[Any]] = None
+_snapshot_watcher_task: Optional[asyncio.Task[Any]] = None
 _terminal_state_condition = asyncio.Condition()
 _terminal_payload_cache: Dict[Tuple[Any, ...], Tuple[int, Dict[str, Any]]] = {}
 _terminal_ws_message_cache: Dict[Tuple[Any, ...], Tuple[int, str]] = {}
+
+# A committed database snapshot refresh must never force a Render restart or
+# blank the browser terminal. The watcher builds a replacement stream/pricing
+# stack beside the active one, then swaps globals only after the replacement is
+# warm and internally consistent. Existing browser WebSockets stay connected.
+_terminal_reload_lock = asyncio.Lock()
+_terminal_reload_in_progress: bool = False
+_terminal_reload_started_at: Optional[str] = None
+_terminal_reload_error: Optional[str] = None
+_terminal_last_reload_at: Optional[str] = None
+_terminal_last_reload_snapshot: Optional[str] = None
+
 _snapshot_marker_cache_value: Optional[str] = None
 _snapshot_marker_cache_error: Optional[str] = None
 _snapshot_marker_cache_at: float = 0.0
@@ -106,6 +121,63 @@ TERMINAL_PAYLOAD_CACHE_MAX_ENTRIES = max(
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _release_unused_process_memory(reason: str) -> None:
+    """
+    Release build-only Python objects and ask glibc to return free heap pages.
+
+    gc.collect() is portable. malloc_trim(0) is best-effort on Render/Linux and
+    is intentionally optional so local Windows development behaves normally.
+    """
+    collected = gc.collect()
+    trimmed: Optional[bool] = None
+
+    if os.name == "posix":
+        try:
+            libc = ctypes.CDLL("libc.so.6")
+            malloc_trim = libc.malloc_trim
+            malloc_trim.argtypes = [ctypes.c_size_t]
+            malloc_trim.restype = ctypes.c_int
+            trimmed = bool(malloc_trim(0))
+        except Exception:  # noqa: BLE001 - memory trimming is best-effort only
+            trimmed = False
+
+    LOGGER.info(
+        "Prediction-market memory release (%s): gc=%s malloc_trim=%s",
+        reason,
+        collected,
+        trimmed,
+    )
+
+
+def _process_memory_metrics() -> Dict[str, Optional[float]]:
+    """Return lightweight Linux RSS/peak-RSS telemetry for Render diagnostics."""
+    values: Dict[str, Optional[float]] = {
+        "rssMb": None,
+        "peakRssMb": None,
+    }
+    try:
+        status_path = "/proc/self/status"
+        if not os.path.exists(status_path):
+            return values
+
+        with open(status_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    values["rssMb"] = round(
+                        float(line.split()[1]) / 1024.0,
+                        2,
+                    )
+                elif line.startswith("VmHWM:"):
+                    values["peakRssMb"] = round(
+                        float(line.split()[1]) / 1024.0,
+                        2,
+                    )
+    except Exception:  # noqa: BLE001 - diagnostics must never affect health
+        return values
+
+    return values
 
 
 def env_flag(name: str, default: bool) -> bool:
@@ -458,6 +530,12 @@ async def prediction_market_lifespan(_app):
     global _terminal_state_revision
     global _terminal_state_error
     global _terminal_publisher_task
+    global _snapshot_watcher_task
+    global _terminal_reload_in_progress
+    global _terminal_reload_started_at
+    global _terminal_reload_error
+    global _terminal_last_reload_at
+    global _terminal_last_reload_snapshot
     global _snapshot_marker_cache_value
     global _snapshot_marker_cache_error
     global _snapshot_marker_cache_at
@@ -474,6 +552,11 @@ async def prediction_market_lifespan(_app):
     _terminal_state_signature_value = None
     _terminal_state_revision = 0
     _terminal_state_error = None
+    _terminal_reload_in_progress = False
+    _terminal_reload_started_at = None
+    _terminal_reload_error = None
+    _terminal_last_reload_at = None
+    _terminal_last_reload_snapshot = None
     _terminal_payload_cache.clear()
     _terminal_ws_message_cache.clear()
     _snapshot_marker_cache_value = None
@@ -492,6 +575,20 @@ async def prediction_market_lifespan(_app):
             context=exact_context,
         )
 
+        # Build the compact live pricing context BEFORE opening venue streams.
+        # Once this returns, the full 30k+ candidate build context is no longer
+        # needed by production. Releasing it here prevents the lifespan local
+        # variable from pinning the complete matching catalog in RAM forever.
+        fee_context = await asyncio.to_thread(
+            build_live_fee_pricing_context,
+            exact_context,
+        )
+        exact_context = None
+        await asyncio.to_thread(
+            _release_unused_process_memory,
+            "initial-runtime-compaction",
+        )
+
         manager = PredictionMarketStreamManager(
             manifest,
             enable_polymarket=True,
@@ -503,11 +600,6 @@ async def prediction_market_lifespan(_app):
         )
         await manager.start()
 
-        fee_context = await asyncio.to_thread(
-            build_live_fee_pricing_context,
-            exact_context,
-        )
-
         _stream_manager = manager
         _live_fee_context = fee_context
 
@@ -516,6 +608,10 @@ async def prediction_market_lifespan(_app):
         _terminal_publisher_task = asyncio.create_task(
             _terminal_publisher_loop(manager, fee_context),
             name="prediction-terminal-publisher",
+        )
+        _snapshot_watcher_task = asyncio.create_task(
+            _prediction_snapshot_watcher_loop(),
+            name="prediction-terminal-snapshot-watcher",
         )
 
         LOGGER.info(
@@ -543,16 +639,27 @@ async def prediction_market_lifespan(_app):
     try:
         yield
     finally:
+        if _snapshot_watcher_task is not None:
+            _snapshot_watcher_task.cancel()
+            await asyncio.gather(_snapshot_watcher_task, return_exceptions=True)
+            _snapshot_watcher_task = None
+
         if _terminal_publisher_task is not None:
             _terminal_publisher_task.cancel()
             await asyncio.gather(_terminal_publisher_task, return_exceptions=True)
             _terminal_publisher_task = None
-        if manager is not None:
-            await manager.stop()
+
+        # Hot reloads can replace the original local `manager`, so always stop
+        # the currently active global manager during process shutdown.
+        active_manager = _stream_manager
+        if active_manager is not None:
+            await active_manager.stop()
+
         _stream_manager = None
         _live_fee_context = None
         _terminal_ready_at = None
         _initial_traffic_ready = False
+        _terminal_reload_in_progress = False
         _terminal_state = None
         _terminal_payload_cache.clear()
         _terminal_ws_message_cache.clear()
@@ -804,6 +911,106 @@ def _terminal_state_signature(state: Dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _terminal_row_signature(row: Dict[str, Any]) -> str:
+    """Hash one priced pair so unchanged rows never need to be serialized again."""
+    encoded = json.dumps(
+        row,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _terminal_incremental_signature(
+    state: Dict[str, Any],
+    row_signatures: Mapping[str, str],
+    pair_order: Sequence[str],
+) -> str:
+    """Compose a full-terminal signature from cached per-pair hashes.
+
+    This preserves the existing "publish only meaningful changes" behavior while
+    avoiding JSON serialization of every large priced row on every live book tick.
+    """
+    status = state.get("streamStatus") or {}
+    coverage = state.get("coverage") or {}
+    status_payload = {
+        "venueConnected": status.get("venueConnected"),
+        "connectionCounts": status.get("connectionCounts"),
+        "errors": status.get("errors"),
+        "pairStatusCounts": coverage.get("pairStatusCounts"),
+        "routeStatusCounts": coverage.get("routeStatusCounts"),
+    }
+    status_hash = hashlib.sha256(
+        json.dumps(
+            status_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+    encoded = "|".join(
+        [status_hash, *(row_signatures.get(pair_id, "") for pair_id in pair_order)]
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+async def _build_incremental_terminal_state(
+    manager: PredictionMarketStreamManager,
+    fee_context: LiveFeePricingContext,
+    *,
+    dirty_pairs: Sequence[Any],
+    snapshot_by_pair_id: Dict[str, Dict[str, Any]],
+    row_by_pair_id: Dict[str, Dict[str, Any]],
+    row_signature_by_pair_id: Dict[str, str],
+) -> Dict[str, Any]:
+    """Reprice only changed matched pairs and reuse every unchanged priced row."""
+    # Capture the revision BEFORE yielding to the pricing worker. If another
+    # exchange tick arrives while pricing is in-flight, pricing_revision advances
+    # and the affected pair remains dirty for the next loop instead of being
+    # accidentally treated as already incorporated.
+    source_revision = manager.store.pricing_revision
+    dirty_snapshots = manager.store.pair_snapshots(
+        dirty_pairs,
+        refresh_health=False,
+    )
+    dirty_rows = await asyncio.to_thread(
+        _price_terminal_snapshots,
+        dirty_snapshots,
+        fee_context,
+    )
+
+    for snapshot, row in zip(dirty_snapshots, dirty_rows):
+        pair_id = str(snapshot.get("id") or "")
+        if not pair_id:
+            continue
+        snapshot_by_pair_id[pair_id] = snapshot
+        row_by_pair_id[pair_id] = row
+        row_signature_by_pair_id[pair_id] = _terminal_row_signature(row)
+
+    pair_order = [pair.id for pair in manager.manifest.pairs]
+    snapshots = [
+        snapshot_by_pair_id[pair_id]
+        for pair_id in pair_order
+        if pair_id in snapshot_by_pair_id
+    ]
+    rows = [
+        row_by_pair_id[pair_id]
+        for pair_id in pair_order
+        if pair_id in row_by_pair_id
+    ]
+    status = manager.store.status(snapshots=snapshots)
+    coverage = _coverage_audit(manager, fee_context, snapshots, rows)
+    return {
+        "generatedAt": status["generatedAt"],
+        "sourceRevision": source_revision,
+        "streamStatus": status,
+        "feePricing": fee_context.summary(),
+        "coverage": coverage,
+        "rows": rows,
+    }
+
+
 async def _build_shared_terminal_state(
     manager: PredictionMarketStreamManager,
     fee_context: LiveFeePricingContext,
@@ -828,11 +1035,294 @@ async def _build_shared_terminal_state(
     }
 
 
+def _stream_stack_is_warm(manager: PredictionMarketStreamManager) -> bool:
+    """Require both venues and every expected batch before an atomic swap."""
+    status = manager.store.status() or {}
+    manifest = status.get("manifest") or {}
+    counts = status.get("connectionCounts") or {}
+    venues = status.get("venueConnected") or {}
+
+    expected_poly = int(manifest.get("polymarketConnections") or 0)
+    expected_kalshi = int(manifest.get("kalshiConnections") or 0)
+    actual_poly = int(counts.get("polymarket") or 0)
+    actual_kalshi = int(counts.get("kalshi") or 0)
+    poly_initialized = int(status.get("polymarketInitializedBooks") or 0)
+    kalshi_initialized = int(status.get("kalshiInitializedBooks") or 0)
+
+    return bool(
+        venues.get("polymarket")
+        and venues.get("kalshi")
+        and expected_poly > 0
+        and expected_kalshi > 0
+        and actual_poly == expected_poly
+        and actual_kalshi == expected_kalshi
+        and poly_initialized > 0
+        and kalshi_initialized > 0
+    )
+
+
+def _candidate_state_is_consistent(state: Mapping[str, Any]) -> bool:
+    coverage = state.get("coverage") or {}
+    return bool(
+        coverage.get("manifestEqualsSnapshots")
+        and coverage.get("manifestEqualsEvaluated")
+        and coverage.get("allRoutesAccounted")
+        and int(coverage.get("malformedRouteRows") or 0) == 0
+        and int(coverage.get("genericRouteStatuses") or 0) == 0
+        and int(coverage.get("unknownRouteStatuses") or 0) == 0
+        and int(coverage.get("pairLookupMissingRoutes") or 0) == 0
+        and int(coverage.get("pricingExceptionRoutes") or 0) == 0
+        and int(coverage.get("feeContextPairs") or 0)
+        == int(coverage.get("manifestPairs") or 0)
+    )
+
+
+async def _wait_for_candidate_stack_warm(
+    manager: PredictionMarketStreamManager,
+) -> None:
+    timeout_seconds = max(
+        30.0,
+        env_float("PREDICTION_HOT_RELOAD_WARMUP_TIMEOUT_SECONDS", 180.0),
+    )
+    poll_seconds = max(
+        0.25,
+        env_float("PREDICTION_HOT_RELOAD_WARMUP_POLL_SECONDS", 0.5),
+    )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+
+    while loop.time() < deadline:
+        if _stream_stack_is_warm(manager):
+            return
+        await asyncio.sleep(poll_seconds)
+
+    status = manager.store.status() or {}
+    raise TimeoutError(
+        "Replacement prediction-market streams did not fully warm before "
+        f"the {timeout_seconds:.0f}s timeout. Status: {status}"
+    )
+
+
+async def _hot_reload_prediction_terminal(target_snapshot: str) -> bool:
+    """Build beside the active stack, then swap without blanking clients."""
+    global _stream_manager
+    global _live_fee_context
+    global _terminal_state
+    global _terminal_state_signature_value
+    global _terminal_state_revision
+    global _terminal_state_error
+    global _terminal_publisher_task
+    global _terminal_reload_in_progress
+    global _terminal_reload_started_at
+    global _terminal_reload_error
+    global _terminal_last_reload_at
+    global _terminal_last_reload_snapshot
+    global _snapshot_marker_cache_value
+    global _snapshot_marker_cache_error
+    global _snapshot_marker_cache_at
+
+    async with _terminal_reload_lock:
+        loaded_snapshot = (
+            _live_fee_context.snapshot_marker
+            if _live_fee_context is not None
+            else None
+        )
+        if loaded_snapshot is not None and str(loaded_snapshot) == str(target_snapshot):
+            return False
+
+        _terminal_reload_in_progress = True
+        _terminal_reload_started_at = utc_now_iso()
+        _terminal_reload_error = None
+        candidate_manager: Optional[PredictionMarketStreamManager] = None
+        candidate_adopted = False
+
+        LOGGER.info(
+            "Prediction-market snapshot changed (%s -> %s). Building hot reload.",
+            loaded_snapshot,
+            target_snapshot,
+        )
+
+        try:
+            exact_context = await asyncio.to_thread(build_exact_pair_context, "all")
+            context_snapshot = getattr(exact_context, "snapshot_marker", None)
+            if context_snapshot is None or str(context_snapshot) != str(target_snapshot):
+                raise RuntimeError(
+                    "Database snapshot changed again while the replacement "
+                    "matching context was being built."
+                )
+
+            candidate_manifest = build_stream_manifest("all", context=exact_context)
+
+            # Compact and release the replacement build catalog before opening
+            # a second set of exchange WebSockets. During hot reload the old
+            # production stack remains live, so avoiding a three-way overlap of
+            # old runtime + full candidate catalog + new streams materially
+            # reduces the peak-memory requirement.
+            candidate_fee_context = await asyncio.to_thread(
+                build_live_fee_pricing_context,
+                exact_context,
+            )
+            exact_context = None
+            await asyncio.to_thread(
+                _release_unused_process_memory,
+                "hot-reload-runtime-compaction",
+            )
+            if str(candidate_fee_context.snapshot_marker) != str(target_snapshot):
+                raise RuntimeError(
+                    "Replacement fee context was built from a different database snapshot."
+                )
+
+            candidate_manager = PredictionMarketStreamManager(
+                candidate_manifest,
+                enable_polymarket=True,
+                enable_kalshi=True,
+                require_kalshi_credentials=env_flag(
+                    "PREDICTION_REQUIRE_KALSHI_STREAMS",
+                    True,
+                ),
+            )
+            await candidate_manager.start()
+
+            await _wait_for_candidate_stack_warm(candidate_manager)
+            candidate_state = await _build_shared_terminal_state(
+                candidate_manager,
+                candidate_fee_context,
+            )
+            if not _candidate_state_is_consistent(candidate_state):
+                raise RuntimeError(
+                    "Replacement terminal failed the pair/route coverage audit."
+                )
+
+            # Never publish a stale candidate if another catalog transaction
+            # committed while this replacement was warming.
+            latest_snapshot = await asyncio.to_thread(prediction_snapshot_marker)
+            if latest_snapshot is None or str(latest_snapshot) != str(target_snapshot):
+                raise RuntimeError(
+                    "Database snapshot advanced again before the hot reload swap."
+                )
+
+            old_manager = _stream_manager
+            old_publisher = _terminal_publisher_task
+
+            # Stop only the OLD publisher. The old terminal state remains readable
+            # while this await completes, so HTTP/WebSocket clients never see zero.
+            if old_publisher is not None:
+                old_publisher.cancel()
+                await asyncio.gather(old_publisher, return_exceptions=True)
+
+            _stream_manager = candidate_manager
+            _live_fee_context = candidate_fee_context
+            _terminal_state = candidate_state
+            _terminal_state_signature_value = _terminal_state_signature(candidate_state)
+            _terminal_state_revision += 1
+            _terminal_state_error = None
+            _terminal_payload_cache.clear()
+            _terminal_ws_message_cache.clear()
+
+            loop = asyncio.get_running_loop()
+            _snapshot_marker_cache_value = str(target_snapshot)
+            _snapshot_marker_cache_error = None
+            _snapshot_marker_cache_at = loop.time()
+
+            _terminal_publisher_task = asyncio.create_task(
+                _terminal_publisher_loop(candidate_manager, candidate_fee_context),
+                name="prediction-terminal-publisher",
+            )
+            _terminal_last_reload_at = utc_now_iso()
+            _terminal_last_reload_snapshot = str(target_snapshot)
+            candidate_adopted = True
+
+            async with _terminal_state_condition:
+                _terminal_state_condition.notify_all()
+
+            LOGGER.info(
+                "Prediction-market hot reload committed: %s",
+                candidate_manifest.summary(),
+            )
+
+            # The new terminal is already globally visible before old exchange
+            # connections are closed. Browser WebSockets remain untouched.
+            if old_manager is not None and old_manager is not candidate_manager:
+                await old_manager.stop()
+                old_manager = None
+
+            # The earlier compaction pass can only free replacement build objects.
+            # Now that the old stream stack is stopped and has severed its order-book
+            # graph, collect again and let Render/Linux malloc_trim return eligible
+            # heap pages to the cgroup before the next scheduled refresh.
+            old_publisher = None
+            await asyncio.to_thread(
+                _release_unused_process_memory,
+                "hot-reload-old-runtime-retired",
+            )
+
+            return True
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - preserve old live stack
+            _terminal_reload_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.exception(
+                "Prediction-market hot reload failed; existing live stack preserved."
+            )
+            return False
+        finally:
+            _terminal_reload_in_progress = False
+            if candidate_manager is not None and not candidate_adopted:
+                await candidate_manager.stop()
+                candidate_manager = None
+                await asyncio.to_thread(
+                    _release_unused_process_memory,
+                    "hot-reload-candidate-discarded",
+                )
+
+
+async def _prediction_snapshot_watcher_loop() -> None:
+    """Detect committed DB snapshots and hot-reload them automatically."""
+    interval = max(
+        5.0,
+        env_float("PREDICTION_SNAPSHOT_WATCH_INTERVAL_SECONDS", 10.0),
+    )
+    retry_seconds = max(
+        15.0,
+        env_float("PREDICTION_HOT_RELOAD_RETRY_SECONDS", 60.0),
+    )
+
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            fee_context = _live_fee_context
+            if fee_context is None or _stream_manager is None:
+                continue
+
+            database_snapshot = await asyncio.to_thread(prediction_snapshot_marker)
+            loaded_snapshot = fee_context.snapshot_marker
+            if (
+                database_snapshot is None
+                or loaded_snapshot is None
+                or str(database_snapshot) == str(loaded_snapshot)
+            ):
+                continue
+
+            swapped = await _hot_reload_prediction_terminal(str(database_snapshot))
+            if not swapped and _terminal_reload_error:
+                await asyncio.sleep(retry_seconds)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - watcher must self-heal
+            LOGGER.exception(
+                "Prediction-market snapshot watcher failed: %s",
+                exc,
+            )
+            await asyncio.sleep(retry_seconds)
+
+
 async def _terminal_publisher_loop(
     manager: PredictionMarketStreamManager,
     fee_context: LiveFeePricingContext,
 ) -> None:
-    """Price the complete manifest once per process and notify all clients."""
+    """Incrementally price changed pairs and notify all clients."""
     global _terminal_state
     global _terminal_state_signature_value
     global _terminal_state_revision
@@ -849,29 +1339,70 @@ async def _terminal_publisher_loop(
         env_float("PREDICTION_TERMINAL_HEARTBEAT_SECONDS", 15.0),
     )
     loop = asyncio.get_running_loop()
-    last_refresh_time = 0.0
+    last_full_refresh_time = 0.0
     last_priced_store_revision = -1
+
+    pair_order = [pair.id for pair in manager.manifest.pairs]
+    snapshot_by_pair_id: Dict[str, Dict[str, Any]] = {}
+    row_by_pair_id: Dict[str, Dict[str, Any]] = {}
+    row_signature_by_pair_id: Dict[str, str] = {}
 
     while True:
         try:
             now = loop.time()
             store_revision = manager.store.pricing_revision
-            refresh_due = now - last_refresh_time >= heartbeat_seconds
+            full_refresh_due = (
+                not snapshot_by_pair_id
+                or now - last_full_refresh_time >= heartbeat_seconds
+            )
 
-            # Only executable-book/health changes advance pricing_revision.
-            # Periodically rebuild for time-based health transitions, but do not
-            # publish a new full catalog unless the meaningful signature changed.
-            if (
-                _terminal_state is not None
-                and store_revision == last_priced_store_revision
-                and not refresh_due
-            ):
-                await asyncio.sleep(interval)
-                continue
+            if full_refresh_due:
+                # Periodically refresh every book's time-based health and run a
+                # complete pair/coverage audit. This is the safety net that
+                # guarantees incremental updates cannot silently drift.
+                dirty_pairs = manager.store.consume_dirty_pairs(force_all=True)
+                manager.store.refresh_health()
+                state = await _build_incremental_terminal_state(
+                    manager,
+                    fee_context,
+                    dirty_pairs=dirty_pairs,
+                    snapshot_by_pair_id=snapshot_by_pair_id,
+                    row_by_pair_id=row_by_pair_id,
+                    row_signature_by_pair_id=row_signature_by_pair_id,
+                )
+                last_full_refresh_time = loop.time()
+            else:
+                if (
+                    _terminal_state is not None
+                    and store_revision == last_priced_store_revision
+                ):
+                    await asyncio.sleep(interval)
+                    continue
 
-            state = await _build_shared_terminal_state(manager, fee_context)
-            signature = _terminal_state_signature(state)
-            last_refresh_time = loop.time()
+                # Coalesce every exchange tick that arrived during this cadence
+                # window, then price only the pairs touched by those instruments.
+                dirty_pairs = manager.store.consume_dirty_pairs()
+                if not dirty_pairs:
+                    # Defensive fallback: revision changed but no pair was marked.
+                    # Force a full audit rather than risk serving stale economics.
+                    dirty_pairs = manager.store.consume_dirty_pairs(force_all=True)
+                    manager.store.refresh_health()
+                    last_full_refresh_time = loop.time()
+
+                state = await _build_incremental_terminal_state(
+                    manager,
+                    fee_context,
+                    dirty_pairs=dirty_pairs,
+                    snapshot_by_pair_id=snapshot_by_pair_id,
+                    row_by_pair_id=row_by_pair_id,
+                    row_signature_by_pair_id=row_signature_by_pair_id,
+                )
+
+            signature = _terminal_incremental_signature(
+                state,
+                row_signature_by_pair_id,
+                pair_order,
+            )
             publish = bool(
                 _terminal_state is None
                 or signature != _terminal_state_signature_value
@@ -885,12 +1416,10 @@ async def _terminal_publisher_loop(
                 _terminal_payload_cache.clear()
                 _terminal_ws_message_cache.clear()
                 _terminal_state_error = None
+
                 # Initial public-traffic readiness is latched only after every
                 # expected venue WebSocket batch is connected and a shared
-                # terminal state has been published. After that first successful
-                # warm-up, transient venue disconnects are surfaced through the
-                # readiness/status payload instead of triggering Render restart
-                # loops.
+                # terminal state has been published.
                 stream_status = state.get("streamStatus") or {}
                 manifest_summary = stream_status.get("manifest") or {}
                 connection_counts = stream_status.get("connectionCounts") or {}
@@ -1191,7 +1720,12 @@ async def build_terminal_readiness_payload() -> Dict[str, Any]:
     if snapshot_lookup_error:
         reasons.append("database_snapshot_check_failed")
     elif not snapshot_current:
-        reasons.append("database_snapshot_changed_restart_required")
+        # The old live stack remains valid while the background watcher builds
+        # the replacement, so a new DB snapshot is a recovery warning, not a
+        # reason to blank the terminal or restart Render.
+        warnings.append("database_snapshot_hot_reload_pending")
+    if _terminal_reload_error:
+        warnings.append("catalog_hot_reload_last_attempt_failed")
     if _stream_start_error:
         reasons.append("terminal_startup_error")
     if _terminal_state is None:
@@ -1216,14 +1750,17 @@ async def build_terminal_readiness_payload() -> Dict[str, Any]:
         "startupError": _stream_start_error,
         "publisherError": _terminal_state_error,
         "terminalRevision": _terminal_state_revision,
-        "restartRequired": bool(
-            loaded_snapshot is not None
-            and database_snapshot is not None
-            and not snapshot_current
-        ),
+        "restartRequired": False,
         "reasons": reasons,
         "warnings": warnings,
-        "recovering": bool(warnings),
+        "recovering": bool(warnings or _terminal_reload_in_progress),
+        "hotReload": {
+            "inProgress": _terminal_reload_in_progress,
+            "startedAt": _terminal_reload_started_at,
+            "lastCompletedAt": _terminal_last_reload_at,
+            "lastCompletedSnapshot": _terminal_last_reload_snapshot,
+            "lastError": _terminal_reload_error,
+        },
         "fullStreamCoverage": bool(
             all_stream_batches_connected and not stream_errors
         ),
@@ -1579,6 +2116,15 @@ async def get_terminal_health():
         "startupError": _stream_start_error,
         "publisherError": _terminal_state_error,
         "terminalRevision": _terminal_state_revision,
+        "hotReloadInProgress": _terminal_reload_in_progress,
+        "hotReloadLastCompletedAt": _terminal_last_reload_at,
+        "hotReloadLastError": _terminal_reload_error,
+        "memory": _process_memory_metrics(),
+        "liveRuntime": (
+            _live_fee_context.summary()
+            if _live_fee_context is not None
+            else None
+        ),
     }
     return JSONResponse(
         status_code=200 if ready_for_traffic else 503,
@@ -1613,6 +2159,13 @@ async def get_terminal_status(
         "coverage": state.get("coverage") or {},
         "terminalRevision": _terminal_state_revision,
         "publisherError": _terminal_state_error,
+        "hotReload": {
+            "inProgress": _terminal_reload_in_progress,
+            "startedAt": _terminal_reload_started_at,
+            "lastCompletedAt": _terminal_last_reload_at,
+            "lastCompletedSnapshot": _terminal_last_reload_snapshot,
+            "lastError": _terminal_reload_error,
+        },
     }
 
 

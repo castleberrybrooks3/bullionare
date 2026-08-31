@@ -42,7 +42,7 @@ from prediction_markets_routes import (
 )
 
 
-REGRESSION_VERSION = "prediction-backend-regression-v4.2-authenticated-production-readiness"
+REGRESSION_VERSION = "prediction-backend-regression-v4.3-persistent-catalog-finance-readiness"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_REPORT = "prediction_market_backend_regression_report.json"
 LIVE_BEARER_TOKEN = ""
@@ -77,6 +77,7 @@ TOP_LEVEL_KEYS = {
     "matchedRowsBeforeLimit",
     "returnedRows",
     "opportunities",
+    "financeInventory",
 }
 
 ROW_KEYS = {
@@ -465,7 +466,7 @@ def context_checks(state: Dict[str, Any]) -> None:
     require(bool(STREAMS_VERSION), "streams version is empty")
     require(
         TERMINAL_API_CONTRACT_VERSION
-        == "prediction-terminal-api-v2-route-accounted",
+        == "prediction-terminal-api-v2.1-persistent-catalog",
         f"unexpected API contract version: {TERMINAL_API_CONTRACT_VERSION}",
     )
     require(
@@ -552,14 +553,33 @@ def context_checks(state: Dict[str, Any]) -> None:
             f"{group} live-pricing admission totals do not reconcile",
         )
 
-    expected_exact = sum(
+    # Sports may apply a deliberate post-settlement runtime cap (currently
+    # soccer-only). Settlement diagnostics describe the pre-runtime-prune
+    # eligible set, so use the post-prune sports count when it is present.
+    expected_sports_runtime = int(
+        diagnostics.get(
+            "sportsPairsAfterFinancePriorityPrune",
+            diagnostics.get("sportsSettlementStreamEligiblePairs", 0),
+        )
+    )
+    expected_exact = expected_sports_runtime + sum(
         int(diagnostics.get(f"{group}SettlementStreamEligiblePairs", 0))
-        for group in ("sports", "macro", "weather", "generic")
+        for group in ("macro", "weather", "generic")
     )
     require(
         len(context.exact_pairs) == expected_exact,
-        "stream-eligible settlement count differs from exact pair count",
+        "runtime exact-pair count differs from post-settlement admitted counts",
     )
+    if "soccerRuntimePairLimit" in diagnostics:
+        require(
+            int(diagnostics.get("soccerPairsAfterPriorityPrune", 0))
+            <= int(diagnostics.get("soccerRuntimePairLimit", 0)),
+            "soccer runtime hard cap was exceeded",
+        )
+        require(
+            diagnostics.get("soccerCapTouchesOnlySoccer") is True,
+            "soccer runtime cap touched non-soccer sports",
+        )
 
     admitted_external = set()
     for poly, kalshi in context.exact_pairs:
@@ -608,6 +628,18 @@ def manifest_checks(state: Dict[str, Any]) -> None:
     require(len(pair_ids) == len(set(pair_ids)), "duplicate manifest pair IDs")
     require(bool(manifest.polymarket_asset_ids), "no Polymarket assets in manifest")
     require(bool(manifest.kalshi_market_tickers), "no Kalshi tickers in manifest")
+
+    expected_inventory = tuple(getattr(context, "finance_inventory", ()) or ())
+    manifest_inventory = tuple(getattr(manifest, "inventory", ()) or ())
+    require(
+        len(manifest_inventory) == len(expected_inventory),
+        "manifest finance inventory does not match engine context",
+    )
+    inventory_ids = [str(item.id) for item in manifest_inventory]
+    require(len(inventory_ids) == len(set(inventory_ids)), "duplicate finance inventory IDs")
+    for item in manifest_inventory:
+        require(item.venue in {"polymarket", "kalshi"}, f"unknown finance venue: {item.venue}")
+        require(item.market_group in {"companies", "macro"}, f"unknown finance group: {item.market_group}")
 
     for pair in manifest.pairs:
         require(bool(pair.polymarket_yes_asset_id), f"missing YES asset: {pair.id}")
@@ -857,6 +889,7 @@ def live_api_checks(
         "allStreamBatchesConnected",
         "streamErrorsClear",
         "allManifestPairsAssigned",
+        "allFinanceInventoryAssigned",
         "manifestEqualsStreamSnapshots",
         "manifestEqualsApiRows",
         "feeContextAligned",
@@ -911,6 +944,16 @@ def live_api_checks(
     require(overview.get("matchedRowsBeforeLimit") == expected_pairs, "All Markets filtered out rows")
     require(overview.get("returnedRows") == expected_pairs, "All Markets did not return every pair")
     require(len(overview.get("opportunities") or []) == expected_pairs, "opportunity length mismatch")
+    expected_inventory = len(tuple(getattr(manifest, "inventory", ()) or ()))
+    finance_inventory = overview.get("financeInventory") or []
+    require(
+        len(finance_inventory) == expected_inventory,
+        "All Markets finance inventory count differs from stream manifest",
+    )
+    finance_ids = [str(row.get("id") or "") for row in finance_inventory if isinstance(row, Mapping)]
+    require(len(finance_ids) == expected_inventory, "finance inventory contains malformed rows")
+    require(all(finance_ids), "finance inventory row is missing its ID")
+    require(len(finance_ids) == len(set(finance_ids)), "duplicate finance inventory API row IDs")
     require((overview.get("filters") or {}).get("limitApplied") is False, "stable All Markets was truncated")
 
     rows = overview.get("opportunities") or []

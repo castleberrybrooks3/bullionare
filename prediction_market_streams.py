@@ -1,12 +1,13 @@
 """
 Bullionaire Prediction Terminal — real-time market stream layer.
 
-Version: live-streams-v3.8-retired-runtime-release
+Version: live-streams-v3.9-finance-inventory
 
 Purpose
 -------
-Maintain live Polymarket and Kalshi order books in memory for the exact
-cross-venue pairs produced by prediction_market_engine.py. This module does
+Maintain live Polymarket and Kalshi order books in memory for exact cross-venue
+pairs plus the bounded single-venue Companies/Economics inventory produced by
+prediction_market_engine.py. This module does
 not write WebSocket ticks to PostgreSQL and does not modify the validated
 matching or fee engine.
 
@@ -84,7 +85,7 @@ except ImportError as exc:  # pragma: no cover - dependency guidance
         'pip install "websockets>=12,<16" "cryptography>=42,<46"'
     ) from exc
 
-STREAMS_VERSION = "live-streams-v3.8-retired-runtime-release"
+STREAMS_VERSION = "live-streams-v3.9-finance-inventory"
 POLYMARKET_MARKET_WS_URL = (
     "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 )
@@ -360,6 +361,30 @@ class PairSubscription:
 
 
 @dataclass(frozen=True)
+class InventorySubscription:
+    id: str
+    venue: str
+    market_group: str
+    family: str
+    event_title: str
+    contract_title: str
+    database_market_id: int
+    external_market_id: str
+    external_event_id: str
+    polymarket_yes_asset_id: str
+    polymarket_no_asset_id: str
+    kalshi_market_ticker: str
+    close_time: Optional[str]
+    resolution_time: Optional[str]
+    liquidity: Optional[float]
+    volume_24h: Optional[float]
+    total_volume: Optional[float]
+    open_interest: Optional[float]
+    rank_score: float
+    subject_key: str
+
+
+@dataclass(frozen=True)
 class StreamManifest:
     engine_version: str
     streams_version: str
@@ -367,15 +392,23 @@ class StreamManifest:
     snapshot_marker: Any
     market_group: str
     pairs: Tuple[PairSubscription, ...]
+    inventory: Tuple[InventorySubscription, ...]
     polymarket_asset_ids: Tuple[str, ...]
     kalshi_market_tickers: Tuple[str, ...]
 
     def summary(self) -> Dict[str, Any]:
         groups: Dict[str, int] = defaultdict(int)
         relationships: Dict[str, int] = defaultdict(int)
+        inventory_groups: Dict[str, int] = defaultdict(int)
+        inventory_venues: Dict[str, int] = defaultdict(int)
+        inventory_families: Dict[str, int] = defaultdict(int)
         for pair in self.pairs:
             groups[pair.market_group] += 1
             relationships[pair.pair_relationship] += 1
+        for item in self.inventory:
+            inventory_groups[item.market_group] += 1
+            inventory_venues[item.venue] += 1
+            inventory_families[item.family] += 1
         return {
             "engineVersion": self.engine_version,
             "streamsVersion": self.streams_version,
@@ -385,6 +418,10 @@ class StreamManifest:
             "pairs": len(self.pairs),
             "pairsByGroup": dict(sorted(groups.items())),
             "pairsByRelationship": dict(sorted(relationships.items())),
+            "financeInventoryRows": len(self.inventory),
+            "financeInventoryByGroup": dict(sorted(inventory_groups.items())),
+            "financeInventoryByVenue": dict(sorted(inventory_venues.items())),
+            "financeInventoryByFamily": dict(sorted(inventory_families.items())),
             "polymarketAssetIds": len(self.polymarket_asset_ids),
             "kalshiMarketTickers": len(self.kalshi_market_tickers),
             "polymarketConnections": (
@@ -451,20 +488,84 @@ def build_stream_manifest(
             raise ValueError("pair_limit must be positive")
         pairs = pairs[:pair_limit]
 
+    inventory: List[InventorySubscription] = []
+    for item in getattr(context, "finance_inventory", ()) or ():
+        item_group = str(getattr(item, "market_group", "") or "")
+        # The process-wide `all` manifest carries both finance tabs. A macro-only
+        # diagnostic manifest carries Economics only; other specialized manifests
+        # stay exact-pair-only.
+        if market_group == "macro" and item_group != "macro":
+            continue
+        if market_group not in {"all", "macro"}:
+            continue
+        venue = str(getattr(item, "venue", "") or "")
+        yes_key = str(getattr(item, "yes_key", "") or "")
+        no_key = str(getattr(item, "no_key", "") or "")
+        external_market_id = str(getattr(item, "external_market_id", "") or "")
+        if venue == "polymarket":
+            if not yes_key or not no_key:
+                continue
+            poly_yes, poly_no, kalshi_ticker = yes_key, no_key, ""
+        elif venue == "kalshi":
+            if not external_market_id:
+                continue
+            poly_yes, poly_no, kalshi_ticker = "", "", external_market_id
+        else:
+            continue
+        inventory.append(
+            InventorySubscription(
+                id=str(getattr(item, "id", "") or f"finance-{venue}-{external_market_id}"),
+                venue=venue,
+                market_group=item_group,
+                family=str(getattr(item, "family", "") or "unknown"),
+                event_title=str(getattr(item, "event_title", "") or ""),
+                contract_title=str(getattr(item, "contract_title", "") or ""),
+                database_market_id=int(getattr(item, "database_market_id", 0) or 0),
+                external_market_id=external_market_id,
+                external_event_id=str(getattr(item, "external_event_id", "") or ""),
+                polymarket_yes_asset_id=poly_yes,
+                polymarket_no_asset_id=poly_no,
+                kalshi_market_ticker=kalshi_ticker,
+                close_time=getattr(item, "close_time", None),
+                resolution_time=getattr(item, "resolution_time", None),
+                liquidity=float(getattr(item, "liquidity", 0.0) or 0.0),
+                volume_24h=float(getattr(item, "volume_24h", 0.0) or 0.0),
+                total_volume=float(getattr(item, "total_volume", 0.0) or 0.0),
+                open_interest=float(getattr(item, "open_interest", 0.0) or 0.0),
+                rank_score=float(getattr(item, "rank_score", 0.0) or 0.0),
+                subject_key=str(getattr(item, "subject_key", "") or ""),
+            )
+        )
+    inventory.sort(key=lambda row: (-row.rank_score, row.market_group, row.id))
+
     asset_ids = tuple(
         dict.fromkeys(
             asset
-            for pair in pairs
-            for asset in (
-                pair.polymarket_yes_asset_id,
-                pair.polymarket_no_asset_id,
-            )
+            for asset in [
+                *(
+                    value
+                    for pair in pairs
+                    for value in (pair.polymarket_yes_asset_id, pair.polymarket_no_asset_id)
+                    if value
+                ),
+                *(
+                    value
+                    for item in inventory
+                    for value in (item.polymarket_yes_asset_id, item.polymarket_no_asset_id)
+                    if value
+                ),
+            ]
             if asset
         )
     )
     tickers = tuple(
         dict.fromkeys(
-            pair.kalshi_market_ticker for pair in pairs if pair.kalshi_market_ticker
+            ticker
+            for ticker in [
+                *(pair.kalshi_market_ticker for pair in pairs if pair.kalshi_market_ticker),
+                *(item.kalshi_market_ticker for item in inventory if item.kalshi_market_ticker),
+            ]
+            if ticker
         )
     )
 
@@ -475,6 +576,7 @@ def build_stream_manifest(
         snapshot_marker=context.snapshot_marker,
         market_group=market_group,
         pairs=tuple(pairs),
+        inventory=tuple(inventory),
         polymarket_asset_ids=asset_ids,
         kalshi_market_tickers=tickers,
     )
@@ -651,6 +753,11 @@ class LiveBookStore:
         }
         self._pair_ids_by_polymarket_asset: Dict[str, Set[str]] = defaultdict(set)
         self._pair_ids_by_kalshi_ticker: Dict[str, Set[str]] = defaultdict(set)
+        self._inventory_by_id: Dict[str, InventorySubscription] = {
+            item.id: item for item in manifest.inventory
+        }
+        self._inventory_ids_by_polymarket_asset: Dict[str, Set[str]] = defaultdict(set)
+        self._inventory_ids_by_kalshi_ticker: Dict[str, Set[str]] = defaultdict(set)
         for pair in manifest.pairs:
             self._pair_ids_by_polymarket_asset[
                 pair.polymarket_yes_asset_id
@@ -661,9 +768,17 @@ class LiveBookStore:
             self._pair_ids_by_kalshi_ticker[
                 pair.kalshi_market_ticker
             ].add(pair.id)
+        for item in manifest.inventory:
+            if item.polymarket_yes_asset_id:
+                self._inventory_ids_by_polymarket_asset[item.polymarket_yes_asset_id].add(item.id)
+            if item.polymarket_no_asset_id:
+                self._inventory_ids_by_polymarket_asset[item.polymarket_no_asset_id].add(item.id)
+            if item.kalshi_market_ticker:
+                self._inventory_ids_by_kalshi_ticker[item.kalshi_market_ticker].add(item.id)
 
         # The first publisher pass must establish a complete baseline.
         self._dirty_pair_ids: Set[str] = set(self._pairs_by_id)
+        self._dirty_inventory_ids: Set[str] = set(self._inventory_by_id)
 
     def release_memory(self) -> None:
         """Drop heavy live-book references after this store is retired."""
@@ -675,7 +790,11 @@ class LiveBookStore:
         self._pairs_by_id.clear()
         self._pair_ids_by_polymarket_asset.clear()
         self._pair_ids_by_kalshi_ticker.clear()
+        self._inventory_by_id.clear()
+        self._inventory_ids_by_polymarket_asset.clear()
+        self._inventory_ids_by_kalshi_ticker.clear()
         self._dirty_pair_ids.clear()
+        self._dirty_inventory_ids.clear()
         self.manifest = None  # type: ignore[assignment]
 
     def _bump_revision(self, *, pricing: bool = True) -> None:
@@ -698,9 +817,19 @@ class LiveBookStore:
             self._mark_pair_ids_dirty(
                 self._pair_ids_by_polymarket_asset.get(clean_id, ())
             )
+            self._dirty_inventory_ids.update(
+                inventory_id
+                for inventory_id in self._inventory_ids_by_polymarket_asset.get(clean_id, ())
+                if inventory_id in self._inventory_by_id
+            )
         elif venue == "kalshi":
             self._mark_pair_ids_dirty(
                 self._pair_ids_by_kalshi_ticker.get(clean_id, ())
+            )
+            self._dirty_inventory_ids.update(
+                inventory_id
+                for inventory_id in self._inventory_ids_by_kalshi_ticker.get(clean_id, ())
+                if inventory_id in self._inventory_by_id
             )
 
     def _mark_batch_dirty(self, venue: str, batch_id: str) -> None:
@@ -736,6 +865,26 @@ class LiveBookStore:
             pair
             for pair in self.manifest.pairs
             if pair.id in pair_ids
+        )
+
+    def mark_all_inventory_dirty(self) -> None:
+        self._dirty_inventory_ids.update(self._inventory_by_id)
+
+    def consume_dirty_inventory(
+        self,
+        *,
+        force_all: bool = False,
+    ) -> Tuple[InventorySubscription, ...]:
+        if force_all:
+            inventory_ids = set(self._inventory_by_id)
+            self._dirty_inventory_ids.clear()
+        else:
+            inventory_ids = self._dirty_inventory_ids
+            self._dirty_inventory_ids = set()
+        if not inventory_ids:
+            return ()
+        return tuple(
+            item for item in self.manifest.inventory if item.id in inventory_ids
         )
 
     def _collection(self, venue: str) -> Dict[str, Any]:
@@ -828,12 +977,14 @@ class LiveBookStore:
         if self.errors.get(key) != value:
             self.errors[key] = value
             self.mark_all_pairs_dirty()
+            self.mark_all_inventory_dirty()
             self._bump_revision()
 
     def clear_error(self, key: str) -> None:
         if key in self.errors:
             self.errors.pop(key, None)
             self.mark_all_pairs_dirty()
+            self.mark_all_inventory_dirty()
             self._bump_revision()
 
     def _poly_book(self, asset_id: str) -> TokenBook:
@@ -1300,6 +1451,80 @@ class LiveBookStore:
             },
         }
 
+    def inventory_snapshot(
+        self,
+        item: InventorySubscription,
+        *,
+        refresh_health: bool = True,
+    ) -> Dict[str, Any]:
+        if refresh_health:
+            self.refresh_health()
+        base = asdict(item)
+        base["rowType"] = "single_venue_market"
+        base["isArbitragePair"] = False
+        if item.venue == "polymarket":
+            yes_book = self.polymarket.get(item.polymarket_yes_asset_id)
+            no_book = self.polymarket.get(item.polymarket_no_asset_id)
+            yes_quote = self._token_quote(yes_book)
+            no_quote = self._token_quote(no_book)
+            yes_state = self._side_state(yes_book, yes_book.best_ask if yes_book else None, yes_book.best_ask_size if yes_book else None)
+            no_state = self._side_state(no_book, no_book.best_ask if no_book else None, no_book.best_ask_size if no_book else None)
+            ready_sides = int(yes_state["executable"]) + int(no_state["executable"])
+            live_status = "ready" if ready_sides == 2 else "partially_ready" if ready_sides == 1 else "unavailable"
+            return {
+                **base,
+                "liveStatus": live_status,
+                "readySideCount": ready_sides,
+                "yes": {**yes_quote, **yes_state},
+                "no": {**no_quote, **no_state},
+                "bestYesBid": yes_quote.get("bestBid"),
+                "bestYesAsk": yes_quote.get("bestAsk"),
+                "bestNoBid": no_quote.get("bestBid"),
+                "bestNoAsk": no_quote.get("bestAsk"),
+                "receivedAt": max(
+                    [value for value in (yes_quote.get("receivedAt"), no_quote.get("receivedAt")) if value],
+                    default=None,
+                ),
+            }
+        kalshi_book = self.kalshi.get(item.kalshi_market_ticker)
+        quote = self._kalshi_quote(kalshi_book)
+        yes_state = self._side_state(kalshi_book, kalshi_book.yes_ask if kalshi_book else None, kalshi_book.yes_ask_size if kalshi_book else None)
+        no_state = self._side_state(kalshi_book, kalshi_book.no_ask if kalshi_book else None, kalshi_book.no_ask_size if kalshi_book else None)
+        ready_sides = int(yes_state["executable"]) + int(no_state["executable"])
+        live_status = "ready" if ready_sides == 2 else "partially_ready" if ready_sides == 1 else "unavailable"
+        return {
+            **base,
+            "liveStatus": live_status,
+            "readySideCount": ready_sides,
+            "yes": {
+                "bestBid": quote.get("yesBid"), "bestBidSize": quote.get("yesBidSize"),
+                "bestAsk": quote.get("yesAsk"), "bestAskSize": quote.get("yesAskSize"),
+                "askLevels": quote.get("yesAskLevels") or [], **yes_state,
+            },
+            "no": {
+                "bestBid": quote.get("noBid"), "bestBidSize": quote.get("noBidSize"),
+                "bestAsk": quote.get("noAsk"), "bestAskSize": quote.get("noAskSize"),
+                "askLevels": quote.get("noAskLevels") or [], **no_state,
+            },
+            "bestYesBid": quote.get("yesBid"),
+            "bestYesAsk": quote.get("yesAsk"),
+            "bestNoBid": quote.get("noBid"),
+            "bestNoAsk": quote.get("noAsk"),
+            "receivedAt": quote.get("receivedAt"),
+            "kalshi": quote,
+        }
+
+    def inventory_snapshots(
+        self,
+        items: Optional[Sequence[InventorySubscription]] = None,
+        *,
+        refresh_health: bool = True,
+    ) -> List[Dict[str, Any]]:
+        if refresh_health:
+            self.refresh_health()
+        selected = self.manifest.inventory if items is None else items
+        return [self.inventory_snapshot(item, refresh_health=False) for item in selected]
+
     def pair_snapshot(
         self,
         pair: PairSubscription,
@@ -1459,6 +1684,9 @@ class LiveBookStore:
             "polymarketInitializedBooks": poly_initialized,
             "polymarketReadyBooks": poly_ready,
             "polymarketFreshBooks": poly_ready,
+            "financeInventoryRows": len(self.manifest.inventory),
+            "financeInventoryCompanies": sum(item.market_group == "companies" for item in self.manifest.inventory),
+            "financeInventoryEconomics": sum(item.market_group == "macro" for item in self.manifest.inventory),
             "kalshiBooks": len(self.kalshi),
             "kalshiExpectedBooks": len(self.manifest.kalshi_market_tickers),
             "kalshiInitializedBooks": kalshi_initialized,
@@ -2030,6 +2258,28 @@ def self_test() -> Dict[str, Any]:
         kalshi_market_ticker="KXTEST",
         kalshi_event_ticker="KXTESTEVENT",
     )
+    finance_item = InventorySubscription(
+        id="test-finance",
+        venue="kalshi",
+        market_group="macro",
+        family="cpi",
+        event_title="Test CPI",
+        contract_title="Will CPI exceed 3%?",
+        database_market_id=999,
+        external_market_id="KXTEST",
+        external_event_id="KXTESTEVENT",
+        polymarket_yes_asset_id="",
+        polymarket_no_asset_id="",
+        kalshi_market_ticker="KXTEST",
+        close_time=None,
+        resolution_time=None,
+        liquidity=100.0,
+        volume_24h=50.0,
+        total_volume=1000.0,
+        open_interest=500.0,
+        rank_score=10.0,
+        subject_key="cpi",
+    )
     dummy_manifest = StreamManifest(
         engine_version="test",
         streams_version=STREAMS_VERSION,
@@ -2037,6 +2287,7 @@ def self_test() -> Dict[str, Any]:
         snapshot_marker=None,
         market_group="all",
         pairs=(pair,),
+        inventory=(finance_item,),
         polymarket_asset_ids=("poly-yes", "poly-no"),
         kalshi_market_tickers=("KXTEST",),
     )
@@ -2048,6 +2299,8 @@ def self_test() -> Dict[str, Any]:
 
     initial_dirty = store.consume_dirty_pairs()
     assert [item.id for item in initial_dirty] == ["test-pair"]
+    initial_inventory_dirty = store.consume_dirty_inventory()
+    assert [item.id for item in initial_inventory_dirty] == ["test-finance"]
 
     for asset_id, bid, ask in (
         ("poly-yes", "0.48", "0.51"),
@@ -2085,6 +2338,12 @@ def self_test() -> Dict[str, Any]:
     assert kalshi.yes_ask == 0.49
     assert kalshi.no_bid == 0.51
     assert kalshi.no_ask == 0.54
+    finance_dirty = store.consume_dirty_inventory()
+    assert [item.id for item in finance_dirty] == ["test-finance"]
+    finance_snapshot = store.inventory_snapshot(finance_item)
+    assert finance_snapshot["liveStatus"] == "ready"
+    assert finance_snapshot["bestYesAsk"] == 0.49
+    assert finance_snapshot["bestNoAsk"] == 0.54
 
     store.apply_kalshi(
         {
@@ -2211,6 +2470,7 @@ def self_test() -> Dict[str, Any]:
     # telemetry update must neither advance pricing_revision nor dirty a pair.
     dirty_before_trade = store.consume_dirty_pairs()
     assert [item.id for item in dirty_before_trade] == ["test-pair"]
+    store.consume_dirty_inventory()
 
     pricing_revision_before_trade = store.pricing_revision
     store.apply_polymarket(
@@ -2233,6 +2493,7 @@ def self_test() -> Dict[str, Any]:
     )
     assert store.pricing_revision == pricing_revision_before_trade
     assert store.consume_dirty_pairs() == ()
+    assert store.consume_dirty_inventory() == ()
 
     # A single executable-book update dirties exactly the affected matched pair.
     store.apply_polymarket(
@@ -2257,6 +2518,9 @@ def self_test() -> Dict[str, Any]:
         "tinyValidDepthPreserved": True,
         "tradeOnlyDoesNotReprice": True,
         "incrementalDirtyPairTracking": True,
+        "financeInventoryStreaming": True,
+        "financeInventoryDirtyTracking": True,
+        "financeInventoryLiveStatus": finance_snapshot["liveStatus"],
         "readyRouteCount": recovered["readyRouteCount"],
         "polymarketBestBid": poly.best_bid,
         "polymarketBestAsk": poly.best_ask,

@@ -49,7 +49,7 @@ from prediction_market_streams import (
 LOGGER = logging.getLogger("prediction_markets_routes")
 
 TERMINAL_API_CONTRACT_VERSION = (
-    "prediction-terminal-api-v2-route-accounted"
+    "prediction-terminal-api-v2.1-persistent-catalog"
 )
 
 # These values describe economic outcomes for executable routes. Every other
@@ -901,6 +901,7 @@ def _terminal_state_signature(state: Dict[str, Any]) -> str:
         "pairStatusCounts": coverage.get("pairStatusCounts"),
         "routeStatusCounts": coverage.get("routeStatusCounts"),
         "rows": state.get("rows") or [],
+        "financeInventory": state.get("financeInventory") or [],
     }
     encoded = json.dumps(
         signature_payload,
@@ -926,6 +927,8 @@ def _terminal_incremental_signature(
     state: Dict[str, Any],
     row_signatures: Mapping[str, str],
     pair_order: Sequence[str],
+    inventory_signatures: Mapping[str, str],
+    inventory_order: Sequence[str],
 ) -> str:
     """Compose a full-terminal signature from cached per-pair hashes.
 
@@ -950,7 +953,11 @@ def _terminal_incremental_signature(
         ).encode("utf-8")
     ).hexdigest()
     encoded = "|".join(
-        [status_hash, *(row_signatures.get(pair_id, "") for pair_id in pair_order)]
+        [
+            status_hash,
+            *(row_signatures.get(pair_id, "") for pair_id in pair_order),
+            *(inventory_signatures.get(item_id, "") for item_id in inventory_order),
+        ]
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -960,9 +967,12 @@ async def _build_incremental_terminal_state(
     fee_context: LiveFeePricingContext,
     *,
     dirty_pairs: Sequence[Any],
+    dirty_inventory: Sequence[Any],
     snapshot_by_pair_id: Dict[str, Dict[str, Any]],
     row_by_pair_id: Dict[str, Dict[str, Any]],
     row_signature_by_pair_id: Dict[str, str],
+    inventory_snapshot_by_id: Dict[str, Dict[str, Any]],
+    inventory_signature_by_id: Dict[str, str],
 ) -> Dict[str, Any]:
     """Reprice only changed matched pairs and reuse every unchanged priced row."""
     # Capture the revision BEFORE yielding to the pricing worker. If another
@@ -988,6 +998,17 @@ async def _build_incremental_terminal_state(
         row_by_pair_id[pair_id] = row
         row_signature_by_pair_id[pair_id] = _terminal_row_signature(row)
 
+    dirty_inventory_rows = manager.store.inventory_snapshots(
+        dirty_inventory,
+        refresh_health=False,
+    )
+    for row in dirty_inventory_rows:
+        item_id = str(row.get("id") or "")
+        if not item_id:
+            continue
+        inventory_snapshot_by_id[item_id] = row
+        inventory_signature_by_id[item_id] = _terminal_row_signature(row)
+
     pair_order = [pair.id for pair in manager.manifest.pairs]
     snapshots = [
         snapshot_by_pair_id[pair_id]
@@ -999,6 +1020,12 @@ async def _build_incremental_terminal_state(
         for pair_id in pair_order
         if pair_id in row_by_pair_id
     ]
+    inventory_order = [item.id for item in manager.manifest.inventory]
+    inventory_rows = [
+        inventory_snapshot_by_id[item_id]
+        for item_id in inventory_order
+        if item_id in inventory_snapshot_by_id
+    ]
     status = manager.store.status(snapshots=snapshots)
     coverage = _coverage_audit(manager, fee_context, snapshots, rows)
     return {
@@ -1008,6 +1035,7 @@ async def _build_incremental_terminal_state(
         "feePricing": fee_context.summary(),
         "coverage": coverage,
         "rows": rows,
+        "financeInventory": inventory_rows,
     }
 
 
@@ -1017,6 +1045,7 @@ async def _build_shared_terminal_state(
 ) -> Dict[str, Any]:
     """Capture books once, then price that immutable capture off the event loop."""
     snapshots = manager.store.pair_snapshots()
+    inventory_rows = manager.store.inventory_snapshots(refresh_health=False)
     source_revision = manager.store.pricing_revision
     status = manager.store.status(snapshots=snapshots)
     rows = await asyncio.to_thread(
@@ -1032,6 +1061,7 @@ async def _build_shared_terminal_state(
         "feePricing": fee_context.summary(),
         "coverage": coverage,
         "rows": rows,
+        "financeInventory": inventory_rows,
     }
 
 
@@ -1343,9 +1373,12 @@ async def _terminal_publisher_loop(
     last_priced_store_revision = -1
 
     pair_order = [pair.id for pair in manager.manifest.pairs]
+    inventory_order = [item.id for item in manager.manifest.inventory]
     snapshot_by_pair_id: Dict[str, Dict[str, Any]] = {}
     row_by_pair_id: Dict[str, Dict[str, Any]] = {}
     row_signature_by_pair_id: Dict[str, str] = {}
+    inventory_snapshot_by_id: Dict[str, Dict[str, Any]] = {}
+    inventory_signature_by_id: Dict[str, str] = {}
 
     while True:
         try:
@@ -1361,14 +1394,18 @@ async def _terminal_publisher_loop(
                 # complete pair/coverage audit. This is the safety net that
                 # guarantees incremental updates cannot silently drift.
                 dirty_pairs = manager.store.consume_dirty_pairs(force_all=True)
+                dirty_inventory = manager.store.consume_dirty_inventory(force_all=True)
                 manager.store.refresh_health()
                 state = await _build_incremental_terminal_state(
                     manager,
                     fee_context,
                     dirty_pairs=dirty_pairs,
+                    dirty_inventory=dirty_inventory,
                     snapshot_by_pair_id=snapshot_by_pair_id,
                     row_by_pair_id=row_by_pair_id,
                     row_signature_by_pair_id=row_signature_by_pair_id,
+                    inventory_snapshot_by_id=inventory_snapshot_by_id,
+                    inventory_signature_by_id=inventory_signature_by_id,
                 )
                 last_full_refresh_time = loop.time()
             else:
@@ -1382,10 +1419,12 @@ async def _terminal_publisher_loop(
                 # Coalesce every exchange tick that arrived during this cadence
                 # window, then price only the pairs touched by those instruments.
                 dirty_pairs = manager.store.consume_dirty_pairs()
-                if not dirty_pairs:
-                    # Defensive fallback: revision changed but no pair was marked.
-                    # Force a full audit rather than risk serving stale economics.
+                dirty_inventory = manager.store.consume_dirty_inventory()
+                if not dirty_pairs and not dirty_inventory:
+                    # Defensive fallback: revision changed but no tracked live row
+                    # was marked. Force a full audit rather than risk stale state.
                     dirty_pairs = manager.store.consume_dirty_pairs(force_all=True)
+                    dirty_inventory = manager.store.consume_dirty_inventory(force_all=True)
                     manager.store.refresh_health()
                     last_full_refresh_time = loop.time()
 
@@ -1393,15 +1432,20 @@ async def _terminal_publisher_loop(
                     manager,
                     fee_context,
                     dirty_pairs=dirty_pairs,
+                    dirty_inventory=dirty_inventory,
                     snapshot_by_pair_id=snapshot_by_pair_id,
                     row_by_pair_id=row_by_pair_id,
                     row_signature_by_pair_id=row_signature_by_pair_id,
+                    inventory_snapshot_by_id=inventory_snapshot_by_id,
+                    inventory_signature_by_id=inventory_signature_by_id,
                 )
 
             signature = _terminal_incremental_signature(
                 state,
                 row_signature_by_pair_id,
                 pair_order,
+                inventory_signature_by_id,
+                inventory_order,
             )
             publish = bool(
                 _terminal_state is None
@@ -1509,6 +1553,21 @@ def _stream_assignment_audit(
         else:
             unassigned_pair_identities.append(identity)
 
+    assigned_inventory_ids: Set[str] = set()
+    unassigned_inventory_ids: List[str] = []
+    for item in manager.manifest.inventory:
+        if item.venue == "polymarket":
+            assigned = bool(
+                item.polymarket_yes_asset_id in assigned_polymarket_assets
+                and item.polymarket_no_asset_id in assigned_polymarket_assets
+            )
+        else:
+            assigned = bool(item.kalshi_market_ticker in assigned_kalshi_tickers)
+        if assigned:
+            assigned_inventory_ids.add(item.id)
+        else:
+            unassigned_inventory_ids.append(item.id)
+
     return {
         "assignedPolymarketAssets": len(assigned_polymarket_assets),
         "expectedPolymarketAssets": len(manager.manifest.polymarket_asset_ids),
@@ -1517,6 +1576,9 @@ def _stream_assignment_audit(
         "assignedPairs": len(assigned_pair_identities),
         "unassignedPairs": len(unassigned_pair_identities),
         "unassignedPairSamples": [list(value) for value in unassigned_pair_identities[:10]],
+        "assignedFinanceInventory": len(assigned_inventory_ids),
+        "unassignedFinanceInventory": len(unassigned_inventory_ids),
+        "unassignedFinanceInventorySamples": unassigned_inventory_ids[:10],
     }
 
 
@@ -1696,6 +1758,8 @@ async def build_terminal_readiness_payload() -> Dict[str, Any]:
         warnings.append("stream_errors_present")
     if assignment and assignment.get("unassignedPairs"):
         reasons.append("manifest_pairs_not_fully_assigned_to_streams")
+    if assignment and assignment.get("unassignedFinanceInventory"):
+        reasons.append("finance_inventory_not_fully_assigned_to_streams")
     if coverage:
         if not coverage.get("manifestEqualsSnapshots"):
             reasons.append("manifest_stream_snapshot_mismatch")
@@ -1774,6 +1838,9 @@ async def build_terminal_readiness_payload() -> Dict[str, Any]:
             "initialTrafficReady": _initial_traffic_ready,
             "allManifestPairsAssigned": bool(
                 assignment and assignment.get("unassignedPairs") == 0
+            ),
+            "allFinanceInventoryAssigned": bool(
+                assignment and assignment.get("unassignedFinanceInventory") == 0
             ),
             "manifestEqualsStreamSnapshots": bool(
                 coverage and coverage.get("manifestEqualsSnapshots")
@@ -2196,6 +2263,54 @@ def _terminal_payload_cache_key(
     )
 
 
+def _build_finance_overview_payload(
+    *,
+    market_group: str,
+    sort_by: str = "edge",
+    limit: int = 2000,
+) -> Dict[str, Any]:
+    state = get_terminal_state()
+    target_group = "companies" if market_group == "companies" else "macro"
+    all_rows = [
+        dict(row)
+        for row in (state.get("financeInventory") or [])
+        if str(row.get("market_group") or "") == target_group
+    ]
+    if sort_by == "event":
+        all_rows.sort(key=lambda row: (str(row.get("event_title") or ""), str(row.get("contract_title") or "")))
+    else:
+        all_rows.sort(key=lambda row: (-float(row.get("rank_score") or 0.0), str(row.get("event_title") or "")))
+    returned = all_rows[:limit]
+    matched_rows = [
+        dict(row)
+        for row in (state.get("rows") or [])
+        if str(row.get("marketGroup") or "") == target_group
+    ]
+    venue_counts = Counter(str(row.get("venue") or "unknown") for row in all_rows)
+    family_counts = Counter(str(row.get("family") or "unknown") for row in all_rows)
+    live_counts = Counter(str(row.get("liveStatus") or "unknown") for row in all_rows)
+    return {
+        **terminal_version_payload(),
+        "generatedAt": state.get("generatedAt") or utc_now_iso(),
+        "pricingMode": "live-single-venue-books",
+        "feeAware": False,
+        "transport": "server-websocket-ready",
+        "marketGroup": market_group,
+        "sourceMarketGroup": target_group,
+        "rowType": "single_venue_market",
+        "streamStatus": state.get("streamStatus") or {},
+        "catalogRows": len(all_rows),
+        "returnedRows": len(returned),
+        "matchedRows": len(matched_rows),
+        "totalFinanceRows": len(all_rows) + len(matched_rows),
+        "byVenue": dict(sorted(venue_counts.items())),
+        "byFamily": dict(sorted(family_counts.items())),
+        "byLiveStatus": dict(sorted(live_counts.items())),
+        "markets": returned,
+        "matchedOpportunities": matched_rows,
+    }
+
+
 def build_terminal_overview_payload(
     *,
     market_group: str = "all",
@@ -2210,6 +2325,12 @@ def build_terminal_overview_payload(
     limit: int = 2000,
 ) -> Dict[str, Any]:
     """Filter one process-wide priced snapshot; never reprice per request/user."""
+    if market_group in {"companies", "economics"}:
+        return _build_finance_overview_payload(
+            market_group=market_group,
+            sort_by=sort_by,
+            limit=limit,
+        )
     state = get_terminal_state()
     revision = _terminal_state_revision
     cache_key = _terminal_payload_cache_key(
@@ -2282,6 +2403,11 @@ def build_terminal_overview_payload(
         "matchedRowsBeforeLimit": len(rows),
         "returnedRows": len(returned),
         "opportunities": returned,
+        # Keep the browser on one persistent `market_group=all` WebSocket.
+        # The bounded single-venue finance inventory rides alongside matched
+        # opportunities so category/subcategory changes are client-side only
+        # and never tear down/reopen the live venue connection.
+        "financeInventory": list(state.get("financeInventory") or []),
     }
     if len(_terminal_payload_cache) >= TERMINAL_PAYLOAD_CACHE_MAX_ENTRIES:
         _terminal_payload_cache.clear()
@@ -2298,8 +2424,13 @@ def build_terminal_websocket_message(**params: Any) -> str:
         return cached[1]
 
     payload = build_terminal_overview_payload(**params)
+    message_type = (
+        "finance_overview"
+        if str(params.get("market_group") or "") in {"companies", "economics"}
+        else "terminal_overview"
+    )
     message = json.dumps(
-        {"type": "terminal_overview", "payload": payload},
+        {"type": message_type, "payload": payload},
         separators=(",", ":"),
         default=str,
     )
@@ -2407,7 +2538,7 @@ async def terminal_websocket(websocket: WebSocket):
     await websocket.accept(subprotocol=selected_subprotocol)
 
     market_group = websocket.query_params.get("market_group", "all")
-    if market_group not in {"all", "sports", "macro", "weather"}:
+    if market_group not in {"all", "sports", "macro", "weather", "companies", "economics"}:
         market_group = "all"
 
     opportunity_type = websocket.query_params.get("opportunity_type", "all")

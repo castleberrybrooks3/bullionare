@@ -1113,6 +1113,191 @@ span:not(:last-child)::after {
     );
 }
 
+
+/* ============================================================
+   SINGLE-VENUE FINANCE MARKETS
+   ============================================================ */
+
+.pm-event-card-single {
+  border-color: rgba(141, 166, 207, 0.18);
+}
+
+.pm-event-card-single-polymarket {
+  border-color: rgba(77, 124, 255, 0.24);
+}
+
+.pm-event-card-single-kalshi {
+  border-color: rgba(27, 191, 138, 0.22);
+}
+
+.pm-single-market-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 9px;
+}
+
+.pm-single-venue-badge,
+.pm-single-book-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--pm-border);
+  border-radius: 999px;
+  font-size: 0.55rem;
+  font-weight: 950;
+  letter-spacing: 0.065em;
+  text-transform: uppercase;
+}
+
+.pm-single-venue-polymarket {
+  border-color: rgba(77, 124, 255, 0.32);
+  color: #8eaaff;
+  background: var(--pm-poly-soft);
+}
+
+.pm-single-venue-kalshi {
+  border-color: rgba(27, 191, 138, 0.32);
+  color: #74e9c0;
+  background: var(--pm-kalshi-soft);
+}
+
+.pm-single-book-status {
+  color: var(--pm-muted);
+  background: rgba(126, 151, 190, 0.06);
+}
+
+.pm-single-book-status.ready {
+  border-color: rgba(53, 223, 158, 0.24);
+  color: #73e9bd;
+  background: rgba(53, 223, 158, 0.08);
+}
+
+.pm-single-book-status.partial {
+  border-color: rgba(243, 182, 63, 0.24);
+  color: #f2c66f;
+  background: rgba(243, 182, 63, 0.08);
+}
+
+.pm-single-book-status.unavailable {
+  border-color: rgba(255, 110, 127, 0.2);
+  color: #df8d98;
+  background: rgba(255, 110, 127, 0.06);
+}
+
+.pm-single-price-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.pm-single-side {
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid rgba(141, 166, 207, 0.11);
+  border-radius: 11px;
+  background: rgba(4, 12, 23, 0.4);
+}
+
+.pm-single-side-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.pm-single-side-heading span {
+  color: #dce7f7;
+  font-size: 0.68rem;
+  font-weight: 950;
+  letter-spacing: 0.055em;
+}
+
+.pm-single-side-heading small {
+  color: #607693;
+  font-size: 0.5rem;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+}
+
+.pm-single-side > strong {
+  display: block;
+  margin-top: 5px;
+  color: #f3f7fd;
+  font-size: 1.55rem;
+  letter-spacing: -0.045em;
+}
+
+.pm-single-side-book {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 30px;
+  margin: 2px 0 8px;
+  color: #627794;
+  font-size: 0.57rem;
+}
+
+.pm-single-side-book b {
+  color: #9db0ca;
+  font-weight: 850;
+}
+
+.pm-single-live-note {
+  min-height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(141, 166, 207, 0.1);
+  border-radius: 9px;
+  color: #657b99;
+  background: rgba(17, 31, 51, 0.45);
+  font-size: 0.56rem;
+  font-weight: 850;
+}
+
+.pm-single-market-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 9px;
+  overflow: hidden;
+  border: 1px solid rgba(141, 166, 207, 0.1);
+  border-radius: 10px;
+  background: rgba(4, 12, 23, 0.34);
+}
+
+.pm-single-market-metrics > div {
+  min-width: 0;
+  padding: 8px 9px;
+}
+
+.pm-single-market-metrics > div + div {
+  border-left: 1px solid rgba(141, 166, 207, 0.09);
+}
+
+.pm-single-market-metrics span,
+.pm-single-market-metrics strong {
+  display: block;
+}
+
+.pm-single-market-metrics span {
+  color: #607693;
+  font-size: 0.46rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.pm-single-market-metrics strong {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #dce7f7;
+  font-size: 0.65rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ============================================================
    RESPONSIVE
    ============================================================ */
@@ -1213,7 +1398,8 @@ span:not(:last-child)::after {
   }
 
   .pm-venue-options,
-  .pm-net-buy-grid {
+  .pm-net-buy-grid,
+  .pm-single-price-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1235,6 +1421,15 @@ span:not(:last-child)::after {
   }
 
   .pm-net-metrics > div + div {
+    border-left: 0;
+    border-top: 1px solid rgba(141, 166, 207, 0.09);
+  }
+
+  .pm-single-market-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .pm-single-market-metrics > div + div {
     border-left: 0;
     border-top: 1px solid rgba(141, 166, 207, 0.09);
   }

@@ -13,14 +13,14 @@ import unicodedata
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timezone
 from decimal import (
     Decimal,
     InvalidOperation,
     ROUND_CEILING,
 )
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 from urllib.parse import quote
 
 import requests
@@ -36,7 +36,7 @@ from prediction_market_settlement import (
 )
 
 
-ENGINE_VERSION = "native-exact-v20.6-compact-live-runtime"
+ENGINE_VERSION = "native-exact-v20.18-soccer-only-cap"
 
 POLYMARKET_CLOB_URL = "https://clob.polymarket.com"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -326,7 +326,15 @@ MACRO_CANDIDATE_PATTERN = (
     r"fed|fomc|federal reserve|federal funds|interest rate|"
     r"cpi|consumer price|inflation|unemployment|payroll|jobs report|"
     r"gdp|gross domestic product|pce|personal consumption|recession|"
-    r"retail sales|jobless claims|consumer sentiment"
+    r"retail sales|jobless claims|consumer sentiment|consumer confidence|"
+    r"jolts|job openings|average hourly earnings|wage growth|adp employment|"
+    r"pmi|purchasing managers|ism manufacturing|ism services|"
+    r"durable goods|industrial production|housing starts|building permits|"
+    r"existing home sales|new home sales|trade balance|trade deficit|"
+    r"personal income|personal spending|labor force participation|"
+    r"treasury yield|10[- ]year yield|2[- ]year yield|"
+    r"s&p 500|s & p 500|sp500|spx|nasdaq 100|nasdaq-100|ndx|"
+    r"dow jones|djia|wti|crude oil|gold price"
 )
 
 WEATHER_CANDIDATE_PATTERN = (
@@ -404,6 +412,199 @@ SPORTS_EVENT_TERMS = (
     "golf",
     "racing",
 )
+
+# Bullionaire is finance-first. Keep globally relevant soccer fully covered,
+# while deterministically trimming low-priority leagues from the long-lived
+# live stream manifest. The matcher still validates every candidate first;
+# this only limits which already-verified soccer pairs occupy runtime slots.
+SOCCER_RUNTIME_PRUNE_FRACTION = min(
+    0.80,
+    max(0.0, float(os.getenv("PREDICTION_SOCCER_RUNTIME_PRUNE_FRACTION", "0.40"))),
+)
+
+SOCCER_LEAGUE_HINT_PATTERN = re.compile(
+    r"(?:soccer|football|premier[_ ]?league|la[_ ]?liga|bundesliga|serie[_ ]?a|"
+    r"ligue[_ ]?1|mls|liga[_ ]?mx|uefa|fifa|champions[_ ]?league|europa|"
+    r"conference[_ ]?league|world[_ ]?cup|copa|libertadores|sudamericana|"
+    r"eredivisie|primeira[_ ]?liga|super[_ ]?lig|championship|league[_ ]?[12]|"
+    r"k[_ ]?league|j[_ ]?league|a[_ ]?league|brasileir|primera|liga|division|"
+    r"allsvenskan|eliteserien|ekstraklasa|superliga|pro[_ ]?league)",
+    re.I,
+)
+
+SOCCER_ALWAYS_KEEP_PATTERN = re.compile(
+    r"(?:english[_ ]?premier|premier[_ ]?league|\bepl\b|la[_ ]?liga|bundesliga|"
+    r"serie[_ ]?a|ligue[_ ]?1|eredivisie|primeira[_ ]?liga|\bmls\b|"
+    r"major[_ ]?league[_ ]?soccer|liga[_ ]?mx|championship|uefa|"
+    r"champions[_ ]?league|europa[_ ]?league|conference[_ ]?league|fifa|"
+    r"world[_ ]?cup|copa[_ ]?america|club[_ ]?world[_ ]?cup|nations[_ ]?league|"
+    r"libertadores|sudamericana|\bnwsl\b|women.?s[_ ]?super[_ ]?league)",
+    re.I,
+)
+
+# v20.18 safety rail: the soccer runtime cap must NEVER consume or remove a
+# verified pair from another sport.  Some venues use the word "football" for
+# soccer while American/Australian/Canadian football use it literally, and
+# competitions in cricket/basketball can also contain generic phrases such as
+# "Premier League" or "Champions League".  Explicit non-soccer sport metadata
+# therefore wins before the broad soccer vocabulary is considered.
+NON_SOCCER_SPORT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("american-football", re.compile(
+        r"(?:\bnfl\b|nflgame|\bncaaf\b|\bcfb\b|college[_ ]?football|"
+        r"american[_ ]?football|national[_ ]?football[_ ]?league|"
+        r"professional[_ ]?football|pro[_ ]?football|\bcfl\b|canadian[_ ]?football|"
+        r"\bxfl\b|\busfl\b|arena[_ ]?football)", re.I)),
+    ("australian-football", re.compile(
+        r"(?:australian[_ ]?(?:rules[_ ]?)?football|aussie[_ ]?rules|\bafl\b)", re.I)),
+    ("rugby", re.compile(r"(?:\brugby\b|rugby[_ ]?(?:union|league)|\bnrl\b)", re.I)),
+    ("basketball", re.compile(
+        r"(?:\bbasketball\b|\bnba\b|nbagame|\bwnba\b|\bncaab\b|\bncaawb\b|"
+        r"college[_ ]?basketball)", re.I)),
+    ("baseball", re.compile(r"(?:\bbaseball\b|\bmlb\b|mlbgame|major[_ ]?league[_ ]?baseball)", re.I)),
+    ("hockey", re.compile(r"(?:\bhockey\b|\bnhl\b|nhlgame)", re.I)),
+    ("cricket", re.compile(r"(?:\bcricket\b|\bt20\b|indian[_ ]?premier[_ ]?league|\bipl\b)", re.I)),
+    ("tennis", re.compile(r"(?:\btennis\b|\batp\b|\bwta\b)", re.I)),
+    ("combat", re.compile(r"(?:\bufc\b|\bmma\b|\bboxing\b)", re.I)),
+    ("golf", re.compile(r"(?:\bgolf\b|\bpga\b|\blpga\b)", re.I)),
+    ("racing", re.compile(r"(?:formula[_ ]?1|\bf1\b|nascar|motogp|\bracing\b)", re.I)),
+    ("esports", re.compile(r"(?:\besports?\b|counter[_ ]?strike|league[_ ]?of[_ ]?legends|valorant|dota)", re.I)),
+)
+
+# v20.17 intentionally disables pre-hydration soccer pruning. Bullionaire first
+# builds the proven full sports catalog, exact matches, and settlement gates.
+# Only AFTER that proven matching path completes do we rank verified soccer
+# pairs and keep at most 500 for long-lived runtime/streams. This preserves
+# match coverage while preventing random small leagues from occupying runtime.
+SOCCER_EARLY_PRUNE_ENABLED = False
+SOCCER_RUNTIME_PAIR_LIMIT = max(
+    1, int(os.getenv("PREDICTION_SOCCER_RUNTIME_PAIR_LIMIT", "500"))
+)
+
+# Ordered display/runtime preference. Earlier patterns are more important.
+# Anything not matched here is still eligible, but it ranks behind these
+# globally watched leagues/tournaments when the 500-pair cap is applied.
+SOCCER_RUNTIME_PRIORITY_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
+    ("champions-league", re.compile(r"champions[_ ]?league|\bucl\b|uefa[_ ]?champions", re.I)),
+    ("premier-league", re.compile(r"premier[_ ]?league|english[_ ]?premier|\bepl\b|eplgame", re.I)),
+    ("la-liga", re.compile(r"la[_ ]?liga|laliga", re.I)),
+    ("serie-a", re.compile(r"serie[_ ]?a|serieagame", re.I)),
+    ("bundesliga", re.compile(r"bundesliga", re.I)),
+    ("ligue-1", re.compile(r"ligue[_ ]?1|ligue1", re.I)),
+    ("mls", re.compile(r"major[_ ]?league[_ ]?soccer|\bmls\b|mlsgame", re.I)),
+    ("liga-mx", re.compile(r"liga[_ ]?mx|ligamx", re.I)),
+    ("europa-league", re.compile(r"europa[_ ]?league|\buel\b|uefa[_ ]?europa", re.I)),
+    ("conference-league", re.compile(r"conference[_ ]?league", re.I)),
+    ("world-cup", re.compile(r"world[_ ]?cup|fifa", re.I)),
+    ("copa-america", re.compile(r"copa[_ ]?america", re.I)),
+    ("libertadores", re.compile(r"libertadores", re.I)),
+    ("sudamericana", re.compile(r"sudamericana", re.I)),
+    ("eredivisie", re.compile(r"eredivisie", re.I)),
+    ("liga-portugal", re.compile(r"primeira[_ ]?liga|liga[_ ]?portugal", re.I)),
+    ("saudi-pro", re.compile(r"saudi[_ ]?pro", re.I)),
+    ("efl-championship", re.compile(r"efl[_ ]?championship|championship", re.I)),
+    ("nwsl", re.compile(r"\bnwsl\b", re.I)),
+    ("scottish-premiership", re.compile(r"scottish[_ ]?premiership", re.I)),
+    ("turkish-super-lig", re.compile(r"turkish[_ ]?super[_ ]?lig|super[_ ]?lig", re.I)),
+    ("brasileirao-a", re.compile(r"brasileir(?:ao)?[_ ]?serie[_ ]?a|brasileirao", re.I)),
+    ("argentina-primera", re.compile(r"argentina[_ ]?primera|primera[_ ]?division", re.I)),
+    ("j-league", re.compile(r"j[_ ]?league|j1", re.I)),
+)
+
+# Replace removed low-priority soccer with a bounded finance-first inventory.
+# These are unmatched single-venue markets; strict cross-venue arbitrage pairs
+# remain separately settlement-gated exactly as before.
+FINANCE_INVENTORY_LIMIT = max(0, int(os.getenv("PREDICTION_FINANCE_INVENTORY_LIMIT", "420")))
+FINANCE_COMPANY_LIMIT = max(0, int(os.getenv("PREDICTION_FINANCE_COMPANY_LIMIT", "240")))
+FINANCE_ECONOMICS_LIMIT = max(0, int(os.getenv("PREDICTION_FINANCE_ECONOMICS_LIMIT", "180")))
+FINANCE_COMPANY_PER_ISSUER_LIMIT = max(1, int(os.getenv("PREDICTION_FINANCE_COMPANY_PER_ISSUER_LIMIT", "4")))
+FINANCE_ECONOMICS_PER_METRIC_LIMIT = max(1, int(os.getenv("PREDICTION_FINANCE_ECONOMICS_PER_METRIC_LIMIT", "16")))
+# Keep either venue from disappearing from a finance tab simply because one
+# venue reports much larger raw volume/liquidity values. This is a floor, not a
+# 50/50 target: after the reserved share is satisfied, ranking is global again.
+FINANCE_MIN_VENUE_SHARE = min(
+    0.45,
+    max(0.0, float(os.getenv("PREDICTION_FINANCE_MIN_VENUE_SHARE", "0.25"))),
+)
+
+SOCCER_CANONICAL_STOP_WORDS = {
+    "fc", "sc", "afc", "cf", "fk", "ac", "club", "de", "the", "football", "soccer"
+}
+
+def _soccer_title_key(value: Any) -> str:
+    text = exact_text(value)
+    parts = re.split(r"\b(?:vs|versus|v|at)\b", text)
+    normalized_parts = []
+    for part in parts:
+        words = [w for w in part.split() if w not in SOCCER_CANONICAL_STOP_WORDS]
+        if words:
+            normalized_parts.append(" ".join(words))
+    if len(normalized_parts) >= 2:
+        return "|".join(sorted(normalized_parts[:2]))
+    return " ".join(w for w in text.split() if w not in SOCCER_CANONICAL_STOP_WORDS)
+
+def _stable_fraction(value: str) -> float:
+    digest = hashlib.sha256(str(value or "").encode("utf-8")).digest()
+    integer = int.from_bytes(digest[:8], "big", signed=False)
+    return integer / float(2**64)
+
+def _sports_index_text(row: Mapping[str, Any]) -> str:
+    return exact_text(" ".join(str(row.get(key) or "") for key in (
+        "category", "event_type", "title", "external_event_id", "external_series_id"
+    )))
+
+def _is_soccer_index_row(row: Mapping[str, Any]) -> bool:
+    text = _sports_index_text(row)
+    return bool(
+        SOCCER_LEAGUE_HINT_PATTERN.search(text)
+        or re.search(r"(?:^|\b)(?:epl|mls|ucl|uel|efl|j1|j2|k1|k2)(?:\b|game)", text)
+    )
+
+def _is_priority_soccer_index_row(row: Mapping[str, Any]) -> bool:
+    text = _sports_index_text(row)
+    if SOCCER_ALWAYS_KEEP_PATTERN.search(text):
+        return True
+    return bool(re.search(
+        r"(?:\bepl\b|eplgame|laliga|bundesliga|serieagame|ligue1|mlsgame|ligamx|"
+        r"ucl|championsleague|uel|europaleague|worldcup|copaamerica|libertadores|sudamericana)",
+        text,
+    ))
+
+def prune_sports_event_index_rows(rows: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not SOCCER_EARLY_PRUNE_ENABLED or SOCCER_RUNTIME_PRUNE_FRACTION <= 0:
+        return list(rows), {
+            "sportsCandidateEventsBeforeEarlyPrune": len(rows),
+            "sportsCandidateEventsAfterEarlyPrune": len(rows),
+            "soccerCandidateEventsBeforeEarlyPrune": sum(_is_soccer_index_row(r) for r in rows),
+            "soccerCandidateEventsEarlyDropped": 0,
+            "soccerEarlyPruneEnabled": False,
+        }
+    kept: List[Dict[str, Any]] = []
+    soccer_total = 0
+    soccer_priority = 0
+    dropped = 0
+    for row in rows:
+        if not _is_soccer_index_row(row):
+            kept.append(row)
+            continue
+        soccer_total += 1
+        if _is_priority_soccer_index_row(row):
+            soccer_priority += 1
+            kept.append(row)
+            continue
+        key = _soccer_title_key(row.get("title")) or _sports_index_text(row)
+        if _stable_fraction(key) < SOCCER_RUNTIME_PRUNE_FRACTION:
+            dropped += 1
+            continue
+        kept.append(row)
+    return kept, {
+        "sportsCandidateEventsBeforeEarlyPrune": len(rows),
+        "sportsCandidateEventsAfterEarlyPrune": len(kept),
+        "soccerCandidateEventsBeforeEarlyPrune": soccer_total,
+        "soccerPriorityEventsAlwaysKept": soccer_priority,
+        "soccerCandidateEventsEarlyDropped": dropped,
+        "soccerEarlyPruneEnabled": True,
+        "soccerEarlyPruneFractionTarget": SOCCER_RUNTIME_PRUNE_FRACTION,
+    }
 
 
 # Generic non-sports/non-macro categories use a stricter isolated matcher and
@@ -484,8 +685,11 @@ GENERIC_GROUP_PATTERNS: Sequence[Tuple[str, str]] = (
     (
         "companies",
         r"\b(company|companies|ceo|chief executive|ipo|initial public offering|"
-        r"merger|acquisition|acquire|buyout|bankruptcy|revenue|earnings|"
-        r"market cap|valuation|shareholder)\b",
+        r"merger|acquisition|acquire|buyout|bankruptcy|revenue|earnings|eps|"
+        r"earnings per share|sales|bookings|payers|subscribers|users|deliveries|"
+        r"comparable store sales|same store sales|trading volume|gross margin|"
+        r"operating margin|free cash flow|market cap|valuation|shareholder|"
+        r"stock price|share price|shares close|shares trade)\b",
     ),
     (
         "entertainment",
@@ -728,6 +932,29 @@ class GenericCandidateMatch:
 
 
 @dataclass(frozen=True)
+class FinanceInventoryMarket:
+    id: str
+    venue: str
+    market_group: str
+    family: str
+    event_title: str
+    contract_title: str
+    database_market_id: int
+    external_market_id: str
+    external_event_id: str
+    yes_key: str
+    no_key: str
+    close_time: Optional[str]
+    resolution_time: Optional[str]
+    liquidity: Optional[float]
+    volume_24h: Optional[float]
+    total_volume: Optional[float]
+    open_interest: Optional[float]
+    rank_score: float
+    subject_key: str
+
+
+@dataclass(frozen=True)
 class SyntheticMacroCandidate:
     event_identity: str
     contract_identity: str
@@ -751,6 +978,7 @@ class ExactPairContext:
     macro_synthetic_candidates: List[SyntheticMacroCandidate]
     weather_pairs: List[Tuple[ExactContract, ExactContract]]
     generic_pairs: List[Tuple[ExactContract, ExactContract]]
+    finance_inventory: List[FinanceInventoryMarket]
     diagnostics: Dict[str, Any]
     snapshot_marker: Optional[str]
 
@@ -793,6 +1021,9 @@ class LiveFeePricingContext:
             "generatedAt": self.generated_at,
             "snapshotMarker": self.snapshot_marker,
             "exactPairs": len(self.pair_lookup),
+            "financeInventoryRows": len(self.exact_context.finance_inventory),
+            "financeInventoryCompanies": sum(x.market_group == "companies" for x in self.exact_context.finance_inventory),
+            "financeInventoryEconomics": sum(x.market_group == "macro" for x in self.exact_context.finance_inventory),
             "runtimeCompacted": bool(
                 diagnostics.get("runtimeCompacted")
             ),
@@ -2046,8 +2277,33 @@ METRIC_PATTERNS: Sequence[Tuple[str, str]] = (
     (r"\brecession\b", "recession"),
     (r"\binflation\b", "inflation"),
     (r"\bretail sales\b", "retail-sales"),
+    (r"\binitial (?:jobless |unemployment )?claims\b", "initial-claims"),
+    (r"\bcontinuing (?:jobless |unemployment )?claims\b", "continuing-claims"),
     (r"\bjobless claims\b", "jobless-claims"),
-    (r"\bconsumer sentiment\b", "consumer-sentiment"),
+    (r"\b(?:university of michigan |michigan )?consumer sentiment\b", "consumer-sentiment"),
+    (r"\bconsumer confidence\b", "consumer-confidence"),
+    (r"\bjolts\b|\bjob openings(?: and labor turnover survey)?\b", "jolts-job-openings"),
+    (r"\baverage hourly earnings\b|\bwage growth\b", "average-hourly-earnings"),
+    (r"\badp(?: national)? employment\b|\badp jobs\b", "adp-employment"),
+    (r"\bism manufacturing(?: pmi)?\b|\bmanufacturing pmi\b", "manufacturing-pmi"),
+    (r"\bism (?:services|service)(?: pmi)?\b|\bservices pmi\b", "services-pmi"),
+    (r"\bdurable goods(?: orders)?\b", "durable-goods"),
+    (r"\bindustrial production\b", "industrial-production"),
+    (r"\bhousing starts\b", "housing-starts"),
+    (r"\bbuilding permits\b", "building-permits"),
+    (r"\bexisting home sales\b", "existing-home-sales"),
+    (r"\bnew home sales\b", "new-home-sales"),
+    (r"\btrade (?:balance|deficit)\b", "trade-balance"),
+    (r"\bpersonal income\b", "personal-income"),
+    (r"\bpersonal spending\b|\bpersonal consumption spending\b", "personal-spending"),
+    (r"\blabor force participation(?: rate)?\b", "labor-force-participation"),
+    (r"\b10[- ]year (?:us )?treasury(?: yield)?\b|\b10y treasury\b", "treasury-10y"),
+    (r"\b2[- ]year (?:us )?treasury(?: yield)?\b|\b2y treasury\b", "treasury-2y"),
+    (r"\b(?:s&p 500|s & p 500|sp500|spx)\b", "sp500-level"),
+    (r"\b(?:nasdaq 100|nasdaq-100|ndx)\b", "nasdaq100-level"),
+    (r"\b(?:dow jones|dow 30|djia)\b", "dow-level"),
+    (r"\b(?:wti|west texas intermediate|crude oil)\b", "wti-price"),
+    (r"\bgold(?: price)?\b", "gold-price"),
 )
 
 GEOGRAPHY_PATTERNS: Sequence[Tuple[str, str]] = (
@@ -2080,6 +2336,27 @@ KALSHI_US_MACRO_PREFIXES = (
     "KXRETAIL",
     "KXJOBLESS",
     "KXSENTIMENT",
+    "KXCONFIDENCE",
+    "KXJOLTS",
+    "KXAHE",
+    "KXADP",
+    "KXPMI",
+    "KXISM",
+    "KXDURABLE",
+    "KXINDPRO",
+    "KXHOUSING",
+    "KXPERMITS",
+    "KXHOMESALES",
+    "KXTRADE",
+    "KXPERSONALINCOME",
+    "KXPERSONALSPENDING",
+    "KXLABORFORCE",
+    "KXTREASURY",
+    "KXSP500",
+    "KXNASDAQ",
+    "KXDOW",
+    "KXWTI",
+    "KXGOLD",
 )
 
 IMPLICIT_US_MACRO_METRICS = {
@@ -2097,6 +2374,31 @@ IMPLICIT_US_MACRO_METRICS = {
     "retail-sales",
     "jobless-claims",
     "consumer-sentiment",
+    "consumer-confidence",
+    "initial-claims",
+    "continuing-claims",
+    "jolts-job-openings",
+    "average-hourly-earnings",
+    "adp-employment",
+    "manufacturing-pmi",
+    "services-pmi",
+    "durable-goods",
+    "industrial-production",
+    "housing-starts",
+    "building-permits",
+    "existing-home-sales",
+    "new-home-sales",
+    "trade-balance",
+    "personal-income",
+    "personal-spending",
+    "labor-force-participation",
+    "treasury-10y",
+    "treasury-2y",
+    "sp500-level",
+    "nasdaq100-level",
+    "dow-level",
+    "wti-price",
+    "gold-price",
 }
 
 SCHEDULED_MONTH_MACRO_METRICS = {
@@ -2110,6 +2412,24 @@ SCHEDULED_MONTH_MACRO_METRICS = {
     "retail-sales",
     "jobless-claims",
     "consumer-sentiment",
+    "consumer-confidence",
+    "initial-claims",
+    "continuing-claims",
+    "jolts-job-openings",
+    "average-hourly-earnings",
+    "adp-employment",
+    "manufacturing-pmi",
+    "services-pmi",
+    "durable-goods",
+    "industrial-production",
+    "housing-starts",
+    "building-permits",
+    "existing-home-sales",
+    "new-home-sales",
+    "trade-balance",
+    "personal-income",
+    "personal-spending",
+    "labor-force-participation",
 }
 
 
@@ -2201,6 +2521,14 @@ def macro_measure(
         return "target-range"
     if metric == "fed-cut-count":
         return "target-range-cuts"
+    if metric in {"initial-claims", "continuing-claims"}:
+        return metric
+    if metric in {"treasury-10y", "treasury-2y"}:
+        return "yield"
+    if metric in {"sp500-level", "nasdaq100-level", "dow-level"}:
+        return "index-level"
+    if metric in {"wti-price", "gold-price"}:
+        return "spot-price"
     return "headline"
 
 def macro_geography(market: Market, text: str, metric: str) -> Optional[str]:
@@ -2443,9 +2771,50 @@ def macro_scope(
         "payrolls",
         "retail-sales",
         "jobless-claims",
+        "initial-claims",
+        "continuing-claims",
         "consumer-sentiment",
+        "consumer-confidence",
+        "jolts-job-openings",
+        "average-hourly-earnings",
+        "adp-employment",
+        "manufacturing-pmi",
+        "services-pmi",
+        "durable-goods",
+        "industrial-production",
+        "housing-starts",
+        "building-permits",
+        "existing-home-sales",
+        "new-home-sales",
+        "trade-balance",
+        "personal-income",
+        "personal-spending",
+        "labor-force-participation",
     }:
         return "release"
+
+    if metric in {
+        "treasury-10y",
+        "treasury-2y",
+        "sp500-level",
+        "nasdaq100-level",
+        "dow-level",
+        "wti-price",
+        "gold-price",
+    }:
+        if re.search(
+            r"\b(?:hit|reach|reaches|reached|touch|touches|trade above|trade below)\b"
+            r"[^.?!]{0,80}\b(?:before|by|during|in)\b",
+            text,
+        ):
+            return "level-reached-by-deadline"
+        if re.search(
+            r"\b(?:at|by)\s+(?:the\s+)?end\b|"
+            r"\b(?:close|closing|settle|settles|finish|finishes)\b",
+            text,
+        ):
+            return "level-at-period-end"
+        return None
 
     if metric == "recession":
         return "occurrence"
@@ -5140,9 +5509,6 @@ def generic_group_for_row(row: Dict[str, Any]) -> Optional[str]:
     ):
         return "politics"
 
-    # Corporate-event semantics should outrank subject-matter words such as
-    # OpenAI/Anthropic. Keep political/geopolitical acquisitions (for example
-    # territory questions) out of Companies by respecting explicit venue labels.
     category_is_political = (
         contains_exact_phrase(category_text, "politics")
         or contains_exact_phrase(category_text, "election")
@@ -5154,19 +5520,50 @@ def generic_group_for_row(row: Dict[str, Any]) -> Optional[str]:
         r"best actress|album of the year|record of the year|person of the year|poty)\b",
         title_text,
     )
-    company_semantics = re.search(
+
+    # High-confidence finance/company language can classify directly. The words
+    # acquire/acquisition/buyout are intentionally NOT sufficient by themselves:
+    # prediction venues also use them for geopolitical questions such as a
+    # country acquiring territory. Structured M&A matching still runs before
+    # this fallback, so genuine same-proposition company acquisitions are kept.
+    company_finance_semantics = re.search(
         r"\b(ipo|initial public offering|go public|public offering|"
-        r"earnings call|quarterly earnings|market cap|valuation|bankruptcy|"
-        r"merger|merge|acquisition|acquire|buyout)\b",
+        r"earnings call|quarterly earnings|earnings per share|eps|revenue|sales|"
+        r"bookings|payers|subscribers|users|deliveries|comparable store sales|"
+        r"same store sales|trading volume|gross margin|operating margin|"
+        r"free cash flow|stock price|share price|market cap|valuation|bankruptcy|"
+        r"merger|merge|shareholder|ceo|chief executive)\b",
         title_text,
     )
-    if company_semantics and not award_semantics and not category_is_political:
+    acquisition_semantics = re.search(
+        r"\b(acquisition|acquire|acquires|acquired|buyout|takeover)\b",
+        title_text,
+    )
+    acquisition_corporate_context = re.search(
+        r"\b(company|companies|corporation|corp|inc|incorporated|ltd|limited|plc|"
+        r"holdings|startup|business|firm|shares|stock|shareholder|board|ceo|"
+        r"chief executive|merger|takeover|deal|bid)\b",
+        title_text,
+    ) or any(
+        contains_exact_phrase(category_text, value)
+        for value in ("companies", "company", "business")
+    )
+
+    if (
+        (company_finance_semantics or (acquisition_semantics and acquisition_corporate_context))
+        and not award_semantics
+        and not category_is_political
+    ):
         return "companies"
 
     # Strong title semantics take priority over venue category labels. This is
     # especially important for election markets that one venue labels simply
     # as Politics.
     for group, pattern in GENERIC_GROUP_PATTERNS:
+        # Do not let the broad Companies regex re-introduce an acquisition-only
+        # false positive that the stricter finance check above deliberately rejected.
+        if group == "companies" and acquisition_semantics and not acquisition_corporate_context:
+            continue
         if re.search(pattern, title_text):
             return group
 
@@ -5423,7 +5820,7 @@ def company_normalize_entity(value: Any) -> Optional[str]:
     )
     text = re.sub(r"[^a-z0-9]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip()
-    if not text or text in {"ipo", "merger", "acquisition", "earnings", "call"}:
+    if not text or text in {"ipo", "merger", "acquisition", "earnings", "call", "none"}:
         return None
     return text.replace(" ", "_")
 
@@ -5448,7 +5845,31 @@ def company_candidate_deadline(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def company_custom_strike_value(row: Mapping[str, Any], *keys: str) -> Optional[str]:
+    """Return one explicit venue-provided grouped-market identity value."""
+    semantics = as_json(row.get("contract_semantics"), dict, {})
+    sources = [
+        as_json(row.get("custom_strike"), dict, {}),
+        as_json(semantics.get("custom_strike"), dict, {}),
+    ]
+    wanted = {exact_text(key): key for key in keys}
+    for source in sources:
+        for raw_key, value in source.items():
+            if exact_text(raw_key) not in wanted or value in (None, ""):
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+    return None
+
+
 def company_ipo_subject(row: Dict[str, Any]) -> Optional[str]:
+    explicit_company = company_custom_strike_value(row, "Company")
+    if explicit_company:
+        subject = company_normalize_entity(explicit_company)
+        if subject:
+            return subject
+
     values = [str(row.get("event_title") or ""), str(row.get("market_title") or "")]
     patterns = (
         r"\bwhen will\s+(.+?)\s+officially announce an? ipo\b",
@@ -5474,6 +5895,7 @@ def company_acquisition_parties(row: Dict[str, Any]) -> Optional[Tuple[str, str]
         r"\bwill\s+(.+?)\s+acquire\s+(.+?)(?:\s+in\s+20\d{2}|\s+before\b|\s+by\b|$)",
         r"\b(.+?)\s+acquire\s+(.+?)(?:\s+before\b|\s+by\b|$)",
         r"\b(.+?)\s+announce acquisition of\s+(.+?)(?:\s+before\b|\s+by\b|$)",
+        r"\b(?:will\s+)?(.+?)(?:'s|s')\s+takeover of\s+(.+?)(?:\s+succeed\b|\s+before\b|\s+by\b|$)",
     )
     for value in (market_text, event_text):
         for pattern in patterns:
@@ -5573,6 +5995,228 @@ def company_earnings_event_date(row: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def company_reporting_period(row: Dict[str, Any]) -> Optional[str]:
+    """Return a conservative fiscal/reporting period for company KPI markets."""
+    pieces = [
+        row.get("event_title"),
+        row.get("market_title"),
+        row.get("rules_primary"),
+        row.get("rules_secondary"),
+    ]
+    text = exact_text(" ".join(str(piece or "") for piece in pieces))
+
+    quarter = re.search(
+        r"\b(?:fiscal\s+)?q([1-4])\s*(20\d{2})\b|"
+        r"\b(20\d{2})\s*(?:fiscal\s+)?q([1-4])\b|"
+        r"\b(?:first|1st) quarter(?: of)?\s+(20\d{2})\b|"
+        r"\b(?:second|2nd) quarter(?: of)?\s+(20\d{2})\b|"
+        r"\b(?:third|3rd) quarter(?: of)?\s+(20\d{2})\b|"
+        r"\b(?:fourth|4th) quarter(?: of)?\s+(20\d{2})\b",
+        text,
+    )
+    if quarter:
+        if quarter.group(1) and quarter.group(2):
+            return f"{quarter.group(2)}-q{quarter.group(1)}"
+        if quarter.group(3) and quarter.group(4):
+            return f"{quarter.group(3)}-q{quarter.group(4)}"
+        for index, qnum in ((5, 1), (6, 2), (7, 3), (8, 4)):
+            if quarter.group(index):
+                return f"{quarter.group(index)}-q{qnum}"
+
+    # Earnings-call dates are a safe fallback when neither venue states a
+    # fiscal quarter. We deliberately do not infer a quarter from arbitrary
+    # calendar dates because fiscal calendars differ by issuer.
+    event_date = company_earnings_event_date(row)
+    if event_date:
+        return f"date-{event_date}"
+    return None
+
+
+def company_financial_metric(row: Dict[str, Any]) -> Optional[str]:
+    text = exact_text(
+        f"{row.get('event_title') or ''} {row.get('market_title') or ''} "
+        f"{row.get('rules_primary') or ''} {row.get('rules_secondary') or ''}"
+    )
+    patterns = (
+        (r"\b(?:gaap\s+|adjusted\s+)?(?:earnings per share|eps)\b", "eps"),
+        (r"\b(?:total\s+)?revenue\b|\bnet sales\b|\btotal sales\b", "revenue"),
+        (r"\badjusted ebitda\b", "adjusted-ebitda"),
+        (r"\bebitda\b", "ebitda"),
+        (r"\bfree cash flow\b|\bfcf\b", "free-cash-flow"),
+        (r"\bgross margin\b", "gross-margin"),
+        (r"\boperating margin\b", "operating-margin"),
+        (r"\bcomparable store sales\b|\bsame[- ]store sales\b|\bcomps?\b", "comparable-store-sales"),
+        (r"\bgross bookings\b", "gross-bookings"),
+        (r"\bbookings\b", "bookings"),
+        (r"\btotal payers?\b|\bpayers?\b", "total-payers"),
+        (r"\bmonthly active users?\b|\bmaus?\b", "monthly-active-users"),
+        (r"\bdaily active users?\b|\bdaus?\b", "daily-active-users"),
+        (r"\bsubscribers?\b|\bpaid memberships?\b", "subscribers"),
+        (r"\bdeliveries\b|\bvehicles delivered\b", "deliveries"),
+        (r"\btrading volume\b", "trading-volume"),
+        (r"\bmarket cap(?:italization)?\b", "market-cap"),
+    )
+    for pattern, metric in patterns:
+        if re.search(pattern, text):
+            return metric
+
+    # "Beat earnings" contracts generally mean EPS, but only use that alias
+    # when the rules explicitly tie resolution to EPS / earnings per share.
+    if re.search(r"\bbeat(?:s)?\s+(?:quarterly\s+)?earnings\b", text) and re.search(
+        r"\b(?:earnings per share|eps)\b", text
+    ):
+        return "eps"
+    return None
+
+
+def company_issuer(row: Dict[str, Any]) -> Optional[str]:
+    values = [
+        str(row.get("event_title") or ""),
+        str(row.get("market_title") or ""),
+    ]
+    patterns = (
+        r"^\s*will\s+(.+?)\s+\([A-Za-z.]{1,8}\)\s+(?:beat|report|have|reach|hit|close|trade)",
+        r"^\s*(.+?)\s+\([A-Za-z.]{1,8}\)\s+(?:earnings|revenue|eps|q[1-4]|stock|shares|market cap)",
+        r"^\s*will\s+(.+?)\s+(?:beat(?:s)?\s+(?:quarterly\s+)?earnings|report|have|reach|hit)",
+        r"^\s*(.+?)\s+(?:q[1-4]\s+20\d{2}\s+)?(?:revenue|eps|earnings|bookings|payers|subscribers|deliveries|trading volume|comparable store sales)",
+    )
+    for value in values:
+        cleaned = re.sub(r"[?]+$", "", value.strip())
+        for pattern in patterns:
+            match = re.search(pattern, cleaned, flags=re.I)
+            if match:
+                issuer = company_normalize_entity(
+                    re.sub(r"\([A-Za-z.]{1,8}\)", " ", match.group(1))
+                )
+                if issuer:
+                    return issuer
+
+    # Existing earnings-call extraction remains useful for word markets.
+    return company_earnings_issuer(row)
+
+
+def _company_scaled_number(raw: str, unit: Optional[str], percent: bool) -> Optional[str]:
+    try:
+        value = Decimal(str(raw).replace(",", ""))
+    except (InvalidOperation, ValueError):
+        return None
+    if percent:
+        return f"{decimal_text(value)}pct"
+    normalized_unit = exact_text(unit or "")
+    multiplier = Decimal("1")
+    if normalized_unit in {"k", "thousand"}:
+        multiplier = Decimal("1000")
+    elif normalized_unit in {"m", "million"}:
+        multiplier = Decimal("1000000")
+    elif normalized_unit in {"b", "billion"}:
+        multiplier = Decimal("1000000000")
+    elif normalized_unit in {"t", "trillion"}:
+        multiplier = Decimal("1000000000000")
+    return decimal_text(value * multiplier)
+
+
+def company_threshold_identity(row: Dict[str, Any], metric: str) -> Optional[str]:
+    """Normalize a company KPI threshold without treating dates as values."""
+    pieces = [
+        row.get("market_title"),
+        row.get("event_title"),
+        row.get("rules_primary"),
+        row.get("rules_secondary"),
+    ]
+    text = " ".join(str(piece or "") for piece in pieces)
+    normalized = exact_text(text)
+
+    comparator_patterns = (
+        (r"(?:at least|no less than|greater than or equal to|>=)", "gte"),
+        (r"(?:at most|no more than|less than or equal to|<=)", "lte"),
+        (r"(?:above|over|greater than|more than|exceed(?:s|ed)?|>)", "gt"),
+        (r"(?:below|under|less than|<)", "lt"),
+    )
+
+    # Prefer a number located near an explicit comparator. This keeps years,
+    # earnings dates and quarter numbers out of the financial threshold.
+    for comp_pattern, comparator in comparator_patterns:
+        match = re.search(
+            rf"{comp_pattern}[^0-9$%-]{{0,24}}\$?\s*"
+            r"(-?\d[\d,]*(?:\.\d+)?)\s*"
+            r"(trillion|billion|million|thousand|[kmbt]\b)?\s*(%)?",
+            normalized,
+            flags=re.I,
+        )
+        if match:
+            value = _company_scaled_number(match.group(1), match.group(2), bool(match.group(3)))
+            if value is not None:
+                return f"{comparator}|{value}"
+
+    # Venue structured strikes are a safe fallback only when the market itself
+    # exposes a comparator. Use the same units on both venues; if they disagree
+    # the signatures simply will not match.
+    floor = decimal_text(row.get("floor_strike"))
+    cap = decimal_text(row.get("cap_strike"))
+    functional = exact_code(row.get("functional_strike"))
+    if functional in {"greater", "greater_than", "above", "more_than", "gt"} and floor:
+        return f"gt|{floor}"
+    if functional in {"greater_equal", "greater_than_or_equal", "at_least", "gte"} and floor:
+        return f"gte|{floor}"
+    if functional in {"less", "less_than", "below", "under", "lt"} and cap:
+        return f"lt|{cap}"
+    if functional in {"less_equal", "less_than_or_equal", "at_most", "lte"} and cap:
+        return f"lte|{cap}"
+
+    # "Beat earnings" is semantically greater-than the consensus benchmark.
+    # Only accept a benchmark number that is explicitly tied to EPS/revenue.
+    if "beat" in normalized and metric in {"eps", "revenue"}:
+        metric_phrase = r"(?:earnings per share|eps)" if metric == "eps" else r"(?:revenue|net sales|total sales)"
+        match = re.search(
+            rf"{metric_phrase}[^.?!]{{0,60}}?\$?\s*(-?\d[\d,]*(?:\.\d+)?)\s*"
+            r"(trillion|billion|million|thousand|[kmbt]\b)?\s*(%)?",
+            normalized,
+            flags=re.I,
+        )
+        if match:
+            value = _company_scaled_number(match.group(1), match.group(2), bool(match.group(3)))
+            if value is not None:
+                return f"gt|{value}"
+    return None
+
+
+def company_equity_price_signature(row: Dict[str, Any]) -> Optional[str]:
+    text = exact_text(
+        f"{row.get('event_title') or ''} {row.get('market_title') or ''} "
+        f"{row.get('rules_primary') or ''}"
+    )
+    if not re.search(r"\b(stock price|share price|shares|stock|close|closing)\b", text):
+        return None
+    issuer = company_issuer(row)
+    deadline = company_candidate_deadline(row)
+    if not issuer or not deadline:
+        return None
+    threshold = company_threshold_identity(row, "share-price")
+    if not threshold:
+        return None
+    if re.search(r"\b(hit|reach|touch|trade above|rise above)\b", text):
+        observation = "path-high"
+    elif re.search(r"\b(fall below|drop below|trade below|dip below)\b", text):
+        observation = "path-low"
+    elif re.search(r"\b(close|closing|finish|ending|at the end)\b", text):
+        observation = "point-close"
+    else:
+        return None
+    return f"equity_price|{issuer}|{observation}|{threshold}|{deadline}"
+
+
+def company_kpi_signature(row: Dict[str, Any]) -> Optional[str]:
+    metric = company_financial_metric(row)
+    if not metric:
+        return None
+    issuer = company_issuer(row)
+    period = company_reporting_period(row)
+    threshold = company_threshold_identity(row, metric)
+    if not issuer or not period or not threshold:
+        return None
+    return f"company_kpi|{issuer}|{metric}|{threshold}|{period}"
+
+
 def company_structured_signature(row: Dict[str, Any]) -> Optional[str]:
     category_text = exact_text(f"{row.get('category') or ''} {row.get('market_type') or ''}")
     title_text = exact_text(f"{row.get('event_title') or ''} {row.get('market_title') or ''}")
@@ -5585,6 +6229,14 @@ def company_structured_signature(row: Dict[str, Any]) -> Optional[str]:
         or contains_exact_phrase(category_text, "geopolitics")
     ):
         return None
+
+    equity_signature = company_equity_price_signature(row)
+    if equity_signature:
+        return equity_signature
+
+    kpi_signature = company_kpi_signature(row)
+    if kpi_signature:
+        return kpi_signature
 
     if re.search(r"\bipo\b|\binitial public offering\b", title_text):
         subject = company_ipo_subject(row)
@@ -5815,6 +6467,18 @@ def prepare_generic_candidate(
         "event_title": str(row.get("event_title") or ""),
         "market_title": str(row.get("market_title") or ""),
         "external_market_id": str(row.get("external_market_id") or ""),
+        "external_event_id": str(row.get("external_event_id") or ""),
+        "custom_strike": as_json(row.get("custom_strike"), dict, {}),
+        "contract_semantics": as_json(row.get("contract_semantics"), dict, {}),
+        "outcomes": as_json(row.get("outcomes"), list, []),
+        "close_time": row.get("close_time"),
+        "resolution_time": row.get("resolution_time"),
+        "liquidity": as_float(row.get("liquidity")),
+        "volume_24h": as_float(row.get("volume_24h")),
+        "total_volume": as_float(row.get("total_volume")),
+        "open_interest": as_float(row.get("open_interest")),
+        "company_subject": company_issuer(row) if group == "companies" else None,
+        "company_metric": company_financial_metric(row) if group == "companies" else None,
         "crypto_signature": crypto_signature,
         "company_signature": company_signature,
         "misc_signature": misc_signature,
@@ -5841,7 +6505,7 @@ def generic_pair_score(left: Dict[str, Any], right: Dict[str, Any]) -> Tuple[flo
 def build_generic_candidate_matches(
     cur: Any,
     selected_groups: Set[str],
-) -> Tuple[List[GenericCandidateMatch], Dict[str, Any]]:
+) -> Tuple[List[GenericCandidateMatch], Dict[str, Any], List[Dict[str, Any]]]:
     reference_time = datetime.now(timezone.utc)
     compact_sql = """
         SELECT
@@ -5849,6 +6513,7 @@ def build_generic_candidate_matches(
             venue,
             event_catalog_id AS event_id,
             external_market_id,
+            external_event_id,
             event_title,
             market_title,
             category,
@@ -5862,10 +6527,15 @@ def build_generic_candidate_matches(
             floor_strike,
             cap_strike,
             functional_strike,
+            custom_strike,
             rules_primary,
             rules_secondary,
             contract_semantics,
-            outcomes
+            outcomes,
+            liquidity,
+            volume_24h,
+            total_volume,
+            open_interest
         FROM public.prediction_market_catalog
         WHERE venue = %s
           AND status = 'active'
@@ -5876,6 +6546,7 @@ def build_generic_candidate_matches(
     eligible_by_group: Dict[str, Counter] = defaultdict(Counter)
 
     kalshi_rows: List[Dict[str, Any]] = []
+    finance_company_rows: List[Dict[str, Any]] = []
     cur.execute(compact_sql, ("kalshi",))
     while True:
         batch = cur.fetchmany(5000)
@@ -5887,6 +6558,8 @@ def build_generic_candidate_matches(
             )
             if prepared is not None:
                 kalshi_rows.append(prepared)
+                if prepared.get("group") == "companies":
+                    finance_company_rows.append(prepared)
                 eligible_by_venue["kalshi"] += 1
                 eligible_by_group[prepared["group"]]["kalshi"] += 1
             elif reason not in {"outsideSelectedGroups", "specializedFamily"}:
@@ -5933,6 +6606,8 @@ def build_generic_candidate_matches(
                     rejection_counts[f"polymarket:{reason}"] += 1
                 continue
 
+            if poly.get("group") == "companies":
+                finance_company_rows.append(poly)
             eligible_by_venue["polymarket"] += 1
             eligible_by_group[poly["group"]]["polymarket"] += 1
 
@@ -6188,7 +6863,7 @@ def build_generic_candidate_matches(
         "genericMiscStructuredMatches": len(misc_structured_matches),
         "genericMiscStructuredSamples": misc_structured_samples[:30],
         "genericMatcherMode": "diagnostics_only_until_reviewed",
-    }
+    }, finance_company_rows
 
 
 def build_generic_contract_pairs(
@@ -6285,6 +6960,7 @@ def load_catalog(
     Dict[str, int],
     List[GenericCandidateMatch],
     Dict[str, Any],
+    List[Dict[str, Any]],
 ]:
     if not (
             include_sports
@@ -6319,7 +6995,8 @@ def load_catalog(
             for venue in ("polymarket", "kalshi"):
                 cur.execute(
                     """
-                    SELECT id, venue, title, category, event_type
+                    SELECT id, venue, title, category, event_type,
+                           external_event_id, external_series_id
                     FROM public.prediction_market_events
                     WHERE venue = %s
                       AND status = 'active'
@@ -6331,6 +7008,8 @@ def load_catalog(
             sports_event_ids: Set[int] = set()
             macro_event_ids: Set[int] = set()
             weather_event_ids: Set[int] = set()
+            sports_index_rows: List[Dict[str, Any]] = []
+            sports_early_prune_diagnostics: Dict[str, Any] = {}
 
             for row in event_index_rows:
                 classification = exact_text(
@@ -6344,6 +7023,7 @@ def load_catalog(
                         for term in SPORTS_EVENT_TERMS
                 ):
                     sports_event_ids.add(row["id"])
+                    sports_index_rows.append(row)
 
                 if include_macro and re.search(
                         MACRO_CANDIDATE_PATTERN,
@@ -6361,6 +7041,12 @@ def load_catalog(
                         row["id"]
                     )
 
+            if include_sports and sports_index_rows:
+                kept_sports_rows, sports_early_prune_diagnostics = prune_sports_event_index_rows(
+                    sports_index_rows
+                )
+                sports_event_ids = {int(row["id"]) for row in kept_sports_rows}
+
             def integer_batches(
                     values: Sequence[int],
             ) -> Iterable[Sequence[int]]:
@@ -6372,7 +7058,8 @@ def load_catalog(
                     yield values[index:index + CATALOG_QUERY_BATCH_SIZE]
 
             generic_candidate_matches: List[GenericCandidateMatch] = []
-            generic_diagnostics: Dict[str, Any] = {}
+            generic_diagnostics: Dict[str, Any] = dict(sports_early_prune_diagnostics)
+            finance_company_candidate_rows: List[Dict[str, Any]] = []
             if include_generic:
                 selected_generic_groups = set(
                     generic_groups or GENERIC_MARKET_GROUPS
@@ -6391,11 +7078,13 @@ def load_catalog(
                 )
                 (
                     generic_candidate_matches,
-                    generic_diagnostics,
+                    generic_match_diagnostics,
+                    finance_company_candidate_rows,
                 ) = build_generic_candidate_matches(
                     cur,
                     selected_generic_groups,
                 )
+                generic_diagnostics.update(generic_match_diagnostics)
 
             generic_event_ids = {
                 event_id
@@ -6765,6 +7454,7 @@ def load_catalog(
         venue_counts,
         generic_candidate_matches,
         generic_diagnostics,
+        finance_company_candidate_rows,
     )
 def prediction_snapshot_marker() -> Optional[str]:
     try:
@@ -9272,6 +9962,654 @@ def settlement_gate_pairs(
         "settlementGateMode": "matched-live-pricing-strict-arbitrage",
     }
 
+def _sports_pair_priority_text(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> str:
+    values: List[str] = []
+    for contract in pair:
+        market = markets.get(contract.market_id)
+        if market is None:
+            continue
+        event = market.event
+        values.extend([
+            str(event.category or ""),
+            str(event.event_type or ""),
+            str(event.title or ""),
+            str(market.category or ""),
+            str(market.market_title or ""),
+            str(market.external_series_id or ""),
+        ])
+        for entity, _role in event.entities:
+            values.extend([
+                str(entity.league or ""),
+                str(entity.name or ""),
+                str(entity.abbreviation or ""),
+            ])
+    return exact_text(" ".join(values)).replace(" ", "_")
+
+
+def _sports_pair_explicit_non_soccer_label(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> Optional[str]:
+    text = _sports_pair_priority_text(pair, markets)
+    for label, pattern in NON_SOCCER_SPORT_PATTERNS:
+        if pattern.search(text):
+            return label
+    return None
+
+
+def _sports_pair_is_soccer(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> bool:
+    # Critical invariant: explicit non-soccer metadata wins. This prevents NFL,
+    # NCAAF, AFL, NBA, MLB, NHL, cricket, etc. from ever being counted against
+    # the soccer-only 500-pair cap merely because their text contains generic
+    # words such as "football", "league", "division", or "championship".
+    if _sports_pair_explicit_non_soccer_label(pair, markets) is not None:
+        return False
+    text = _sports_pair_priority_text(pair, markets)
+    return bool(SOCCER_LEAGUE_HINT_PATTERN.search(text))
+
+
+def _sports_pair_is_priority_soccer(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> bool:
+    text = _sports_pair_priority_text(pair, markets)
+    return bool(SOCCER_ALWAYS_KEEP_PATTERN.search(text))
+
+
+def _sports_pair_stable_key(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> str:
+    parts: List[str] = []
+    for contract in pair:
+        market = markets.get(contract.market_id)
+        parts.append(str(market.external_market_id if market else contract.market_id))
+    parts.extend([pair[0].event_identity, pair[0].contract_identity])
+    return "|".join(parts)
+
+
+def _soccer_pair_runtime_rank(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> Tuple[Any, ...]:
+    """Rank already-verified soccer pairs for the 500-pair runtime cap."""
+    text = _sports_pair_priority_text(pair, markets)
+
+    league_rank = len(SOCCER_RUNTIME_PRIORITY_PATTERNS) + 100
+    league_label = "other"
+    for index, (label, pattern) in enumerate(SOCCER_RUNTIME_PRIORITY_PATTERNS):
+        if pattern.search(text):
+            league_rank = index
+            league_label = label
+            break
+
+    # Prefer games that are live/near-term, then markets with more activity.
+    # Use both venue markets but only as ranking metadata; matching/settlement
+    # has already completed before this function is called.
+    starts: List[datetime] = []
+    activity: List[float] = []
+    for contract in pair:
+        market = markets.get(contract.market_id)
+        if market is None:
+            continue
+        start = market.event_start_time or market.event.start_time
+        if isinstance(start, datetime):
+            starts.append(start if start.tzinfo else start.replace(tzinfo=timezone.utc))
+        activity.extend([
+            float(market.volume_24h or 0.0),
+            float(market.total_volume or 0.0),
+            float(market.open_interest or 0.0),
+            float(market.liquidity or 0.0),
+        ])
+
+    now = datetime.now(timezone.utc)
+    if starts:
+        nearest = min(starts, key=lambda value: abs((value - now).total_seconds()))
+        delta = (nearest - now).total_seconds()
+        # live/recent first, then upcoming, then distant/old.
+        if -4 * 3600 <= delta <= 4 * 3600:
+            timing_bucket = 0
+        elif delta > 0:
+            timing_bucket = 1
+        else:
+            timing_bucket = 2
+        timing_distance = abs(delta)
+    else:
+        timing_bucket = 3
+        timing_distance = float("inf")
+
+    activity_score = max(activity) if activity else 0.0
+    stable_key = _sports_pair_stable_key(pair, markets)
+    return (
+        league_rank,
+        timing_bucket,
+        timing_distance,
+        -activity_score,
+        stable_key,
+        league_label,
+    )
+
+
+def prioritize_sports_runtime_pairs(
+    pairs: Sequence[Tuple[ExactContract, ExactContract]],
+    markets: Dict[int, Market],
+) -> Tuple[List[Tuple[ExactContract, ExactContract]], Dict[str, Any]]:
+    """
+    Keep the proven full sports matching + settlement flow, then cap soccer.
+
+    Non-soccer pairs are never removed here. Verified soccer pairs are ranked
+    by major/popular league first, then timing/activity, and only the best 500
+    remain in the runtime context that feeds streams/frontend.
+    """
+    pairs = list(pairs)
+    soccer_pairs = [pair for pair in pairs if _sports_pair_is_soccer(pair, markets)]
+    non_soccer_pairs = [pair for pair in pairs if not _sports_pair_is_soccer(pair, markets)]
+
+    protected_non_soccer: Counter = Counter()
+    for pair in non_soccer_pairs:
+        label = _sports_pair_explicit_non_soccer_label(pair, markets)
+        if label:
+            protected_non_soccer[label] += 1
+
+    ranked_soccer = sorted(
+        soccer_pairs,
+        key=lambda pair: _soccer_pair_runtime_rank(pair, markets)[:-1],
+    )
+    kept_soccer = ranked_soccer[:SOCCER_RUNTIME_PAIR_LIMIT]
+    dropped_soccer = ranked_soccer[SOCCER_RUNTIME_PAIR_LIMIT:]
+
+    # Preserve original relative order of non-soccer pairs and retained soccer
+    # pairs so unrelated sports do not churn between refreshes.
+    kept_soccer_keys = {
+        _sports_pair_stable_key(pair, markets)
+        for pair in kept_soccer
+    }
+    kept = [
+        pair for pair in pairs
+        if (
+            not _sports_pair_is_soccer(pair, markets)
+            or _sports_pair_stable_key(pair, markets) in kept_soccer_keys
+        )
+    ]
+
+    kept_leagues: Counter = Counter()
+    dropped_leagues: Counter = Counter()
+    dropped_samples: List[Dict[str, Any]] = []
+    for pair in kept_soccer:
+        rank = _soccer_pair_runtime_rank(pair, markets)
+        kept_leagues[str(rank[-1])] += 1
+    for pair in dropped_soccer:
+        rank = _soccer_pair_runtime_rank(pair, markets)
+        dropped_leagues[str(rank[-1])] += 1
+        if len(dropped_samples) < 20:
+            dropped_samples.append({
+                "eventTitle": pair[0].event_title,
+                "leagueBucket": str(rank[-1]),
+                "priorityText": _sports_pair_priority_text(pair, markets)[:220],
+            })
+
+    return kept, {
+        "sportsPairsBeforeFinancePriorityPrune": len(pairs),
+        "sportsPairsAfterFinancePriorityPrune": len(kept),
+        "soccerPairsBeforePriorityPrune": len(soccer_pairs),
+        "soccerPairsAfterPriorityPrune": len(kept_soccer),
+        "soccerPairsDroppedByHardCap": len(dropped_soccer),
+        "soccerRuntimePairLimit": SOCCER_RUNTIME_PAIR_LIMIT,
+        "soccerBackendHardCapApplied": len(soccer_pairs) > SOCCER_RUNTIME_PAIR_LIMIT,
+        "soccerPriorityPruneMode": "post-match-post-settlement-popular-leagues-first-hard-500",
+        "soccerKeptByLeagueBucket": dict(sorted(kept_leagues.items())),
+        "soccerDroppedByLeagueBucket": dict(sorted(dropped_leagues.items())),
+        "soccerDroppedSamples": dropped_samples,
+        "nonSoccerSportsPairsPreserved": len(non_soccer_pairs),
+        "explicitNonSoccerPairsProtected": dict(sorted(protected_non_soccer.items())),
+        "soccerCapTouchesOnlySoccer": True,
+    }
+
+def _inventory_outcome_keys(outcomes: Any) -> Optional[Tuple[str, str]]:
+    rows = as_json(outcomes, list, [])
+    by_label: Dict[str, str] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        label = exact_text(item.get("label") or "")
+        key = str(item.get("key") or "").strip()
+        if label in {"yes", "no"} and key:
+            by_label[label] = key
+    if set(by_label) != {"yes", "no"}:
+        return None
+    return by_label["yes"], by_label["no"]
+
+
+def _inventory_rank_score(volume_24h: Any, liquidity: Any, total_volume: Any, open_interest: Any, relevance: float = 0.0) -> float:
+    import math
+    values = [
+        (as_float(volume_24h) or 0.0, 4.0),
+        (as_float(liquidity) or 0.0, 2.5),
+        (as_float(total_volume) or 0.0, 1.0),
+        (as_float(open_interest) or 0.0, 1.5),
+    ]
+    return round(float(relevance) + sum(weight * math.log1p(max(0.0, value)) for value, weight in values), 6)
+
+
+def _company_inventory_identity_value(row: Mapping[str, Any], key: str) -> Optional[str]:
+    return company_custom_strike_value(row, key)
+
+
+def _company_inventory_display_identity(
+    row: Mapping[str, Any],
+    family: str,
+) -> Tuple[str, str, str]:
+    """Use venue-provided grouped-market identity for display and issuer caps."""
+    event_title = str(row.get("event_title") or "")
+    contract_title = str(row.get("market_title") or "")
+    subject = str(row.get("company_subject") or "").strip()
+
+    company_choice = _company_inventory_identity_value(row, "Company")
+    acquirer_choice = _company_inventory_identity_value(row, "Acquirer")
+
+    if family == "ipo" and company_choice:
+        normalized = company_normalize_entity(company_choice)
+        if normalized:
+            subject = normalized
+        # Kalshi grouped IPO contracts store the company in custom_strike while
+        # the shared title is only "Who will IPO before 2027?". Keep the exact
+        # proposition wording but replace the missing grouped identity.
+        if re.search(r"^\s*who will\s+ipo\b", contract_title, flags=re.I):
+            contract_title = re.sub(
+                r"^\s*who will\s+",
+                f"Will {company_choice} ",
+                contract_title,
+                count=1,
+                flags=re.I,
+            )
+
+    if family == "m-and-a" and acquirer_choice:
+        normalized = company_normalize_entity(acquirer_choice)
+        if normalized:
+            subject = normalized
+        elif exact_text(acquirer_choice) == "none":
+            # "None" is a legitimate mutually-exclusive Kalshi outcome, not a
+            # company named None. Render it as the actual choice instead of the
+            # grammatically broken venue title "Will None's takeover...".
+            subject = "no_listed_acquirer"
+            match = re.search(
+                r"^\s*Will None's takeover of (.+?) succeed (before|by) (.+?)\?\s*$",
+                contract_title,
+                flags=re.I,
+            )
+            if match:
+                target, preposition, deadline = match.groups()
+                contract_title = (
+                    f"Will no listed acquirer take over {target} "
+                    f"{preposition.lower()} {deadline}?"
+                )
+            else:
+                contract_title = re.sub(
+                    r"\bNone's takeover\b",
+                    "no listed acquirer's takeover",
+                    contract_title,
+                    flags=re.I,
+                )
+
+    if not subject:
+        subject = exact_text(event_title)[:80]
+    return event_title, contract_title, subject
+
+
+def _company_inventory_family(row: Mapping[str, Any]) -> str:
+    signature = str(row.get("company_signature") or "")
+    metric = str(row.get("company_metric") or "")
+    text = exact_text(f"{row.get('event_title') or ''} {row.get('market_title') or ''}")
+    if _company_inventory_identity_value(row, "Company") and re.search(r"\bipo\b", text):
+        return "ipo"
+    if _company_inventory_identity_value(row, "Acquirer") and re.search(
+        r"\b(takeover|acquire|acquisition|buyout)\b", text
+    ):
+        return "m-and-a"
+    if signature.startswith("company_kpi|"):
+        return metric or "company-kpi"
+    if signature.startswith("equity_price|"):
+        return "share-price"
+    if signature.startswith("ipo|"):
+        return "ipo"
+    if signature.startswith("acquisition|") or signature.startswith("combination|"):
+        return "m-and-a"
+    if signature.startswith("earnings_mention|"):
+        return "earnings-call"
+    if "earnings" in text or "eps" in text:
+        return "earnings"
+    return metric or "company-event"
+
+
+def _company_inventory_relevance(family: str) -> float:
+    return {
+        "eps": 14.0, "revenue": 13.0, "earnings": 12.0, "ebitda": 11.0,
+        "adjusted-ebitda": 11.0, "free-cash-flow": 11.0,
+        "gross-margin": 10.0, "operating-margin": 10.0,
+        "gross-bookings": 9.0, "bookings": 9.0, "deliveries": 9.0,
+        "subscribers": 9.0, "monthly-active-users": 9.0, "daily-active-users": 9.0,
+        "total-payers": 8.0, "comparable-store-sales": 8.0,
+        "trading-volume": 8.0, "share-price": 7.0, "market-cap": 7.0,
+        "ipo": 7.0, "m-and-a": 8.0, "earnings-call": 6.0,
+        "company-kpi": 8.0, "company-event": 4.0,
+    }.get(family, 4.0)
+
+
+COMPANY_INVENTORY_KPI_FAMILIES: Set[str] = {
+    "eps", "revenue", "earnings", "ebitda", "adjusted-ebitda",
+    "free-cash-flow", "gross-margin", "operating-margin",
+    "gross-bookings", "bookings", "deliveries", "subscribers",
+    "monthly-active-users", "daily-active-users", "total-payers",
+    "comparable-store-sales", "trading-volume", "company-kpi",
+}
+
+COMPANY_INVENTORY_NONCORPORATE_PATTERN = re.compile(
+    r"\b(university|college|school|harvard|federal sponsored|tariff revenue|"
+    r"stimulus checks?|tax revenue|government revenue|municipal revenue|"
+    r"state revenue|household income|personal income)\b",
+    re.I,
+)
+
+COMPANY_INVENTORY_MENTION_NOISE_PATTERN = re.compile(
+    r"\b(?:what|which)\s+companies?\s+will\b.*\b(?:say|mention|name)\b|"
+    r"\bwill\s+(?:trump|the president|president)\s+(?:say|mention|name)\b",
+    re.I,
+)
+
+COMPANY_INVENTORY_EVENT_CUE_PATTERN = re.compile(
+    r"\b(bankrupt|bankruptcy|merge|merger|acquire|acquisition|buyout|takeover|"
+    r"deal|bid|ceo|chief executive|board|shareholder|layoff|layoffs|resign|"
+    r"steps? down|product launch|launch(?:es|ed|ing)?|go public|ipo)\b",
+    re.I,
+)
+
+
+def _company_inventory_row_allowed(row: Mapping[str, Any], family: str) -> bool:
+    """Keep the Companies inventory corporate, not merely company-word adjacent."""
+    title_text = exact_text(
+        f"{row.get('event_title') or ''} {row.get('market_title') or ''}"
+    )
+    category_text = exact_text(
+        f"{row.get('category') or ''} {row.get('market_type') or ''}"
+    )
+    signature = str(row.get("company_signature") or "")
+
+    # Explicitly political/geopolitical venue categories stay out of the
+    # unmatched Companies inventory regardless of a stray finance keyword.
+    if any(
+        contains_exact_phrase(category_text, value)
+        for value in ("politics", "political", "election", "geopolitics", "geopolitical")
+    ):
+        return False
+
+    # Revenue and other KPI words occur in government, university and household
+    # propositions. Require an actual issuer for KPI-style rows, and reject
+    # obvious non-corporate institutions even when a loose issuer parser finds
+    # a noun phrase. Structured KPI signatures already satisfy this issuer test.
+    if family in COMPANY_INVENTORY_KPI_FAMILIES:
+        issuer = company_issuer(dict(row))
+        if not issuer:
+            return False
+        issuer_text = exact_text(issuer.replace("_", " "))
+        if COMPANY_INVENTORY_NONCORPORATE_PATTERN.search(title_text) or COMPANY_INVENTORY_NONCORPORATE_PATTERN.search(issuer_text):
+            return False
+
+    # Mention/word markets about a politician saying a company name are not
+    # corporate events. Earnings-call word markets are handled separately as
+    # family=earnings-call and therefore do not hit this guard.
+    if family == "company-event" and COMPANY_INVENTORY_MENTION_NOISE_PATTERN.search(title_text):
+        return False
+
+    # "Acquire" is ambiguous outside corporate finance. Require an explicit
+    # business cue for generic/unstructured acquisition rows. Structured M&A
+    # rows are family=m-and-a and bypass this conservative guard.
+    if family == "company-event" and re.search(
+        r"\b(acquire|acquires|acquired|acquisition|buyout|takeover)\b",
+        title_text,
+    ):
+        corporate_cue = re.search(
+            r"\b(company|companies|corporation|corp|inc|incorporated|ltd|limited|plc|"
+            r"holdings|startup|business|firm|shares|stock|shareholder|board|ceo|"
+            r"chief executive|merger|takeover|deal|bid)\b",
+            title_text,
+        )
+        if not corporate_cue:
+            return False
+
+    # High-signal political/territorial language never belongs in generic
+    # company-event rows even if a broad venue label is noisy.
+    if family == "company-event" and re.search(
+        r"\b(trump|president|prime minister|government|administration|congress|senate|"
+        r"house of representatives|territory|sovereignty|annex|annexation|"
+        r"military|ceasefire|border)\b",
+        title_text,
+    ):
+        return False
+
+    # Generic company-event is the noisiest bucket. Keep only rows that describe
+    # a recognizable corporate action; pure name/mention/topic markets are out.
+    if family == "company-event" and not COMPANY_INVENTORY_EVENT_CUE_PATTERN.search(title_text):
+        return False
+
+    return True
+
+
+def _company_family_soft_cap(family: str, limit: int) -> int:
+    """Soft diversity cap used before the final fill pass."""
+    shares = {
+        "ipo": 0.17,
+        "market-cap": 0.17,
+        "company-event": 0.10,
+        "share-price": 0.15,
+        "m-and-a": 0.14,
+        "earnings-call": 0.12,
+    }
+    share = shares.get(family, 0.12)
+    return max(4, int(round(max(1, limit) * share)))
+
+
+def _select_finance_inventory_candidates(
+    candidates: Sequence[FinanceInventoryMarket],
+    limit: int,
+    *,
+    per_subject_limit: int,
+    family_soft_cap: Optional[Any] = None,
+    min_venue_share: float = FINANCE_MIN_VENUE_SHARE,
+) -> List[FinanceInventoryMarket]:
+    """Rank with issuer/metric limits, soft family diversity and a venue floor."""
+    if limit <= 0:
+        return []
+
+    ranked = sorted(
+        candidates,
+        key=lambda x: (-x.rank_score, x.venue, x.event_title, x.contract_title, x.id),
+    )
+    selected: List[FinanceInventoryMarket] = []
+    selected_ids: Set[str] = set()
+    per_subject: Counter = Counter()
+    per_family: Counter = Counter()
+    per_venue: Counter = Counter()
+
+    def can_add(item: FinanceInventoryMarket, *, enforce_family: bool) -> bool:
+        if item.id in selected_ids:
+            return False
+        subject = item.subject_key or item.event_title or item.id
+        if per_subject[subject] >= per_subject_limit:
+            return False
+        if enforce_family and family_soft_cap is not None:
+            if per_family[item.family] >= int(family_soft_cap(item.family, limit)):
+                return False
+        return True
+
+    def add(item: FinanceInventoryMarket) -> None:
+        selected.append(item)
+        selected_ids.add(item.id)
+        per_subject[item.subject_key or item.event_title or item.id] += 1
+        per_family[item.family] += 1
+        per_venue[item.venue] += 1
+
+    # Reserve only a minority share for each venue. After this, all remaining
+    # slots compete globally by rank, so this is not a forced 50/50 allocation.
+    target_per_venue = max(0, int(round(limit * min_venue_share)))
+    venues = [venue for venue in ("kalshi", "polymarket") if any(x.venue == venue for x in ranked)]
+    for venue in venues:
+        available = sum(1 for x in ranked if x.venue == venue)
+        venue_target = min(target_per_venue, available)
+        for item in ranked:
+            if len(selected) >= limit or per_venue[venue] >= venue_target:
+                break
+            if item.venue == venue and can_add(item, enforce_family=True):
+                add(item)
+
+    # Diversity-first global fill.
+    for item in ranked:
+        if len(selected) >= limit:
+            break
+        if can_add(item, enforce_family=True):
+            add(item)
+
+    # Soft caps should not leave useful slots empty. Only after every family had
+    # a fair chance do we permit overflow, while issuer/metric caps remain hard.
+    for item in ranked:
+        if len(selected) >= limit:
+            break
+        if can_add(item, enforce_family=False):
+            add(item)
+
+    return selected
+
+
+def build_company_finance_inventory(
+    prepared_rows: Sequence[Dict[str, Any]],
+    excluded_market_ids: Set[int],
+    limit: int,
+) -> List[FinanceInventoryMarket]:
+    candidates: List[FinanceInventoryMarket] = []
+    for row in prepared_rows:
+        market_id = int(row.get("market_id") or 0)
+        if not market_id or market_id in excluded_market_ids:
+            continue
+        keys = _inventory_outcome_keys(row.get("outcomes"))
+        if row.get("venue") == "polymarket" and not keys:
+            continue
+        yes_key, no_key = keys if keys else ("yes", "no")
+        family = _company_inventory_family(row)
+        if not _company_inventory_row_allowed(row, family):
+            continue
+        event_title, contract_title, subject = _company_inventory_display_identity(row, family)
+        score = _inventory_rank_score(
+            row.get("volume_24h"),
+            row.get("liquidity"),
+            row.get("total_volume"),
+            row.get("open_interest"),
+            _company_inventory_relevance(family),
+        )
+        candidates.append(FinanceInventoryMarket(
+            id=f"finance-companies-{row.get('venue')}-{market_id}", venue=str(row.get("venue") or ""),
+            market_group="companies", family=family, event_title=event_title,
+            contract_title=contract_title, database_market_id=market_id,
+            external_market_id=str(row.get("external_market_id") or ""), external_event_id=str(row.get("external_event_id") or ""),
+            yes_key=str(yes_key), no_key=str(no_key), close_time=iso_value(row.get("close_time")),
+            resolution_time=iso_value(row.get("resolution_time")), liquidity=as_float(row.get("liquidity")),
+            volume_24h=as_float(row.get("volume_24h")), total_volume=as_float(row.get("total_volume")),
+            open_interest=as_float(row.get("open_interest")), rank_score=score, subject_key=subject,
+        ))
+
+    return _select_finance_inventory_candidates(
+        candidates,
+        limit,
+        per_subject_limit=FINANCE_COMPANY_PER_ISSUER_LIMIT,
+        family_soft_cap=_company_family_soft_cap,
+    )
+
+
+def _macro_inventory_relevance(metric: str) -> float:
+    return {
+        "fed-rate": 15.0, "fed-cut-count": 14.0, "cpi": 15.0, "core-cpi": 14.0,
+        "recession": 13.0,
+        "pce": 14.0, "core-pce": 14.0, "payrolls": 14.0, "unemployment": 13.0,
+        "jolts-job-openings": 12.0, "initial-claims": 11.0, "gdp-unspecified": 13.0,
+        "real-gdp": 13.0, "nominal-gdp": 11.0, "retail-sales": 11.0,
+        "manufacturing-pmi": 10.0, "services-pmi": 10.0, "trade-balance": 9.0,
+        "housing-starts": 8.0, "building-permits": 8.0, "existing-home-sales": 8.0,
+        "new-home-sales": 8.0, "labor-force-participation": 8.0, "treasury-10y": 11.0,
+        "sp500-level": 9.0, "nasdaq100-level": 8.0, "dow-level": 8.0,
+        "wti-price": 7.0, "gold-price": 7.0, "inflation": 12.0,
+    }.get(metric, 5.0)
+
+
+def build_economics_finance_inventory(markets: Mapping[int, Market], excluded_market_ids: Set[int], limit: int) -> List[FinanceInventoryMarket]:
+    candidates: List[FinanceInventoryMarket] = []
+    now = datetime.now(timezone.utc)
+    for market in markets.values():
+        if market.id in excluded_market_ids or not market_is_open_for_exact_matching(market, now):
+            continue
+
+        # Inventory classification is intentionally title-scoped. Full venue
+        # rules can mention neighboring releases, source names, or generic words
+        # such as "federal" and previously leaked unrelated contracts (for
+        # example federal-crime markets) into Economics as fed-rate. Exact
+        # cross-venue settlement matching still uses the richer semantic text.
+        title_text = market_title_semantic_text(market)
+        metric = macro_metric(title_text)
+        if not metric:
+            continue
+        keys = yes_no_outcomes(market)
+        if not keys:
+            continue
+        yes_row, no_row = keys
+        score = _inventory_rank_score(market.volume_24h, market.liquidity, market.total_volume, market.open_interest, _macro_inventory_relevance(metric))
+        candidates.append(FinanceInventoryMarket(
+            id=f"finance-macro-{market.venue}-{market.id}", venue=market.venue, market_group="macro", family=metric,
+            event_title=market.event_title or market.event.title, contract_title=market.market_title,
+            database_market_id=market.id, external_market_id=str(market.external_market_id or ""),
+            external_event_id=str(market.external_event_id or market.event.external_event_id or ""),
+            yes_key=str(yes_row.get("key") or ""), no_key=str(no_row.get("key") or ""),
+            close_time=iso_value(market.close_time), resolution_time=iso_value(market.resolution_time),
+            liquidity=market.liquidity, volume_24h=market.volume_24h, total_volume=market.total_volume,
+            open_interest=market.open_interest, rank_score=score, subject_key=metric,
+        ))
+    return _select_finance_inventory_candidates(
+        candidates,
+        limit,
+        per_subject_limit=FINANCE_ECONOMICS_PER_METRIC_LIMIT,
+        family_soft_cap=None,
+    )
+
+
+def build_bounded_finance_inventory(*, markets: Mapping[int, Market], company_rows: Sequence[Dict[str, Any]], exact_pairs: Sequence[Tuple[ExactContract, ExactContract]], include_companies: bool, include_macro: bool) -> Tuple[List[FinanceInventoryMarket], Dict[str, Any]]:
+    exact_market_ids = {c.market_id for pair in exact_pairs for c in pair}
+    companies = build_company_finance_inventory(company_rows, exact_market_ids, FINANCE_COMPANY_LIMIT) if include_companies else []
+    economics = build_economics_finance_inventory(markets, exact_market_ids, FINANCE_ECONOMICS_LIMIT) if include_macro else []
+    combined = [*companies, *economics]
+    if FINANCE_INVENTORY_LIMIT and len(combined) > FINANCE_INVENTORY_LIMIT:
+        combined = sorted(combined, key=lambda x: (-x.rank_score, x.market_group, x.id))[:FINANCE_INVENTORY_LIMIT]
+    company_selected = [x for x in combined if x.market_group == "companies"]
+    economics_selected = [x for x in combined if x.market_group == "macro"]
+    return combined, {
+        "financeInventoryRows": len(combined),
+        "financeInventoryCompanies": len(company_selected),
+        "financeInventoryEconomics": len(economics_selected),
+        "financeInventoryByVenue": dict(sorted(Counter(x.venue for x in combined).items())),
+        "financeInventoryByFamily": dict(sorted(Counter(x.family for x in combined).items())),
+        "financeInventoryCompaniesByVenue": dict(sorted(Counter(x.venue for x in company_selected).items())),
+        "financeInventoryEconomicsByVenue": dict(sorted(Counter(x.venue for x in economics_selected).items())),
+        "financeInventoryCompaniesByFamily": dict(sorted(Counter(x.family for x in company_selected).items())),
+        "financeInventoryEconomicsByFamily": dict(sorted(Counter(x.family for x in economics_selected).items())),
+        "financeInventoryMinVenueShare": FINANCE_MIN_VENUE_SHARE,
+        "financeInventoryExcludedExactMarketIds": len(exact_market_ids),
+        "financeInventoryLimit": FINANCE_INVENTORY_LIMIT,
+        "financeCompanyLimit": FINANCE_COMPANY_LIMIT,
+        "financeEconomicsLimit": FINANCE_ECONOMICS_LIMIT,
+    }
+
+
 def build_exact_pair_context(
     market_group: str = "all",
 ) -> ExactPairContext:
@@ -9324,6 +10662,7 @@ def build_exact_pair_context(
         venue_counts,
         generic_candidate_matches,
         generic_load_diagnostics,
+        finance_company_candidate_rows,
     ) = load_catalog(
         include_sports=include_sports,
         include_macro=include_macro,
@@ -9368,6 +10707,18 @@ def build_exact_pair_context(
             "sports",
         )
         diagnostics.update(sports_settlement_diagnostics)
+        if SOCCER_EARLY_PRUNE_ENABLED:
+            diagnostics.update({
+                "sportsPairsBeforeFinancePriorityPrune": len(sports_pairs),
+                "sportsPairsAfterFinancePriorityPrune": len(sports_pairs),
+                "soccerRuntimePostMatchPruneSkipped": True,
+            })
+        else:
+            sports_pairs, sports_priority_diagnostics = prioritize_sports_runtime_pairs(
+                sports_pairs,
+                markets,
+            )
+            diagnostics.update(sports_priority_diagnostics)
         diagnostics["sportsEventMatchMethods"] = dict(
             sorted(
                 Counter(
@@ -9441,6 +10792,14 @@ def build_exact_pair_context(
             )
         )
 
+    finance_inventory, finance_inventory_diagnostics = build_bounded_finance_inventory(
+        markets=markets,
+        company_rows=finance_company_candidate_rows,
+        exact_pairs=[*sports_pairs, *macro_pairs, *weather_pairs, *generic_pairs],
+        include_companies=bool(include_generic and selected_generic_groups and "companies" in selected_generic_groups),
+        include_macro=include_macro,
+    )
+    diagnostics.update(finance_inventory_diagnostics)
     diagnostics["candidateEventsLoaded"] = len(events)
     diagnostics["candidateMarketsLoaded"] = len(markets)
 
@@ -9454,6 +10813,7 @@ def build_exact_pair_context(
         macro_synthetic_candidates=macro_synthetic_candidates,
         weather_pairs=weather_pairs,
         generic_pairs=generic_pairs,
+        finance_inventory=finance_inventory,
         diagnostics=diagnostics,
         snapshot_marker=prediction_snapshot_marker(),
     )
@@ -9548,7 +10908,15 @@ def compact_exact_pair_context_for_live(
         ),
         weather_pairs=list(context.weather_pairs),
         generic_pairs=list(context.generic_pairs),
-        diagnostics=compact_diagnostics,
+        finance_inventory=list(context.finance_inventory),
+        diagnostics={
+            **compact_diagnostics,
+            "financeInventoryRows": len(context.finance_inventory),
+            "financeInventoryCompanies": sum(x.market_group == "companies" for x in context.finance_inventory),
+            "financeInventoryEconomics": sum(x.market_group == "macro" for x in context.finance_inventory),
+            "financeInventoryByVenue": dict(sorted(Counter(x.venue for x in context.finance_inventory).items())),
+            "financeInventoryByFamily": dict(sorted(Counter(x.family for x in context.finance_inventory).items())),
+        },
         snapshot_marker=context.snapshot_marker,
     )
 
@@ -11075,6 +12443,258 @@ def route_pricing_self_test() -> Dict[str, Any]:
 
 
 
+def finance_inventory_diagnostics_payload() -> Dict[str, Any]:
+    context = build_exact_pair_context("all")
+    return {
+        "engineVersion": ENGINE_VERSION,
+        "snapshotMarker": context.snapshot_marker,
+        "exactPairs": len(context.exact_pairs),
+        "sportsExactPairs": len(context.sports_pairs),
+        "macroExactPairs": len(context.macro_pairs),
+        "genericExactPairs": len(context.generic_pairs),
+        "financeInventoryRows": len(context.finance_inventory),
+        "financeInventoryCompanies": sum(x.market_group == "companies" for x in context.finance_inventory),
+        "financeInventoryEconomics": sum(x.market_group == "macro" for x in context.finance_inventory),
+        "financeInventoryByVenue": dict(sorted(Counter(x.venue for x in context.finance_inventory).items())),
+        "financeInventoryByFamily": dict(sorted(Counter(x.family for x in context.finance_inventory).items())),
+        "financeInventoryCompaniesByVenue": context.diagnostics.get("financeInventoryCompaniesByVenue"),
+        "financeInventoryEconomicsByVenue": context.diagnostics.get("financeInventoryEconomicsByVenue"),
+        "financeInventoryCompaniesByFamily": context.diagnostics.get("financeInventoryCompaniesByFamily"),
+        "financeInventoryEconomicsByFamily": context.diagnostics.get("financeInventoryEconomicsByFamily"),
+        "financeInventoryMinVenueShare": context.diagnostics.get("financeInventoryMinVenueShare"),
+        "sportsCandidateEventsBeforeEarlyPrune": context.diagnostics.get("sportsCandidateEventsBeforeEarlyPrune"),
+        "sportsCandidateEventsAfterEarlyPrune": context.diagnostics.get("sportsCandidateEventsAfterEarlyPrune"),
+        "soccerCandidateEventsEarlyDropped": context.diagnostics.get("soccerCandidateEventsEarlyDropped"),
+        "soccerPairsBeforePriorityPrune": context.diagnostics.get("soccerPairsBeforePriorityPrune"),
+        "soccerPairsAfterPriorityPrune": context.diagnostics.get("soccerPairsAfterPriorityPrune"),
+        "soccerPairsDroppedByHardCap": context.diagnostics.get("soccerPairsDroppedByHardCap"),
+        "soccerRuntimePairLimit": context.diagnostics.get("soccerRuntimePairLimit", SOCCER_RUNTIME_PAIR_LIMIT),
+        "soccerBackendHardCapApplied": context.diagnostics.get("soccerBackendHardCapApplied"),
+        "soccerPriorityPruneMode": context.diagnostics.get("soccerPriorityPruneMode"),
+        "soccerKeptByLeagueBucket": context.diagnostics.get("soccerKeptByLeagueBucket"),
+        "soccerDroppedByLeagueBucket": context.diagnostics.get("soccerDroppedByLeagueBucket"),
+        "nonSoccerSportsPairsPreserved": context.diagnostics.get("nonSoccerSportsPairsPreserved"),
+        "explicitNonSoccerPairsProtected": context.diagnostics.get("explicitNonSoccerPairsProtected"),
+        "soccerCapTouchesOnlySoccer": context.diagnostics.get("soccerCapTouchesOnlySoccer"),
+        "candidateEventsLoaded": context.diagnostics.get("candidateEventsLoaded"),
+        "candidateMarketsLoaded": context.diagnostics.get("candidateMarketsLoaded"),
+        "sampleCompanies": [asdict(x) for x in context.finance_inventory if x.market_group == "companies"][:8],
+        "sampleEconomics": [asdict(x) for x in context.finance_inventory if x.market_group == "macro"][:8],
+    }
+
+
+def finance_priority_self_test() -> Dict[str, Any]:
+    meta_eps = {
+        "event_title": "Meta Q3 2026 earnings",
+        "market_title": "Will Meta (META) beat quarterly earnings?",
+        "rules_primary": "This resolves Yes if Meta GAAP EPS for Q3 2026 is greater than $6.12.",
+        "rules_secondary": "",
+        "category": "companies",
+        "market_type": "binary",
+        "contract_semantics": {},
+        "floor_strike": None,
+        "cap_strike": None,
+        "functional_strike": None,
+        "external_market_id": "META-Q3-2026-EPS",
+    }
+    meta_eps_alt = {
+        **meta_eps,
+        "market_title": "Meta (META) Q3 2026 EPS above 6.12?",
+        "rules_primary": "Resolves Yes when earnings per share is above $6.12 for Q3 2026.",
+        "external_market_id": "KXMETA-Q3-26-EPS",
+    }
+    assert company_structured_signature(meta_eps) == company_structured_signature(meta_eps_alt)
+
+    sales_a = {
+        "event_title": "ExampleCo Q2 2026 earnings",
+        "market_title": "Will ExampleCo Q2 2026 revenue be above $15.6 billion?",
+        "rules_primary": "Revenue greater than $15.6 billion.",
+        "rules_secondary": "",
+        "category": "companies",
+        "market_type": "binary",
+        "contract_semantics": {},
+        "floor_strike": None,
+        "cap_strike": None,
+        "functional_strike": None,
+        "external_market_id": "EX-Q2-REV",
+    }
+    sales_b = {
+        **sales_a,
+        "market_title": "ExampleCo Q2 2026 revenue over 15600 million?",
+        "rules_primary": "Total revenue above 15600 million in Q2 2026.",
+        "external_market_id": "KXEX-Q2-REV",
+    }
+    assert company_structured_signature(sales_a) == company_structured_signature(sales_b)
+
+    assert macro_metric("us jolts job openings in september 2026") == "jolts-job-openings"
+    assert macro_metric("ism manufacturing pmi in october 2026") == "manufacturing-pmi"
+    assert macro_metric("s&p 500 above 7000 by december 31 2026") == "sp500-level"
+    assert macro_metric("10-year treasury yield above 5% by december 2026") == "treasury-10y"
+
+    assert SOCCER_ALWAYS_KEEP_PATTERN.search("uefa_champions_league")
+    assert not SOCCER_ALWAYS_KEEP_PATTERN.search("k_league_2")
+    assert SOCCER_EARLY_PRUNE_ENABLED is False
+    assert SOCCER_RUNTIME_PAIR_LIMIT == 500
+    # Regression guard for the exact bug fixed in v20.18: generic "football"
+    # must not make American/Australian football subject to the soccer cap.
+    sample_non_soccer_text = "nfl pro football national football league"
+    assert NON_SOCCER_SPORT_PATTERNS[0][1].search(sample_non_soccer_text)
+    assert any(pattern.search("nba basketball") for _label, pattern in NON_SOCCER_SPORT_PATTERNS)
+    assert any(pattern.search("mlb baseball") for _label, pattern in NON_SOCCER_SPORT_PATTERNS)
+
+    territorial_acquisition = {
+        "event_title": "Will Trump acquire Greenland before 2027?",
+        "market_title": "Will Trump acquire Greenland before 2027?",
+        "category": "world",
+        "market_type": "binary",
+        "sports_market_type": None,
+    }
+    assert generic_group_for_row(territorial_acquisition) != "companies"
+
+    tariff_revenue_noise = {
+        "event_title": "Will Americans receive tariff stimulus checks?",
+        "market_title": "Will at least one million Americans receive checks directly attributable to tariff revenue?",
+        "category": "economics",
+        "market_type": "binary",
+        "company_signature": None,
+        "company_metric": "revenue",
+    }
+    assert not _company_inventory_row_allowed(tariff_revenue_noise, "revenue")
+
+    trump_company_mention_noise = {
+        "event_title": "What companies will Trump say in August?",
+        "market_title": 'Will Trump say "Nvidia / NVDA" before Sep 1, 2026?',
+        "category": "companies",
+        "market_type": "binary",
+        "company_signature": None,
+        "company_metric": None,
+    }
+    assert not _company_inventory_row_allowed(trump_company_mention_noise, "company-event")
+
+    harvard_revenue_noise = {
+        "event_title": "Harvard federal sponsored revenue in FY2026?",
+        "market_title": "Will Harvard's federal sponsored revenue be above 1000000000 in fiscal year 2026?",
+        "category": "economics",
+        "market_type": "binary",
+        "company_signature": None,
+        "company_metric": "revenue",
+    }
+    assert not _company_inventory_row_allowed(harvard_revenue_noise, "revenue")
+
+    assert macro_metric("who will be charged with a federal crime in 2026") is None
+    assert macro_metric("will anthony fauci be charged with any crime before jan 1 2027") is None
+    assert macro_metric("will there be a recession in 2026") == "recession"
+
+    grouped_ipo = {
+        "event_title": "Which companies will officially announce an IPO this year?",
+        "market_title": "Who will IPO before 2027?",
+        "category": "Financials",
+        "market_type": "binary",
+        "custom_strike": {"Company": "Anthropic"},
+        "contract_semantics": {"custom_strike": {"Company": "Anthropic"}},
+        "company_signature": None,
+        "company_metric": None,
+    }
+    assert company_ipo_subject(grouped_ipo) == "anthropic"
+    assert _company_inventory_family(grouped_ipo) == "ipo"
+    _, grouped_ipo_title, grouped_ipo_subject = _company_inventory_display_identity(grouped_ipo, "ipo")
+    assert grouped_ipo_title == "Will Anthropic IPO before 2027?"
+    assert grouped_ipo_subject == "anthropic"
+
+    grouped_takeover_none = {
+        "event_title": "Who will successfully take over Warner Brothers?",
+        "market_title": "Will None's takeover of Warner Brothers succeed Before July 2027?",
+        "category": "Companies",
+        "market_type": "binary",
+        "custom_strike": {"Acquirer": "None"},
+        "contract_semantics": {"custom_strike": {"Acquirer": "None"}},
+        "company_signature": None,
+        "company_metric": None,
+    }
+    assert _company_inventory_family(grouped_takeover_none) == "m-and-a"
+    _, takeover_none_title, takeover_none_subject = _company_inventory_display_identity(grouped_takeover_none, "m-and-a")
+    assert "None's" not in takeover_none_title
+    assert "no listed acquirer" in takeover_none_title.lower()
+    assert takeover_none_subject == "no_listed_acquirer"
+
+    synthetic_inventory: List[FinanceInventoryMarket] = []
+    for index in range(12):
+        synthetic_inventory.append(FinanceInventoryMarket(
+            id=f"poly-ipo-{index}", venue="polymarket", market_group="companies",
+            family="ipo", event_title=f"IPO {index}", contract_title=f"IPO {index}",
+            database_market_id=1000 + index, external_market_id=str(1000 + index),
+            external_event_id=str(2000 + index), yes_key="yes", no_key="no",
+            close_time=None, resolution_time=None, liquidity=1000.0, volume_24h=1000.0 - index,
+            total_volume=5000.0, open_interest=1000.0, rank_score=100.0 - index,
+            subject_key=f"issuer-ipo-{index}",
+        ))
+    for index in range(12):
+        synthetic_inventory.append(FinanceInventoryMarket(
+            id=f"poly-revenue-{index}", venue="polymarket", market_group="companies",
+            family="revenue", event_title=f"Revenue {index}", contract_title=f"Revenue {index}",
+            database_market_id=3000 + index, external_market_id=str(3000 + index),
+            external_event_id=str(4000 + index), yes_key="yes", no_key="no",
+            close_time=None, resolution_time=None, liquidity=800.0, volume_24h=800.0 - index,
+            total_volume=4000.0, open_interest=800.0, rank_score=80.0 - index,
+            subject_key=f"issuer-revenue-{index}",
+        ))
+    for index in range(8):
+        synthetic_inventory.append(FinanceInventoryMarket(
+            id=f"kalshi-share-{index}", venue="kalshi", market_group="companies",
+            family="share-price", event_title=f"Share {index}", contract_title=f"Share {index}",
+            database_market_id=5000 + index, external_market_id=f"KX{5000 + index}",
+            external_event_id=f"KXE{6000 + index}", yes_key="yes", no_key="no",
+            close_time=None, resolution_time=None, liquidity=200.0, volume_24h=200.0 - index,
+            total_volume=1000.0, open_interest=200.0, rank_score=40.0 - index,
+            subject_key=f"issuer-share-{index}",
+        ))
+    synthetic_selected = _select_finance_inventory_candidates(
+        synthetic_inventory,
+        12,
+        per_subject_limit=4,
+        family_soft_cap=_company_family_soft_cap,
+        min_venue_share=0.25,
+    )
+    synthetic_venues = Counter(x.venue for x in synthetic_selected)
+    synthetic_families = Counter(x.family for x in synthetic_selected)
+    assert len(synthetic_selected) == 12
+    assert synthetic_venues["kalshi"] >= 3
+    assert synthetic_families["ipo"] <= _company_family_soft_cap("ipo", 12)
+
+    return {
+        "engineVersion": ENGINE_VERSION,
+        "status": "passed",
+        "companyStructuredEps": company_structured_signature(meta_eps),
+        "companyStructuredRevenue": company_structured_signature(sales_a),
+        "expandedMacroMetrics": [
+            "jolts-job-openings",
+            "manufacturing-pmi",
+            "sp500-level",
+            "treasury-10y",
+        ],
+        "soccerRuntimePairLimit": SOCCER_RUNTIME_PAIR_LIMIT,
+        "soccerEarlyPruneEnabled": SOCCER_EARLY_PRUNE_ENABLED,
+        "soccerPruneStage": "post-match-post-settlement",
+        "soccerCapTouchesOnlySoccer": True,
+        "explicitNonSoccerProtectionEnabled": True,
+        "financeInventoryLimit": FINANCE_INVENTORY_LIMIT,
+        "financeCompanyLimit": FINANCE_COMPANY_LIMIT,
+        "financeEconomicsLimit": FINANCE_ECONOMICS_LIMIT,
+        "financeMinVenueShare": FINANCE_MIN_VENUE_SHARE,
+        "territorialAcquisitionExcludedFromCompanies": True,
+        "tariffRevenueExcludedFromCompanies": True,
+        "politicianCompanyMentionsExcludedFromCompanies": True,
+        "universityRevenueExcludedFromCompanies": True,
+        "federalCrimeExcludedFromEconomics": True,
+        "economicsInventoryTitleScoped": True,
+        "groupedIpoIdentityFromCustomStrike": True,
+        "noneTakeoverDisplayNormalized": True,
+        "syntheticVenueBalance": dict(sorted(synthetic_venues.items())),
+        "syntheticFamilyBalance": dict(sorted(synthetic_families.items())),
+        "majorSoccerPrioritizedWithinHardCap": True,
+    }
+
+
 def main() -> None:
     print(f"Engine version: {ENGINE_VERSION}")
     if len(sys.argv) == 1:
@@ -11082,13 +12702,19 @@ def main() -> None:
         print(
             "Run with 'scan', 'settlement-diagnostics', "
             "'macro-diagnostics', 'weather-diagnostics', 'generic-diagnostics', "
-            "'live-manifest', or 'route-self-test'."
+            "'live-manifest', 'finance-inventory', 'finance-priority-self-test', or 'route-self-test'."
         )
         return
 
     command = sys.argv[1].strip().lower()
     if command == "route-self-test":
         print(json.dumps(route_pricing_self_test(), indent=2, default=str))
+        return
+    if command == "finance-priority-self-test":
+        print(json.dumps(finance_priority_self_test(), indent=2, default=str))
+        return
+    if command == "finance-inventory":
+        print(json.dumps(finance_inventory_diagnostics_payload(), indent=2, default=str))
         return
     if command == "scan":
         print(json.dumps(run_full_scan(), indent=2, default=str))
@@ -11147,7 +12773,7 @@ def main() -> None:
     raise SystemExit(
         "Unknown command. Use scan, settlement-diagnostics, "
         "macro-diagnostics, weather-diagnostics, generic-diagnostics, "
-        "live-manifest, or route-self-test."
+        "live-manifest, finance-inventory, finance-priority-self-test, or route-self-test."
     )
 
 

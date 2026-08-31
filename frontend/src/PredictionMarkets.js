@@ -18,7 +18,9 @@ const API_BASE = (
 ).replace(/\/+$/, "");
 
 const API_CONTRACT_VERSION =
-  "prediction-terminal-api-v2-route-accounted";
+  "prediction-terminal-api-v2.1-persistent-catalog";
+const PREDICTION_UI_VERSION =
+  "prediction-ui-v4.1-persistent-socket-soccer500";
 
 const TERMINAL_LIMIT = 5000;
 const HTTP_FALLBACK_INTERVAL_MS = 5000;
@@ -80,7 +82,8 @@ const VIEW_OPTIONS = [
 
 const CATEGORY_PRIORITY = [
   "sports",
-  "macro",
+  "companies",
+  "economics",
   "politics",
   "elections",
   "culture",
@@ -88,10 +91,8 @@ const CATEGORY_PRIORITY = [
   "entertainment",
   "weather",
   "crypto",
-  "companies",
   "geopolitics",
   "technology",
-  "economics",
   "other",
 ];
 
@@ -220,6 +221,7 @@ const MACRO_SUBCATEGORIES = [
   "Jobs",
   "GDP",
   "Recession",
+  "Markets",
   "Other",
 ];
 
@@ -431,7 +433,7 @@ const formatDateTime = (
 
 const titleCase = (value) =>
   String(value || "")
-    .replaceAll("_", " ")
+    .replace(/[_-]+/g, " ")
     .replace(
       /\b\w/g,
       (character) =>
@@ -473,6 +475,13 @@ const getSearchText = (item) =>
       item?.ticker,
       item?.category,
       item?.subcategory,
+      item?.family,
+      item?.venue,
+      item?.event_title,
+      item?.contract_title,
+      item?.external_market_id,
+      item?.external_event_id,
+      item?.subject_key,
       item?.polymarket?.marketId,
       item?.polymarket?.eventId,
       item?.polymarket?.slug,
@@ -523,10 +532,16 @@ const getIdentifierText = (item) =>
 
 const getPrimaryCategory = (item) => {
   const value = String(
-    item?.marketGroup || "other"
+    item?.marketGroup ||
+      item?.market_group ||
+      "other"
   )
     .trim()
     .toLowerCase();
+
+  if (value === "macro") {
+    return "economics";
+  }
 
   return value || "other";
 };
@@ -856,6 +871,14 @@ const inferMacroCategory = (item) => {
     return "Recession";
   }
 
+  if (
+    /\b(s&p|sp500|spx|nasdaq|ndx|gold|wti|crude oil|oil price|treasury yield)\b/.test(
+      text
+    )
+  ) {
+    return "Markets";
+  }
+
   return "Other";
 };
 
@@ -864,6 +887,7 @@ const getGenericSubcategory = (
 ) => {
   const value =
     item?.subcategory ||
+    item?.family ||
     item?.polymarket?.subcategory ||
     item?.kalshi?.subcategory ||
     "";
@@ -871,6 +895,199 @@ const getGenericSubcategory = (
   return value
     ? titleCase(value)
     : "All";
+};
+
+
+const isSingleVenueMarket = (item) =>
+  String(
+    item?.rowType ||
+      item?.row_type ||
+      ""
+  ).toLowerCase() ===
+    "single_venue_market" ||
+  item?.isArbitragePair === false;
+
+const normalizeFinanceInventoryRow = (
+  row,
+  requestedGroup
+) => {
+  const venueName = String(
+    row?.venue || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  const yes = row?.yes || {};
+  const no = row?.no || {};
+
+  const marketId = String(
+    row?.external_market_id ||
+      row?.externalMarketId ||
+      ""
+  );
+
+  const eventId = String(
+    row?.external_event_id ||
+      row?.externalEventId ||
+      ""
+  );
+
+  const normalizedVenue = {
+    ...(venueName === "kalshi"
+      ? row?.kalshi || {}
+      : venueName === "polymarket"
+        ? row?.polymarket || {}
+        : {}),
+    marketId,
+    eventId,
+    marketTicker:
+      venueName === "kalshi"
+        ? marketId
+        : undefined,
+    eventTicker:
+      venueName === "kalshi"
+        ? eventId
+        : undefined,
+    yesBid:
+      asNumber(
+        row?.bestYesBid
+      ) ??
+      asNumber(
+        yes?.bestBid
+      ),
+    yesAsk:
+      asNumber(
+        row?.bestYesAsk
+      ) ??
+      asNumber(
+        yes?.bestAsk
+      ),
+    yesSize:
+      asNumber(
+        yes?.bestAskSize
+      ),
+    noBid:
+      asNumber(
+        row?.bestNoBid
+      ) ??
+      asNumber(
+        no?.bestBid
+      ),
+    noAsk:
+      asNumber(
+        row?.bestNoAsk
+      ) ??
+      asNumber(
+        no?.bestAsk
+      ),
+    noSize:
+      asNumber(
+        no?.bestAskSize
+      ),
+    yesLabel: "YES",
+    noLabel: "NO",
+  };
+
+  const marketGroup =
+    requestedGroup ===
+    "economics"
+      ? "economics"
+      : requestedGroup ===
+          "companies"
+        ? "companies"
+        : getPrimaryCategory(
+            row
+          );
+
+  return {
+    ...row,
+    id:
+      row?.id ||
+      `finance-${venueName}-${marketId}`,
+    rowType:
+      "single_venue_market",
+    isArbitragePair: false,
+    marketGroup,
+    family:
+      row?.family || "other",
+    subcategory:
+      row?.family || "other",
+    eventTitle:
+      row?.event_title ||
+      row?.eventTitle ||
+      "Untitled market",
+    contractTitle:
+      row?.contract_title ||
+      row?.contractTitle ||
+      "",
+    eventKey:
+      row?.subject_key ||
+      row?.event_key ||
+      row?.eventKey ||
+      eventId,
+    contractKey:
+      row?.external_market_id ||
+      row?.contract_key ||
+      row?.contractKey ||
+      marketId,
+    scheduledTime:
+      row?.close_time ||
+      row?.closeTime ||
+      row?.resolution_time ||
+      row?.resolutionTime ||
+      null,
+    settlementTarget:
+      row?.resolution_time ||
+      row?.resolutionTime ||
+      row?.close_time ||
+      row?.closeTime ||
+      null,
+    closeTime:
+      row?.close_time ||
+      row?.closeTime ||
+      null,
+    resolutionTime:
+      row?.resolution_time ||
+      row?.resolutionTime ||
+      null,
+    financeVenue: venueName,
+    liquidity:
+      asNumber(
+        row?.liquidity
+      ) ?? 0,
+    volume24h:
+      asNumber(
+        row?.volume_24h ??
+          row?.volume24h
+      ) ?? 0,
+    totalVolume:
+      asNumber(
+        row?.total_volume ??
+          row?.totalVolume
+      ) ?? 0,
+    openInterest:
+      asNumber(
+        row?.open_interest ??
+          row?.openInterest
+      ) ?? 0,
+    rankScore:
+      asNumber(
+        row?.rank_score ??
+          row?.rankScore
+      ) ?? 0,
+    ...(venueName === "polymarket"
+      ? {
+          polymarket:
+            normalizedVenue,
+        }
+      : {}),
+    ...(venueName === "kalshi"
+      ? {
+          kalshi:
+            normalizedVenue,
+        }
+      : {}),
+  };
 };
 
 const getEventTiming = (item) => {
@@ -1175,6 +1392,14 @@ const getVenueSideQuote = (
     feeReady,
     size,
     url: venue?.url || "",
+    marketId:
+      venue?.marketTicker ||
+      venue?.marketId ||
+      "",
+    eventId:
+      venue?.eventTicker ||
+      venue?.eventId ||
+      "",
   };
 };
 
@@ -1762,6 +1987,119 @@ const stableAllComparator = (
   );
 };
 
+
+const SOCCER_DISPLAY_LIMIT = 500;
+
+const applySoccerPresentationCap = (
+  rows
+) => {
+  const nonSoccer = [];
+  const liveSoccer = [];
+  const majorLeagueSoccer = [];
+  const otherSoccer = [];
+
+  rows.forEach((item) => {
+    const isSoccer =
+      getPrimaryCategory(item) ===
+        "sports" &&
+      inferSportsSubcategory(item) ===
+        "Soccer";
+
+    if (!isSoccer) {
+      nonSoccer.push(item);
+      return;
+    }
+
+    const league =
+      inferSoccerLeague(item);
+    const live =
+      getEventTiming(item)
+        .phase === "live";
+    const majorLeague =
+      SOCCER_LEAGUE_PRIORITY.includes(
+        league
+      );
+
+    // Hard cap soccer at 500 total cards. Within that cap, live markets
+    // always get first priority, then protected major leagues, then the
+    // best remaining low-priority markets. Each row belongs to one bucket
+    // only, so the final soccer count can never exceed SOCCER_DISPLAY_LIMIT.
+    if (live) {
+      liveSoccer.push(item);
+    } else if (majorLeague) {
+      majorLeagueSoccer.push(item);
+    } else {
+      otherSoccer.push(item);
+    }
+  });
+
+  liveSoccer.sort(
+    stableAllComparator
+  );
+  majorLeagueSoccer.sort(
+    stableAllComparator
+  );
+  otherSoccer.sort(
+    stableAllComparator
+  );
+
+  const cappedSoccer = [
+    ...liveSoccer,
+    ...majorLeagueSoccer,
+    ...otherSoccer,
+  ].slice(0, SOCCER_DISPLAY_LIMIT);
+
+  return [
+    ...nonSoccer,
+    ...cappedSoccer,
+  ];
+};
+
+const financeMarketComparator = (
+  left,
+  right
+) => {
+  const leftSingle =
+    isSingleVenueMarket(left);
+  const rightSingle =
+    isSingleVenueMarket(right);
+
+  if (
+    leftSingle !==
+    rightSingle
+  ) {
+    return leftSingle ? 1 : -1;
+  }
+
+  if (
+    leftSingle &&
+    rightSingle
+  ) {
+    const leftRank =
+      asNumber(
+        left?.rankScore
+      ) ?? 0;
+
+    const rightRank =
+      asNumber(
+        right?.rankScore
+      ) ?? 0;
+
+    if (
+      rightRank !== leftRank
+    ) {
+      return (
+        rightRank - leftRank
+      );
+    }
+  }
+
+  return stableAllComparator(
+    left,
+    right
+  );
+};
+
 const netComparator = (
   left,
   right,
@@ -2074,6 +2412,14 @@ function EventCardShell({
             )}
           </span>
 
+          {item?.family ? (
+            <span>
+              {titleCase(
+                item.family
+              )}
+            </span>
+          ) : null}
+
           {timing.label ? (
             <span
               className={
@@ -2186,6 +2532,207 @@ function BestSideSummary({
         </small>
       </div>
     </div>
+  );
+}
+
+
+function SingleVenueMarketCard({
+  item,
+}) {
+  const venueName =
+    String(
+      item?.financeVenue || ""
+    ).toLowerCase() ||
+    (item?.kalshi
+      ? "kalshi"
+      : item?.polymarket
+        ? "polymarket"
+        : "");
+
+  const venue =
+    item?.[venueName] || {};
+
+  const venueLabel =
+    venueName === "polymarket"
+      ? "Polymarket"
+      : venueName === "kalshi"
+        ? "Kalshi"
+        : "Single venue";
+
+  const status = String(
+    item?.liveStatus || ""
+  ).toLowerCase();
+
+  const statusLabel =
+    status === "ready"
+      ? "LIVE BOOK"
+      : status ===
+          "partially_ready"
+        ? "PARTIAL BOOK"
+        : "BOOK UNAVAILABLE";
+
+  const renderSide = (side) => {
+    const isNo = side === "no";
+
+    const ask = asNumber(
+      isNo
+        ? venue?.noAsk
+        : venue?.yesAsk
+    );
+
+    const bid = asNumber(
+      isNo
+        ? venue?.noBid
+        : venue?.yesBid
+    );
+
+    const size = asNumber(
+      isNo
+        ? venue?.noSize
+        : venue?.yesSize
+    );
+
+    const quote =
+      getVenueSideQuote(
+        item,
+        venueName,
+        side
+      );
+
+    const canTrade =
+      Boolean(
+        buildVenueBuyUrl(quote)
+      );
+
+    return (
+      <div
+        className={[
+          "pm-single-side",
+          `pm-single-side-${side}`,
+        ].join(" ")}
+      >
+        <div className="pm-single-side-heading">
+          <span>
+            {side.toUpperCase()}
+          </span>
+
+          <small>
+            ASK
+          </small>
+        </div>
+
+        <strong>
+          {formatCents(ask)}
+        </strong>
+
+        <div className="pm-single-side-book">
+          <span>
+            Bid{" "}
+            <b>
+              {formatCents(bid)}
+            </b>
+          </span>
+
+          <span>
+            Depth{" "}
+            <b>
+              {formatContracts(
+                size
+              )}
+            </b>
+          </span>
+        </div>
+
+        {canTrade ? (
+          <VenueBuyButton
+            quote={quote}
+            isBest={false}
+            label={`Trade ${side.toUpperCase()}`}
+          />
+        ) : (
+          <div className="pm-single-live-note">
+            Live executable book
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <EventCardShell
+      item={item}
+      tone={[
+        "pm-event-card-single",
+        venueName
+          ? `pm-event-card-single-${venueName}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <div className="pm-single-market-summary">
+        <span
+          className={[
+            "pm-single-venue-badge",
+            venueName
+              ? `pm-single-venue-${venueName}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
+          {venueLabel}
+        </span>
+
+        <span
+          className={[
+            "pm-single-book-status",
+            status === "ready"
+              ? "ready"
+              : status ===
+                  "partially_ready"
+                ? "partial"
+                : "unavailable",
+          ].join(" ")}
+        >
+          {statusLabel}
+        </span>
+      </div>
+
+      <div className="pm-single-price-grid">
+        {renderSide("yes")}
+        {renderSide("no")}
+      </div>
+
+      <div className="pm-single-market-metrics">
+        <div>
+          <span>24H VOLUME</span>
+          <strong>
+            {formatMoney(
+              item?.volume24h
+            )}
+          </strong>
+        </div>
+
+        <div>
+          <span>LIQUIDITY</span>
+          <strong>
+            {formatMoney(
+              item?.liquidity
+            )}
+          </strong>
+        </div>
+
+        <div>
+          <span>OPEN INTEREST</span>
+          <strong>
+            {formatMoney(
+              item?.openInterest
+            )}
+          </strong>
+        </div>
+      </div>
+    </EventCardShell>
   );
 }
 
@@ -3348,7 +3895,10 @@ function NetArbitrageDetail({
     routeIsExecutable(route);
 
   return (
-    <section className="prediction-markets-page">
+    <section
+      className="prediction-markets-page"
+      data-ui-version={PREDICTION_UI_VERSION}
+    >
       <header className="pm-terminal-header">
         <div className="pm-brand-block">
           <img
@@ -4547,6 +5097,17 @@ function PredictionMarkets() {
     Date.now()
   );
 
+  // Keep one process-wide browser WebSocket for the lifetime of this page.
+  // Category and subcategory changes are client-side filters only; they must
+  // never tear down the live feed or flash CONNECTING again.
+  const backendMarketGroup = "all";
+
+  const requestedMarketGroupRef =
+    useRef("all");
+
+  const hasEverOpenedSocketRef =
+    useRef(false);
+
   useEffect(() => {
     const timer =
       window.setInterval(
@@ -4591,6 +5152,22 @@ function PredictionMarkets() {
 
   const applyPayload =
     useCallback((body) => {
+      const bodyMarketGroup =
+        String(
+          body?.marketGroup ||
+            body?.filters
+              ?.marketGroup ||
+            "all"
+        ).toLowerCase();
+
+      if (
+        bodyMarketGroup !==
+        requestedMarketGroupRef
+          .current
+      ) {
+        return;
+      }
+
       setLastFeedAt(
         Date.now()
       );
@@ -4699,6 +5276,24 @@ function PredictionMarkets() {
       applyPayload,
     ]);
 
+  // The browser WebSocket must not depend on render-time callbacks.  Keep the
+  // newest callback bodies in refs so changing categories can never tear down
+  // the socket effect.
+  const applyPayloadRef =
+    useRef(applyPayload);
+  const loadTerminalRef =
+    useRef(loadTerminal);
+
+  useEffect(() => {
+    applyPayloadRef.current =
+      applyPayload;
+  }, [applyPayload]);
+
+  useEffect(() => {
+    loadTerminalRef.current =
+      loadTerminal;
+  }, [loadTerminal]);
+
   const handleManualRefresh =
     useCallback(async () => {
       setIsRefreshing(true);
@@ -4762,9 +5357,14 @@ function PredictionMarkets() {
         return;
       }
 
-      setBrowserFeed(
-        "connecting"
-      );
+      if (
+        !hasEverOpenedSocketRef
+          .current
+      ) {
+        setBrowserFeed(
+          "connecting"
+        );
+      }
 
       let accessToken;
       try {
@@ -4801,6 +5401,8 @@ function PredictionMarkets() {
 
       socket.onopen = () => {
         socketOpen = true;
+        hasEverOpenedSocketRef
+          .current = true;
         setBrowserFeed(
           "live"
         );
@@ -4824,11 +5426,15 @@ function PredictionMarkets() {
             );
 
           if (
-            message?.type ===
-              "terminal_overview" &&
+            [
+              "terminal_overview",
+              "finance_overview",
+            ].includes(
+              message?.type
+            ) &&
             message?.payload
           ) {
-            applyPayload(
+            applyPayloadRef.current(
               message.payload
             );
             setIsLoading(
@@ -4885,7 +5491,7 @@ function PredictionMarkets() {
             document.visibilityState ===
               "visible"
           ) {
-            loadTerminal();
+            loadTerminalRef.current();
           }
         },
         HTTP_FALLBACK_INTERVAL_MS
@@ -4907,26 +5513,75 @@ function PredictionMarkets() {
 
       socket?.close();
     };
-  }, [
-    terminalQuery,
-    loadTerminal,
-    applyPayload,
-  ]);
+  }, [terminalQuery]);
+
+  const payloadMarketGroup =
+    String(
+      payload?.marketGroup ||
+        payload?.filters
+          ?.marketGroup ||
+        "all"
+    ).toLowerCase();
+
+  const payloadMatchesBackendMarketGroup =
+    Boolean(payload) &&
+    payloadMarketGroup ===
+      backendMarketGroup;
 
   const rows =
-    useMemo(
-      () =>
+    useMemo(() => {
+      if (
+        !payloadMatchesBackendMarketGroup
+      ) {
+        return [];
+      }
+
+      const matchedRows =
         Array.isArray(
           payload?.opportunities
         )
           ? payload.opportunities
-          : [],
-      [payload]
-    );
+          : [];
+
+      const singleVenueRows =
+        Array.isArray(
+          payload?.financeInventory
+        )
+          ? payload.financeInventory.map(
+              (row) => {
+                const rawGroup =
+                  String(
+                    row?.market_group ||
+                      row?.marketGroup ||
+                      ""
+                  ).toLowerCase();
+
+                const financeGroup =
+                  rawGroup === "macro" ||
+                  rawGroup === "economics"
+                    ? "economics"
+                    : "companies";
+
+                return normalizeFinanceInventoryRow(
+                  row,
+                  financeGroup
+                );
+              }
+            )
+          : [];
+
+      return [
+        ...matchedRows,
+        ...singleVenueRows,
+      ];
+    }, [
+      payload,
+      payloadMatchesBackendMarketGroup,
+    ]);
 
   const displayRows =
-    useMemo(
-      () =>
+    useMemo(() => {
+      const activeRows =
         collapseMirroredSportsRows(
           rows,
           mirroredRepresentativeIdsRef
@@ -4936,9 +5591,12 @@ function PredictionMarkets() {
             !isDefinitivelyClosedRow(
               item
             )
-        ),
-      [rows]
-    );
+        );
+
+      return applySoccerPresentationCap(
+        activeRows
+      );
+    }, [rows]);
 
   const selectedNetItem =
     useMemo(
@@ -4960,19 +5618,75 @@ function PredictionMarkets() {
       ]
     );
 
+  const manifestSummary =
+    payload?.streamStatus
+      ?.manifest || {};
+
   const categoryOptions =
     useMemo(() => {
-      const groups = [
-        ...new Set(
-          displayRows
-            .map(
-              getPrimaryCategory
-            )
-            .filter(Boolean)
-        ),
+      const groups = new Set();
+
+      const pairGroups =
+        manifestSummary
+          ?.pairsByGroup || {};
+
+      Object.keys(
+        pairGroups
+      ).forEach((value) => {
+        const normalized =
+          value === "macro"
+            ? "economics"
+            : String(
+                value || ""
+              ).toLowerCase();
+
+        if (normalized) {
+          groups.add(normalized);
+        }
+      });
+
+      const financeGroups =
+        manifestSummary
+          ?.financeInventoryByGroup ||
+        {};
+
+      if (
+        Number(
+          financeGroups
+            ?.companies || 0
+        ) > 0
+      ) {
+        groups.add("companies");
+      }
+
+      if (
+        Number(
+          financeGroups?.macro || 0
+        ) > 0
+      ) {
+        groups.add("economics");
+      }
+
+      if (!groups.size) {
+        displayRows.forEach(
+          (item) => {
+            const category =
+              getPrimaryCategory(
+                item
+              );
+
+            if (category) {
+              groups.add(category);
+            }
+          }
+        );
+      }
+
+      const ordered = [
+        ...groups,
       ];
 
-      groups.sort(
+      ordered.sort(
         (left, right) => {
           const leftIndex =
             CATEGORY_PRIORITY.indexOf(
@@ -5015,31 +5729,47 @@ function PredictionMarkets() {
       return [
         "all",
         "live",
-        ...groups,
+        ...ordered,
       ];
-    }, [displayRows]);
+    }, [
+      payload,
+      displayRows,
+    ]);
 
   const categoryCounts =
     useMemo(() => {
       const counts = {
         all: displayRows.length,
-        live: displayRows.filter(
-          (item) =>
-            getEventTiming(item)
-              .phase === "live"
-        ).length,
+        live: 0,
       };
 
-      displayRows.forEach((item) => {
-        const category =
-          getPrimaryCategory(
-            item
-          );
+      displayRows.forEach(
+        (item) => {
+          if (
+            getEventTiming(item)
+              .phase === "live"
+          ) {
+            counts.live += 1;
+          }
 
-        counts[category] =
-          (counts[category] ||
-            0) + 1;
-      });
+          const category =
+            getPrimaryCategory(
+              item
+            );
+
+          if (
+            !category ||
+            category === "all" ||
+            category === "live"
+          ) {
+            return;
+          }
+
+          counts[category] =
+            (counts[category] ||
+              0) + 1;
+        }
+      );
 
       return counts;
     }, [displayRows]);
@@ -5114,7 +5844,7 @@ function PredictionMarkets() {
 
       if (
         primaryCategory ===
-        "macro"
+        "economics"
       ) {
         return MACRO_SUBCATEGORIES.filter(
           (option) => {
@@ -5191,17 +5921,25 @@ function PredictionMarkets() {
             ).length;
           }
 
-          return categoryRows.filter(
-            (item) =>
-              inferSportsSubcategory(
-                item
-              ) === option
-          ).length;
+          const matchingRows =
+            categoryRows.filter(
+              (item) =>
+                inferSportsSubcategory(
+                  item
+                ) === option
+            );
+
+          return option === "Soccer"
+            ? Math.min(
+                matchingRows.length,
+                SOCCER_DISPLAY_LIMIT
+              )
+            : matchingRows.length;
         }
 
         if (
           primaryCategory ===
-          "macro"
+          "economics"
         ) {
           return categoryRows.filter(
             (item) =>
@@ -5248,18 +5986,26 @@ function PredictionMarkets() {
           );
         }
 
-        return categoryRows.filter(
-          (item) =>
-            inferSportsSubcategory(
-              item
-            ) ===
-            subcategory
-        );
+        const matchingRows =
+          categoryRows.filter(
+            (item) =>
+              inferSportsSubcategory(
+                item
+              ) ===
+              subcategory
+          );
+
+        return subcategory === "Soccer"
+          ? matchingRows.slice(
+              0,
+              SOCCER_DISPLAY_LIMIT
+            )
+          : matchingRows;
       }
 
       if (
         primaryCategory ===
-        "macro"
+        "economics"
       ) {
         return categoryRows.filter(
           (item) =>
@@ -5444,6 +6190,18 @@ function PredictionMarkets() {
               nowMs
             )
         );
+      } else if (
+        !searchMode &&
+        [
+          "companies",
+          "economics",
+        ].includes(
+          primaryCategory
+        )
+      ) {
+        sorted.sort(
+          financeMarketComparator
+        );
       } else {
         sorted.sort(
           stableAllComparator
@@ -5457,6 +6215,7 @@ function PredictionMarkets() {
       normalizedSearch,
       categoryFilteredRows,
       viewFilter,
+      primaryCategory,
       nowMs,
     ]);
 
@@ -5638,6 +6397,15 @@ function PredictionMarkets() {
       setSoccerLeague(
         "all"
       );
+
+      if (
+        category ===
+          "companies" ||
+        category ===
+          "economics"
+      ) {
+        setViewFilter("all");
+      }
     };
 
   return (
@@ -5658,8 +6426,8 @@ function PredictionMarkets() {
 
             <small>
               Polymarket × Kalshi ·
-              executable live
-              comparison
+              live markets &
+              executable comparisons
             </small>
           </div>
         </div>
@@ -5705,7 +6473,7 @@ function PredictionMarkets() {
           <strong>
             {displayRows.length}
           </strong>{" "}
-          current comparisons
+          current markets
         </span>
 
         <span className="pm-stat-gross">
@@ -5928,11 +6696,12 @@ function PredictionMarkets() {
 
       {searchMode ? (
         <div className="pm-search-context">
-          Search is global.
-          Results below compare
-          current executable
-          after-fee prices across
-          Polymarket and Kalshi.
+          Search filters the
+          currently loaded market
+          set. Single-venue finance
+          markets show one live
+          book; matched rows retain
+          the two-venue comparison.
         </div>
       ) : null}
 
@@ -5952,8 +6721,7 @@ function PredictionMarkets() {
             {
               filteredRows.length
             }{" "}
-            current matched
-            contracts
+            current markets
           </span>
         </div>
 
@@ -5964,8 +6732,8 @@ function PredictionMarkets() {
         </small>
       </div>
 
-      {isLoading &&
-      !payload ? (
+      {!payloadMatchesBackendMarketGroup &&
+      isLoading ? (
         <div className="pm-empty-state">
           Loading prediction
           markets…
@@ -5979,6 +6747,19 @@ function PredictionMarkets() {
         <div className="pm-event-grid">
           {visibleRows.map(
             (item) => {
+              if (
+                isSingleVenueMarket(
+                  item
+                )
+              ) {
+                return (
+                  <SingleVenueMarketCard
+                    key={item?.id}
+                    item={item}
+                  />
+                );
+              }
+
               if (
                 displayMode ===
                 "net"
@@ -6054,15 +6835,19 @@ function PredictionMarkets() {
         Prices are live
         executable asks and can
         change before execution.
+        Single-venue cards show
+        the book for that venue
+        only and never imply an
+        arbitrage match.
         Green-highlighted Buy
-        buttons indicate the
-        better after-fee price
-        only when both venue fee
-        estimates are available.
-        Net Arbitrage contains
-        only backend-classified
-        strict settlement
-        opportunities.
+        buttons on matched rows
+        indicate the better
+        after-fee price only when
+        both venue fee estimates
+        are available. Net
+        Arbitrage contains only
+        backend-classified strict
+        settlement opportunities.
       </footer>
     </section>
   );

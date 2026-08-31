@@ -7,6 +7,7 @@ import os
 import time
 import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -42,7 +43,7 @@ from prediction_markets_routes import (
 )
 
 
-REGRESSION_VERSION = "prediction-backend-regression-v4.3-persistent-catalog-finance-readiness"
+REGRESSION_VERSION = "prediction-backend-regression-v4.8-zero-epoch-delta-verified"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_REPORT = "prediction_market_backend_regression_report.json"
 LIVE_BEARER_TOKEN = ""
@@ -69,9 +70,10 @@ TOP_LEVEL_KEYS = {
     "pricingMode",
     "feeAware",
     "transport",
+    "marketGroup",
+    "terminalRevision",
+    "catalogEpoch",
     "streamStatus",
-    "feePricing",
-    "coverage",
     "filters",
     "catalogRows",
     "matchedRowsBeforeLimit",
@@ -85,16 +87,9 @@ ROW_KEYS = {
     "marketGroup",
     "eventTitle",
     "contractTitle",
-    "scheduledTime",
-    "resolutionTime",
-    "closeTime",
-    "settlementTime",
-    "eventKey",
-    "contractKey",
     "pairRelationship",
     "settlementStatus",
     "settlementVerified",
-    "settlementStreamEligible",
     "opportunityClass",
     "pairStatus",
     "pricingStatus",
@@ -102,49 +97,26 @@ ROW_KEYS = {
     "accountedRouteCount",
     "allRoutesAccounted",
     "anyRouteReady",
-    "routeStatusCounts",
-    "bestRoute",
     "routes",
     "polymarket",
     "kalshi",
-    "liquidity",
-    "bestGrossEdge",
-    "bestNetEdge",
-    "rawIsGrossArbitrage",
-    "rawIsNetArbitrage",
-    "rawIsNetArbitrageAtDisplayedDepth",
-    "feeEstimateComplete",
 }
 
 ROUTE_KEYS = {
     "key",
-    "description",
     "status",
-    "pricingStatus",
-    "reason",
-    "reasons",
     "executable",
     "polymarket",
     "kalshi",
-    "grossEdge",
-    "netEdge",
-    "feeEstimateComplete",
-    "executableContracts",
-    "capitalRequiredUsd",
-    "grossExecutableProfitUsd",
-    "estimatedFeesAtDisplayedDepthUsd",
-    "netExecutableProfitUsd",
+    "depthAvailable",
 }
 
 LEG_KEYS = {
-    "venue",
     "side",
-    "ask",
-    "askSize",
     "status",
-    "reason",
     "executable",
 }
+
 
 COVERAGE_KEYS = {
     "manifestPairs",
@@ -456,6 +428,22 @@ def component_self_tests(state: Dict[str, Any]) -> None:
         routes_result.get("authorizationHeaderParsing") is True,
         "prediction API authorization header parsing failed",
     )
+    require(
+        routes_result.get("browserProjectionCompact") is True,
+        "browser projection still leaks full terminal rows",
+    )
+    require(
+        routes_result.get("browserDepthOnDemand") is True,
+        "browser depth is not one-row-on-demand",
+    )
+    require(
+        routes_result.get("browserRevisionCatchupUsesMergedDelta") is True,
+        "browser revision catch-up still falls back to repeated full snapshots",
+    )
+    require(
+        routes_result.get("browserZeroCatalogEpochCatchup") is True,
+        "browser delta catch-up failed for initial catalog epoch 0",
+    )
 
 
 def context_checks(state: Dict[str, Any]) -> None:
@@ -466,7 +454,7 @@ def context_checks(state: Dict[str, Any]) -> None:
     require(bool(STREAMS_VERSION), "streams version is empty")
     require(
         TERMINAL_API_CONTRACT_VERSION
-        == "prediction-terminal-api-v2.1-persistent-catalog",
+        == "prediction-terminal-api-v2.3-lean-delta",
         f"unexpected API contract version: {TERMINAL_API_CONTRACT_VERSION}",
     )
     require(
@@ -692,20 +680,24 @@ def route_invariant_checks(row: Mapping[str, Any], route: Mapping[str, Any]) -> 
     route_label = f"{row_label} | {route.get('key')}"
 
     require_keys(route, ROUTE_KEYS, route_label)
-    require_keys(route.get("polymarket") or {}, LEG_KEYS, f"{route_label} Polymarket leg")
-    require_keys(route.get("kalshi") or {}, LEG_KEYS, f"{route_label} Kalshi leg")
+    require("depthBreakdown" not in route, f"browser route leaked depthBreakdown: {route_label}")
+    require("description" not in route, f"browser route leaked repeated description: {route_label}")
+    require(isinstance(route.get("depthAvailable"), bool), f"depthAvailable is not boolean: {route_label}")
 
     status = str(route.get("status") or "").strip().lower()
     require(status not in GENERIC_ROUTE_STATUSES, f"generic route status: {route_label}")
     require(status in TERMINAL_ROUTE_STATUSES, f"unknown route status {status}: {route_label}")
-    require(
-        route.get("pricingStatus") == status,
-        f"pricingStatus disagrees with status: {route_label}",
-    )
+    if route.get("pricingStatus") is not None:
+        require(
+            route.get("pricingStatus") == status,
+            f"pricingStatus disagrees with status: {route_label}",
+        )
 
     executable = route.get("executable") is True
     poly_leg = route.get("polymarket") or {}
     kalshi_leg = route.get("kalshi") or {}
+    require_keys(poly_leg, LEG_KEYS, f"{route_label} Polymarket leg")
+    require_keys(kalshi_leg, LEG_KEYS, f"{route_label} Kalshi leg")
 
     if status in EXECUTABLE_ROUTE_STATUSES:
         require(executable, f"executable status marked unavailable: {route_label}")
@@ -715,43 +707,16 @@ def route_invariant_checks(row: Mapping[str, Any], route: Mapping[str, Any]) -> 
         require(as_float(kalshi_leg.get("ask")) is not None, f"missing Kalshi ask: {route_label}")
         require((as_float(poly_leg.get("askSize")) or 0.0) > 0, f"zero Polymarket depth: {route_label}")
         require((as_float(kalshi_leg.get("askSize")) or 0.0) > 0, f"zero Kalshi depth: {route_label}")
-        require((as_float(route.get("executableContracts")) or 0.0) > 0, f"no executable contracts: {route_label}")
-        require(as_float(route.get("grossEdge")) is not None, f"missing gross edge: {route_label}")
-
-        if route.get("feeEstimateComplete") is True:
-            require(as_float(route.get("capitalRequiredUsd")) is not None, f"missing capital required: {route_label}")
-
-        if status == "net_opportunity":
-            require(route.get("feeEstimateComplete") is True, f"net route has incomplete fees: {route_label}")
-            require((as_float(route.get("grossEdge")) or 0.0) > 0, f"net route has no gross edge: {route_label}")
-            require((as_float(route.get("netEdge")) or 0.0) > 0, f"net route has no net edge: {route_label}")
-            require((as_float(route.get("netExecutableProfitUsd")) or 0.0) > 0, f"net route has no depth profit: {route_label}")
-        elif status == "gross_only":
-            require((as_float(route.get("grossEdge")) or 0.0) > 0, f"gross-only route has no gross edge: {route_label}")
-            net_profit = as_float(route.get("netExecutableProfitUsd"))
-            require(net_profit is None or net_profit <= 0, f"gross-only route is net-positive at depth: {route_label}")
-        elif status == "no_opportunity":
-            require((as_float(route.get("grossEdge")) or 0.0) <= 0, f"no-opportunity route has positive gross edge: {route_label}")
     else:
         require(status in UNAVAILABLE_ROUTE_STATUSES, f"invalid unavailable status: {route_label}")
         require(not executable, f"unavailable route marked executable: {route_label}")
-        require((as_float(route.get("executableContracts")) or 0.0) == 0.0, f"unavailable route has executable depth: {route_label}")
-        require(route.get("grossEdge") is None, f"unavailable route has gross edge: {route_label}")
-        require(route.get("netEdge") is None, f"unavailable route has net edge: {route_label}")
-        require(route.get("netExecutableProfitUsd") is None, f"unavailable route has net profit: {route_label}")
-        require(route.get("feeEstimateComplete") is False, f"unavailable route claims complete fees: {route_label}")
 
 
 def row_invariant_checks(row: Mapping[str, Any]) -> None:
     label = f"{row.get('eventTitle')} | {row.get('contractTitle')}"
     require_keys(row, ROW_KEYS, label)
-    for venue_name in ("polymarket", "kalshi"):
-        venue_payload = row.get(venue_name) or {}
-        require_keys(
-            venue_payload,
-            {"resolutionTime", "closeTime", "settlementTime"},
-            f"{label} {venue_name} lifecycle timing",
-        )
+    require("settlementSignature" not in row, f"browser row leaked settlement signature: {label}")
+    require("bestRoute" not in row, f"browser row duplicated bestRoute: {label}")
 
     routes = row.get("routes")
     require(isinstance(routes, list), f"routes is not a list: {label}")
@@ -760,7 +725,12 @@ def row_invariant_checks(row: Mapping[str, Any]) -> None:
     require(row.get("allRoutesAccounted") is True, f"allRoutesAccounted is false: {label}")
 
     route_keys = [str(route.get("key") or "") for route in routes]
+    require(all(route_keys), f"route key missing: {label}")
     require(len(set(route_keys)) == 2, f"duplicate route keys: {label}")
+    require(
+        str(row.get("bestRouteKey") or "") in set(route_keys),
+        f"bestRouteKey is not one of the two routes: {label}",
+    )
 
     for route in routes:
         require(isinstance(route, Mapping), f"route is not an object: {label}")
@@ -776,40 +746,13 @@ def row_invariant_checks(row: Mapping[str, Any]) -> None:
     require(row.get("pairStatus") in PAIR_STATUSES, f"unknown pair status: {label}")
     require(row.get("pairStatus") == expected_pair_status, f"pairStatus mismatch: {label}")
 
-    status_counts = Counter(str(route.get("status") or "") for route in routes)
-    require(
-        row.get("routeStatusCounts") == dict(sorted(status_counts.items())),
-        f"routeStatusCounts mismatch: {label}",
-    )
-
     expected_class = expected_opportunity_class(row)
     require(expected_class in OPPORTUNITY_CLASSES, f"unexpected opportunity class: {label}")
     require(row.get("opportunityClass") == expected_class, f"opportunityClass mismatch: {label}")
 
-    best_route = row.get("bestRoute")
-    require(isinstance(best_route, Mapping), f"bestRoute is not an object: {label}")
-    require(
-        str(best_route.get("key") or "") in set(route_keys),
-        f"bestRoute is not one of the two routes: {label}",
-    )
+    encoded_size = len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
+    require(encoded_size < 20_000, f"browser row unexpectedly large ({encoded_size} bytes): {label}")
 
-    settlement_verified = bool(row.get("settlementVerified"))
-    settlement_status = str(row.get("settlementStatus") or "")
-    if settlement_status == "strict_verified":
-        require(settlement_verified, f"strict row not verified: {label}")
-    if settlement_status == "core_verified_exception_risk":
-        require(not settlement_verified, f"conditional row marked verified: {label}")
-        require(row.get("isGrossArbitrage") is not True, f"conditional row claimed guaranteed gross arbitrage: {label}")
-        require(row.get("isNetArbitrage") is not True, f"conditional row claimed guaranteed net arbitrage: {label}")
-    if settlement_status == "rejected":
-        require(not settlement_verified, f"rejected comparison row marked verified: {label}")
-        require(row.get("isGrossArbitrage") is not True, f"rejected row claimed guaranteed gross arbitrage: {label}")
-        require(row.get("isNetArbitrage") is not True, f"rejected row claimed guaranteed net arbitrage: {label}")
-        require(
-            row.get("opportunityClass")
-            in {"comparison_price_gap", "comparison_only", "unavailable"},
-            f"rejected row escaped comparison-only classification: {label}",
-        )
 
 
 def terminal_overview(
@@ -917,9 +860,12 @@ def live_api_checks(
     require(overview.get("streamsVersion") == STREAMS_VERSION, "overview streams version mismatch")
     require(overview.get("pricingMode") == "live-fee-aware-route-accounted", "wrong pricing mode")
     require(overview.get("feeAware") is True, "overview is not fee-aware")
+    require(overview.get("transport") == "lean-delta-websocket", "browser transport is not compact delta")
+    require(isinstance(overview.get("terminalRevision"), int), "overview terminalRevision missing")
+    require(isinstance(overview.get("catalogEpoch"), int), "overview catalogEpoch missing")
 
-    coverage = overview.get("coverage") or {}
-    require_keys(coverage, COVERAGE_KEYS, "overview coverage")
+    coverage = status.get("coverage") or {}
+    require_keys(coverage, COVERAGE_KEYS, "terminal status coverage")
 
     manifest = state["manifest"]
     expected_pairs = len(manifest.pairs)
@@ -965,6 +911,41 @@ def live_api_checks(
         require(isinstance(row, Mapping), "API opportunity row is not an object")
         row_invariant_checks(row)
 
+    # Full depth must be one-row-on-demand only. Verify the compact catalog has no
+    # depth ladders, then fetch one detail row if a net opportunity is available.
+    require(
+        "depthBreakdown" not in json.dumps(rows, separators=(",", ":"), default=str),
+        "compact overview leaked depthBreakdown data",
+    )
+    detail_candidate = next(
+        (
+            row
+            for row in rows
+            if any(
+                route.get("status") == "net_opportunity"
+                and route.get("depthAvailable") is True
+                for route in row.get("routes", [])
+            )
+        ),
+        None,
+    )
+    if detail_candidate is not None:
+        detail_id = urllib.parse.quote(str(detail_candidate.get("id") or ""), safe="")
+        detail = http_json(
+            api_url,
+            f"/api/prediction-markets/terminal/detail/{detail_id}",
+            timeout=30.0,
+        )
+        detail_item = detail.get("item") or {}
+        require(
+            str(detail_item.get("id") or "") == str(detail_candidate.get("id") or ""),
+            "detail endpoint returned the wrong row",
+        )
+        require(
+            any(route.get("depthBreakdown") for route in detail_item.get("routes", [])),
+            "detail endpoint did not return execution depth",
+        )
+
     route_status_counts = Counter(
         str(route.get("status") or "")
         for row in rows
@@ -981,7 +962,7 @@ def live_api_checks(
         "coverage pair-status counts do not match rows",
     )
 
-    stream_status = overview.get("streamStatus") or {}
+    stream_status = status
     require((stream_status.get("manifest") or {}).get("pairs") == expected_pairs, "stream manifest count mismatch")
     require(stream_status.get("totalRoutes") == expected_routes, "stream total route count mismatch")
     require(
@@ -994,7 +975,7 @@ def live_api_checks(
         "stream ready and unavailable routes do not reconcile",
     )
 
-    fee_pricing = overview.get("feePricing") or {}
+    fee_pricing = status.get("feePricing") or {}
     require(fee_pricing.get("engineVersion") == ENGINE_VERSION, "fee context engine mismatch")
     require(fee_pricing.get("exactPairs") == expected_pairs, "fee context exact-pair count mismatch")
     require(

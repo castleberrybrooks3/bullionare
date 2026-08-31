@@ -18,14 +18,13 @@ const API_BASE = (
 ).replace(/\/+$/, "");
 
 const API_CONTRACT_VERSION =
-  "prediction-terminal-api-v2.1-persistent-catalog";
+  "prediction-terminal-api-v2.3-lean-delta";
 const PREDICTION_UI_VERSION =
-  "prediction-ui-v4.1-persistent-socket-soccer500";
+  "prediction-ui-v4.3-lean-delta-on-demand-depth";
 
 const TERMINAL_LIMIT = 5000;
-const HTTP_FALLBACK_INTERVAL_MS = 5000;
 const WS_RECONNECT_DELAY_MS = 1500;
-const READINESS_INTERVAL_MS = 30000;
+const READINESS_INTERVAL_MS = 60000;
 const LIST_PAGE_SIZE = 180;
 
 const WS_AUTH_PROTOCOL = "bullionaire-v1";
@@ -1182,16 +1181,223 @@ const isStrictGrossOpportunity = (
   );
 
 const getBestRoute = (item) => {
-  if (item?.bestRoute) {
-    return item.bestRoute;
-  }
-
   const routes =
     Array.isArray(item?.routes)
       ? item.routes
       : [];
 
+  const bestRouteKey =
+    String(
+      item?.bestRouteKey ||
+        item?.bestRoute?.key ||
+        ""
+    );
+
+  if (bestRouteKey) {
+    const matched = routes.find(
+      (route) =>
+        String(route?.key || "") ===
+        bestRouteKey
+    );
+
+    if (matched) {
+      return matched;
+    }
+  }
+
+  if (item?.bestRoute) {
+    return item.bestRoute;
+  }
+
   return routes[0] || {};
+};
+
+const mergeLiveRow = (current, incoming) => {
+  if (!current) return incoming;
+  if (!incoming) return current;
+
+  const currentRoutes =
+    Array.isArray(current?.routes)
+      ? current.routes
+      : [];
+  const incomingRoutes =
+    Array.isArray(incoming?.routes)
+      ? incoming.routes
+      : null;
+
+  let routes = currentRoutes;
+  if (incomingRoutes) {
+    const byKey = new Map(
+      currentRoutes.map((route) => [
+        String(route?.key || ""),
+        route,
+      ])
+    );
+
+    routes = incomingRoutes.map((route) => {
+      const previous =
+        byKey.get(
+          String(route?.key || "")
+        ) || {};
+      return {
+        ...previous,
+        ...route,
+        polymarket: {
+          ...(previous?.polymarket || {}),
+          ...(route?.polymarket || {}),
+        },
+        kalshi: {
+          ...(previous?.kalshi || {}),
+          ...(route?.kalshi || {}),
+        },
+      };
+    });
+  }
+
+  return {
+    ...current,
+    ...incoming,
+    polymarket: {
+      ...(current?.polymarket || {}),
+      ...(incoming?.polymarket || {}),
+    },
+    kalshi: {
+      ...(current?.kalshi || {}),
+      ...(incoming?.kalshi || {}),
+    },
+    yes: {
+      ...(current?.yes || {}),
+      ...(incoming?.yes || {}),
+    },
+    no: {
+      ...(current?.no || {}),
+      ...(incoming?.no || {}),
+    },
+    ...(incomingRoutes
+      ? { routes }
+      : {}),
+  };
+};
+
+const mergeRowsById = (
+  currentRows,
+  changedRows,
+  removedIds = []
+) => {
+  const removed = new Set(
+    (removedIds || []).map(String)
+  );
+  const byId = new Map();
+  const order = [];
+
+  (currentRows || []).forEach(
+    (row) => {
+      const id = String(
+        row?.id || ""
+      );
+      if (!id || removed.has(id)) {
+        return;
+      }
+      byId.set(id, row);
+      order.push(id);
+    }
+  );
+
+  (changedRows || []).forEach(
+    (row) => {
+      const id = String(
+        row?.id || ""
+      );
+      if (!id || removed.has(id)) {
+        return;
+      }
+      if (!byId.has(id)) {
+        order.push(id);
+      }
+      byId.set(
+        id,
+        mergeLiveRow(
+          byId.get(id),
+          row
+        )
+      );
+    }
+  );
+
+  return order
+    .map((id) => byId.get(id))
+    .filter(Boolean);
+};
+
+const mergeDetailedRowWithLiveRow = (
+  detailRow,
+  liveRow
+) => {
+  if (!detailRow) return liveRow;
+  if (!liveRow) return detailRow;
+
+  const detailRoutes = new Map(
+    (Array.isArray(detailRow?.routes)
+      ? detailRow.routes
+      : []
+    ).map((route) => [
+      String(route?.key || ""),
+      route,
+    ])
+  );
+
+  const liveRoutes =
+    Array.isArray(liveRow?.routes)
+      ? liveRow.routes
+      : [];
+
+  const routes = liveRoutes.map(
+    (liveRoute) => {
+      const detailRoute =
+        detailRoutes.get(
+          String(
+            liveRoute?.key || ""
+          )
+        ) || {};
+
+      return {
+        ...detailRoute,
+        ...liveRoute,
+        depthBreakdown:
+          Array.isArray(
+            detailRoute
+              ?.depthBreakdown
+          )
+            ? detailRoute.depthBreakdown
+            : [],
+        depthBreakdownTruncated:
+          Boolean(
+            detailRoute
+              ?.depthBreakdownTruncated
+          ),
+      };
+    }
+  );
+
+  return {
+    ...detailRow,
+    ...liveRow,
+    polymarket: {
+      ...(detailRow?.polymarket || {}),
+      ...(liveRow?.polymarket || {}),
+    },
+    kalshi: {
+      ...(detailRow?.kalshi || {}),
+      ...(liveRow?.kalshi || {}),
+    },
+    routes,
+    bestRoute: null,
+    bestRouteKey:
+      liveRow?.bestRouteKey ||
+      detailRow?.bestRoute?.key ||
+      detailRow?.bestRouteKey ||
+      "",
+  };
 };
 
 const getRouteLeg = (
@@ -4663,10 +4869,11 @@ function NetArbitrageCard({
         </div>
       </div>
 
-      {Array.isArray(
+      {route?.depthAvailable === true ||
+      (Array.isArray(
         route?.depthBreakdown
       ) &&
-      route.depthBreakdown.length ? (
+        route.depthBreakdown.length) ? (
         <button
           type="button"
           onClick={onOpen}
@@ -5091,6 +5298,16 @@ function PredictionMarkets() {
   ] = useState(null);
 
   const [
+    selectedNetDetail,
+    setSelectedNetDetail,
+  ] = useState(null);
+
+  const [
+    selectedNetDetailLoading,
+    setSelectedNetDetailLoading,
+  ] = useState(false);
+
+  const [
     nowMs,
     setNowMs,
   ] = useState(
@@ -5183,6 +5400,83 @@ function PredictionMarkets() {
       }
 
       setPayload(body);
+      setError("");
+    }, []);
+
+  const applyDelta =
+    useCallback((body) => {
+      if (
+        body?.apiContractVersion &&
+        body.apiContractVersion !==
+          API_CONTRACT_VERSION
+      ) {
+        throw new Error(
+          `Unsupported API contract ${body.apiContractVersion}. Expected ${API_CONTRACT_VERSION}.`
+        );
+      }
+
+      setPayload((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const currentEpoch =
+          Number(
+            current?.catalogEpoch
+          );
+        const deltaEpoch =
+          Number(
+            body?.catalogEpoch
+          );
+
+        if (
+          Number.isFinite(
+            currentEpoch
+          ) &&
+          Number.isFinite(
+            deltaEpoch
+          ) &&
+          currentEpoch !==
+            deltaEpoch
+        ) {
+          return current;
+        }
+
+        return {
+          ...current,
+          generatedAt:
+            body?.generatedAt ||
+            current?.generatedAt,
+          terminalRevision:
+            body?.terminalRevision ??
+            current?.terminalRevision,
+          catalogEpoch:
+            body?.catalogEpoch ??
+            current?.catalogEpoch,
+          streamStatus:
+            body?.streamStatus ||
+            current?.streamStatus,
+          opportunities:
+            mergeRowsById(
+              current?.opportunities ||
+                [],
+              body?.opportunities ||
+                [],
+              body?.removedOpportunityIds ||
+                []
+            ),
+          financeInventory:
+            mergeRowsById(
+              current?.financeInventory ||
+                [],
+              body?.financeInventory ||
+                [],
+              body?.removedFinanceInventoryIds ||
+                []
+            ),
+        };
+      });
+
       setError("");
     }, []);
 
@@ -5281,8 +5575,8 @@ function PredictionMarkets() {
   // the socket effect.
   const applyPayloadRef =
     useRef(applyPayload);
-  const loadTerminalRef =
-    useRef(loadTerminal);
+  const applyDeltaRef =
+    useRef(applyDelta);
 
   useEffect(() => {
     applyPayloadRef.current =
@@ -5290,9 +5584,9 @@ function PredictionMarkets() {
   }, [applyPayload]);
 
   useEffect(() => {
-    loadTerminalRef.current =
-      loadTerminal;
-  }, [loadTerminal]);
+    applyDeltaRef.current =
+      applyDelta;
+  }, [applyDelta]);
 
   const handleManualRefresh =
     useCallback(async () => {
@@ -5315,7 +5609,8 @@ function PredictionMarkets() {
     ]);
 
   useEffect(() => {
-    loadTerminal();
+    // The WebSocket supplies the initial compact catalog. Do not download a
+    // duplicate full terminal payload over HTTP on page load.
     loadReadiness();
 
     const readinessTimer =
@@ -5328,10 +5623,7 @@ function PredictionMarkets() {
       window.clearInterval(
         readinessTimer
       );
-  }, [
-    loadTerminal,
-    loadReadiness,
-  ]);
+  }, [loadReadiness]);
 
   useEffect(() => {
     let cancelled = false;
@@ -5427,6 +5719,7 @@ function PredictionMarkets() {
 
           if (
             [
+              "terminal_snapshot",
               "terminal_overview",
               "finance_overview",
             ].includes(
@@ -5439,6 +5732,14 @@ function PredictionMarkets() {
             );
             setIsLoading(
               false
+            );
+          } else if (
+            message?.type ===
+              "terminal_delta" &&
+            message?.payload
+          ) {
+            applyDeltaRef.current(
+              message.payload
             );
           } else if (
             message?.type ===
@@ -5483,20 +5784,6 @@ function PredictionMarkets() {
 
     connect();
 
-    const fallbackTimer =
-      window.setInterval(
-        () => {
-          if (
-            !socketOpen &&
-            document.visibilityState ===
-              "visible"
-          ) {
-            loadTerminalRef.current();
-          }
-        },
-        HTTP_FALLBACK_INTERVAL_MS
-      );
-
     return () => {
       cancelled = true;
       socketOpen = false;
@@ -5506,10 +5793,6 @@ function PredictionMarkets() {
           reconnectTimer
         );
       }
-
-      window.clearInterval(
-        fallbackTimer
-      );
 
       socket?.close();
     };
@@ -5617,6 +5900,32 @@ function PredictionMarkets() {
         selectedNetOpportunityId,
       ]
     );
+
+  const selectedNetDisplayItem =
+    useMemo(() => {
+      if (
+        !selectedNetDetail ||
+        String(
+          selectedNetDetail?.id ||
+            ""
+        ) !==
+          String(
+            selectedNetOpportunityId ||
+              ""
+          )
+      ) {
+        return selectedNetItem;
+      }
+
+      return mergeDetailedRowWithLiveRow(
+        selectedNetDetail,
+        selectedNetItem
+      );
+    }, [
+      selectedNetDetail,
+      selectedNetItem,
+      selectedNetOpportunityId,
+    ]);
 
   const manifestSummary =
     payload?.streamStatus
@@ -6348,16 +6657,77 @@ function PredictionMarkets() {
       setSelectedNetOpportunityId(
         id
       );
+      setSelectedNetDetail(null);
+      setSelectedNetDetailLoading(
+        true
+      );
       window.scrollTo({
         top: 0,
         behavior: "smooth",
       });
+
+      authenticatedFetch(
+        `${API_BASE}/api/prediction-markets/terminal/detail/${encodeURIComponent(
+          id
+        )}`,
+        {
+          cache: "no-store",
+          headers: {
+            Accept:
+              "application/json",
+          },
+        }
+      )
+        .then(async (response) => {
+          const body =
+            await response
+              .json()
+              .catch(() => ({}));
+
+          if (!response.ok) {
+            throw new Error(
+              body?.detail ||
+                "Could not load execution depth."
+            );
+          }
+
+          if (
+            body?.apiContractVersion &&
+            body.apiContractVersion !==
+              API_CONTRACT_VERSION
+          ) {
+            throw new Error(
+              `Unsupported API contract ${body.apiContractVersion}. Expected ${API_CONTRACT_VERSION}.`
+            );
+          }
+
+          if (body?.item) {
+            setSelectedNetDetail(
+              body.item
+            );
+          }
+        })
+        .catch((detailError) => {
+          setError(
+            detailError?.message ||
+              "Could not load execution depth."
+          );
+        })
+        .finally(() => {
+          setSelectedNetDetailLoading(
+            false
+          );
+        });
     }, []);
 
   const closeNetOpportunity =
     useCallback(() => {
       setSelectedNetOpportunityId(
         null
+      );
+      setSelectedNetDetail(null);
+      setSelectedNetDetailLoading(
+        false
       );
       window.scrollTo({
         top: 0,
@@ -6367,11 +6737,28 @@ function PredictionMarkets() {
 
   if (
     selectedNetOpportunityId &&
+    selectedNetItem &&
+    selectedNetDetailLoading
+  ) {
+    return (
+      <section className="prediction-markets-page">
+        <div className="pm-empty-state">
+          Loading execution depth…
+        </div>
+      </section>
+    );
+  }
+
+  if (
+    selectedNetOpportunityId &&
     selectedNetItem
   ) {
     return (
       <NetArbitrageDetail
-        item={selectedNetItem}
+        item={
+          selectedNetDisplayItem ||
+          selectedNetItem
+        }
         nowMs={nowMs}
         onBack={
           closeNetOpportunity
@@ -6728,7 +7115,7 @@ function PredictionMarkets() {
         <small>
           {browserFeed === "live"
             ? `LIVE FEED · ${feedAgeLabel}`
-            : "HTTP FALLBACK"}
+            : "RECONNECTING"}
         </small>
       </div>
 

@@ -49,7 +49,7 @@ from prediction_market_streams import (
 LOGGER = logging.getLogger("prediction_markets_routes")
 
 TERMINAL_API_CONTRACT_VERSION = (
-    "prediction-terminal-api-v2.1-persistent-catalog"
+    "prediction-terminal-api-v2.3-lean-delta"
 )
 
 # These values describe economic outcomes for executable routes. Every other
@@ -97,6 +97,16 @@ _snapshot_watcher_task: Optional[asyncio.Task[Any]] = None
 _terminal_state_condition = asyncio.Condition()
 _terminal_payload_cache: Dict[Tuple[Any, ...], Tuple[int, Dict[str, Any]]] = {}
 _terminal_ws_message_cache: Dict[Tuple[Any, ...], Tuple[int, str]] = {}
+
+# Browser transport is deliberately separate from the full internal terminal state.
+# The internal state keeps complete depth/accounting for one-row detail requests,
+# while browsers receive one compact catalog snapshot followed by compact deltas.
+_terminal_catalog_epoch: int = 0
+_terminal_browser_delta: Optional[Dict[str, Any]] = None
+# Keep a bounded history of compact deltas so a browser that falls a few
+# revisions behind can catch up with one merged delta instead of forcing a
+# full-catalog snapshot. This is the key outbound-bandwidth safety net.
+_terminal_browser_delta_history = deque(maxlen=512)
 
 # A committed database snapshot refresh must never force a Render restart or
 # blank the browser terminal. The watcher builds a replacement stream/pricing
@@ -246,7 +256,7 @@ PREDICTION_HTTP_REQUESTS_PER_MINUTE = max(
     30, env_int("PREDICTION_HTTP_REQUESTS_PER_MINUTE", 180)
 )
 PREDICTION_WS_MAX_CONNECTIONS_PER_USER = max(
-    1, env_int("PREDICTION_WS_MAX_CONNECTIONS_PER_USER", 3)
+    1, env_int("PREDICTION_WS_MAX_CONNECTIONS_PER_USER", 1)
 )
 _prediction_http_buckets: Dict[str, Any] = {}
 _prediction_http_rate_lock = asyncio.Lock()
@@ -529,6 +539,8 @@ async def prediction_market_lifespan(_app):
     global _terminal_state_signature_value
     global _terminal_state_revision
     global _terminal_state_error
+    global _terminal_catalog_epoch
+    global _terminal_browser_delta
     global _terminal_publisher_task
     global _snapshot_watcher_task
     global _terminal_reload_in_progress
@@ -552,6 +564,9 @@ async def prediction_market_lifespan(_app):
     _terminal_state_signature_value = None
     _terminal_state_revision = 0
     _terminal_state_error = None
+    _terminal_catalog_epoch = 0
+    _terminal_browser_delta = None
+    _terminal_browser_delta_history.clear()
     _terminal_reload_in_progress = False
     _terminal_reload_started_at = None
     _terminal_reload_error = None
@@ -661,6 +676,8 @@ async def prediction_market_lifespan(_app):
         _initial_traffic_ready = False
         _terminal_reload_in_progress = False
         _terminal_state = None
+        _terminal_browser_delta = None
+        _terminal_browser_delta_history.clear()
         _terminal_payload_cache.clear()
         _terminal_ws_message_cache.clear()
 
@@ -990,24 +1007,32 @@ async def _build_incremental_terminal_state(
         fee_context,
     )
 
+    changed_pair_ids: List[str] = []
     for snapshot, row in zip(dirty_snapshots, dirty_rows):
         pair_id = str(snapshot.get("id") or "")
         if not pair_id:
             continue
+        new_signature = _terminal_row_signature(row)
+        if row_signature_by_pair_id.get(pair_id) != new_signature:
+            changed_pair_ids.append(pair_id)
         snapshot_by_pair_id[pair_id] = snapshot
         row_by_pair_id[pair_id] = row
-        row_signature_by_pair_id[pair_id] = _terminal_row_signature(row)
+        row_signature_by_pair_id[pair_id] = new_signature
 
     dirty_inventory_rows = manager.store.inventory_snapshots(
         dirty_inventory,
         refresh_health=False,
     )
+    changed_inventory_ids: List[str] = []
     for row in dirty_inventory_rows:
         item_id = str(row.get("id") or "")
         if not item_id:
             continue
+        new_signature = _terminal_row_signature(row)
+        if inventory_signature_by_id.get(item_id) != new_signature:
+            changed_inventory_ids.append(item_id)
         inventory_snapshot_by_id[item_id] = row
-        inventory_signature_by_id[item_id] = _terminal_row_signature(row)
+        inventory_signature_by_id[item_id] = new_signature
 
     pair_order = [pair.id for pair in manager.manifest.pairs]
     snapshots = [
@@ -1036,6 +1061,8 @@ async def _build_incremental_terminal_state(
         "coverage": coverage,
         "rows": rows,
         "financeInventory": inventory_rows,
+        "_changedPairIds": changed_pair_ids,
+        "_changedInventoryIds": changed_inventory_ids,
     }
 
 
@@ -1141,6 +1168,8 @@ async def _hot_reload_prediction_terminal(target_snapshot: str) -> bool:
     global _terminal_state_signature_value
     global _terminal_state_revision
     global _terminal_state_error
+    global _terminal_catalog_epoch
+    global _terminal_browser_delta
     global _terminal_publisher_task
     global _terminal_reload_in_progress
     global _terminal_reload_started_at
@@ -1245,6 +1274,9 @@ async def _hot_reload_prediction_terminal(target_snapshot: str) -> bool:
             _terminal_state = candidate_state
             _terminal_state_signature_value = _terminal_state_signature(candidate_state)
             _terminal_state_revision += 1
+            _terminal_catalog_epoch += 1
+            _terminal_browser_delta = None
+            _terminal_browser_delta_history.clear()
             _terminal_state_error = None
             _terminal_payload_cache.clear()
             _terminal_ws_message_cache.clear()
@@ -1357,6 +1389,7 @@ async def _terminal_publisher_loop(
     global _terminal_state_signature_value
     global _terminal_state_revision
     global _terminal_state_error
+    global _terminal_browser_delta
     global _terminal_ready_at
     global _initial_traffic_ready
 
@@ -1454,9 +1487,21 @@ async def _terminal_publisher_loop(
             last_priced_store_revision = int(state.get("sourceRevision") or 0)
 
             if publish:
+                changed_pair_ids = tuple(state.pop("_changedPairIds", ()) or ())
+                changed_inventory_ids = tuple(
+                    state.pop("_changedInventoryIds", ()) or ()
+                )
                 _terminal_state = state
                 _terminal_state_signature_value = signature
                 _terminal_state_revision += 1
+                _terminal_browser_delta = _build_browser_delta_payload(
+                    state,
+                    changed_pair_ids=changed_pair_ids,
+                    changed_inventory_ids=changed_inventory_ids,
+                    terminal_revision=_terminal_state_revision,
+                    catalog_epoch=_terminal_catalog_epoch,
+                )
+                _terminal_browser_delta_history.append(_terminal_browser_delta)
                 _terminal_payload_cache.clear()
                 _terminal_ws_message_cache.clear()
                 _terminal_state_error = None
@@ -2263,6 +2308,644 @@ def _terminal_payload_cache_key(
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Browser bandwidth projection
+# ---------------------------------------------------------------------------
+# The engine keeps complete order-book/depth data in memory because pricing and
+# one-row execution detail need it. None of that bulk belongs in every browser
+# update. These projections intentionally contain only fields used by the list UI.
+_BROWSER_ROW_KEYS = (
+    "id",
+    "marketGroup",
+    "eventTitle",
+    "contractTitle",
+    "scheduledTime",
+    "resolutionTime",
+    "closeTime",
+    "settlementTime",
+    "eventKey",
+    "contractKey",
+    "pairRelationship",
+    "settlementStreamEligible",
+    "settlementVerified",
+    "settlementStatus",
+    "pairStatus",
+    "pricingStatus",
+    "readyRouteCount",
+    "accountedRouteCount",
+    "allRoutesAccounted",
+    "anyRouteReady",
+    "routeStatusCounts",
+    "opportunityClass",
+    "bestGrossEdge",
+    "bestNetEdge",
+    "rawIsGrossArbitrage",
+    "rawIsNetArbitrage",
+    "rawIsNetArbitrageAtDisplayedDepth",
+    "feeEstimateComplete",
+    "eventPhase",
+    # Optional classification metadata used by client-side tabs/search.
+    "family",
+    "category",
+    "subcategory",
+    "sport",
+    "sportName",
+    "league",
+    "leagueName",
+    "competition",
+    "competitionName",
+    "series",
+    "seriesTitle",
+    "seriesTicker",
+    "eventTicker",
+    "ticker",
+)
+
+_BROWSER_VENUE_KEYS = (
+    "marketId",
+    "eventId",
+    "marketTicker",
+    "eventTicker",
+    "seriesTicker",
+    "url",
+    "yesLabel",
+    "noLabel",
+    "yesAsk",
+    "noAsk",
+    "yesSize",
+    "noSize",
+    "resolutionTime",
+    "closeTime",
+    "settlementTime",
+    "category",
+    "subcategory",
+    "sport",
+    "league",
+    "slug",
+    "eventSlug",
+)
+
+_BROWSER_ROUTE_KEYS = (
+    "key",
+    "status",
+    "pricingStatus",
+    "reason",
+    "executable",
+    "pairedCost",
+    "grossEdge",
+    "polymarketEstimatedFeeUsd",
+    "kalshiEstimatedFeeUsd",
+    "estimatedFeesUsd",
+    "netEdge",
+    "netReturnPercent",
+    "rawIsGrossArbitrage",
+    "rawIsNetArbitrage",
+    "rawIsNetArbitrageAtDisplayedDepth",
+    "isGrossArbitrage",
+    "isNetArbitrage",
+    "isNetArbitrageAtDisplayedDepth",
+    "feeEstimateComplete",
+    "executableContracts",
+    "executableDepthUsd",
+    "capitalRequiredUsd",
+    "grossExecutableProfitUsd",
+    "estimatedFeesAtDisplayedDepthUsd",
+    "netExecutableProfitUsd",
+    "maxPositiveEdgeCapitalUsd",
+    "maxPositiveEdgeContracts",
+    "maxPositiveEdgeNetProfitUsd",
+    "maxPositiveEdgeReturnRate",
+)
+
+_BROWSER_LEG_KEYS = (
+    "venue",
+    "side",
+    "ask",
+    "askSize",
+    "status",
+    "reason",
+    "executable",
+)
+
+_BROWSER_DELTA_ROW_KEYS = (
+    "id",
+    "pairStatus",
+    "pricingStatus",
+    "readyRouteCount",
+    "accountedRouteCount",
+    "allRoutesAccounted",
+    "anyRouteReady",
+    "routeStatusCounts",
+    "opportunityClass",
+    "bestGrossEdge",
+    "bestNetEdge",
+    "rawIsGrossArbitrage",
+    "rawIsNetArbitrage",
+    "rawIsNetArbitrageAtDisplayedDepth",
+    "feeEstimateComplete",
+    "eventPhase",
+)
+
+_BROWSER_DELTA_VENUE_KEYS = (
+    "yesAsk",
+    "noAsk",
+    "yesSize",
+    "noSize",
+)
+
+_BROWSER_DELTA_ROUTE_KEYS = (
+    "key",
+    "status",
+    "pricingStatus",
+    "reason",
+    "executable",
+    "pairedCost",
+    "grossEdge",
+    "polymarketEstimatedFeeUsd",
+    "kalshiEstimatedFeeUsd",
+    "estimatedFeesUsd",
+    "netEdge",
+    "netReturnPercent",
+    "rawIsGrossArbitrage",
+    "rawIsNetArbitrage",
+    "rawIsNetArbitrageAtDisplayedDepth",
+    "isGrossArbitrage",
+    "isNetArbitrage",
+    "isNetArbitrageAtDisplayedDepth",
+    "feeEstimateComplete",
+    "executableContracts",
+    "executableDepthUsd",
+    "capitalRequiredUsd",
+    "grossExecutableProfitUsd",
+    "estimatedFeesAtDisplayedDepthUsd",
+    "netExecutableProfitUsd",
+    "maxPositiveEdgeCapitalUsd",
+    "maxPositiveEdgeContracts",
+    "maxPositiveEdgeNetProfitUsd",
+    "maxPositiveEdgeReturnRate",
+)
+
+_BROWSER_DELTA_LEG_KEYS = (
+    "side",
+    "ask",
+    "askSize",
+    "status",
+    "reason",
+    "executable",
+)
+
+_BROWSER_INVENTORY_KEYS = (
+    "id",
+    "venue",
+    "market_group",
+    "family",
+    "event_title",
+    "contract_title",
+    "external_market_id",
+    "external_event_id",
+    "close_time",
+    "resolution_time",
+    "liquidity",
+    "volume_24h",
+    "total_volume",
+    "open_interest",
+    "rank_score",
+    "subject_key",
+    "liveStatus",
+    "bestYesBid",
+    "bestYesAsk",
+    "bestNoBid",
+    "bestNoAsk",
+)
+
+
+def _browser_subset(mapping: Any, keys: Sequence[str]) -> Dict[str, Any]:
+    if not isinstance(mapping, Mapping):
+        return {}
+    result: Dict[str, Any] = {}
+    for key in keys:
+        if key not in mapping:
+            continue
+        value = mapping.get(key)
+        # Omit bulky/empty placeholders while preserving False and numeric zero.
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        result[key] = value
+    return result
+
+
+def _compact_browser_leg(value: Any) -> Dict[str, Any]:
+    return _browser_subset(value, _BROWSER_LEG_KEYS)
+
+
+def _compact_browser_route(route: Any) -> Dict[str, Any]:
+    compact = _browser_subset(route, _BROWSER_ROUTE_KEYS)
+    if not isinstance(route, Mapping):
+        return compact
+    polymarket_leg = _compact_browser_leg(route.get("polymarket"))
+    kalshi_leg = _compact_browser_leg(route.get("kalshi"))
+    if polymarket_leg:
+        compact["polymarket"] = polymarket_leg
+    if kalshi_leg:
+        compact["kalshi"] = kalshi_leg
+    # The list UI only needs to know whether a detail chart exists. The actual
+    # depth ladder is fetched only after the user opens this one opportunity.
+    compact["depthAvailable"] = bool(route.get("depthBreakdown"))
+    return compact
+
+
+def _compact_browser_venue(value: Any) -> Dict[str, Any]:
+    return _browser_subset(value, _BROWSER_VENUE_KEYS)
+
+
+def _compact_browser_row(row: Any) -> Dict[str, Any]:
+    compact = _browser_subset(row, _BROWSER_ROW_KEYS)
+    if not isinstance(row, Mapping):
+        return compact
+
+    polymarket = _compact_browser_venue(row.get("polymarket"))
+    kalshi = _compact_browser_venue(row.get("kalshi"))
+    if polymarket:
+        compact["polymarket"] = polymarket
+    if kalshi:
+        compact["kalshi"] = kalshi
+
+    routes = [
+        _compact_browser_route(route)
+        for route in (row.get("routes") or [])
+        if isinstance(route, Mapping)
+    ]
+    compact["routes"] = routes
+
+    best_route = row.get("bestRoute") or {}
+    best_key = str(best_route.get("key") or "") if isinstance(best_route, Mapping) else ""
+    if best_key:
+        compact["bestRouteKey"] = best_key
+    return compact
+
+
+def _compact_browser_delta_leg(value: Any) -> Dict[str, Any]:
+    return _browser_subset(value, _BROWSER_DELTA_LEG_KEYS)
+
+
+def _compact_browser_delta_route(route: Any) -> Dict[str, Any]:
+    compact = _browser_subset(route, _BROWSER_DELTA_ROUTE_KEYS)
+    if not isinstance(route, Mapping):
+        return compact
+    polymarket_leg = _compact_browser_delta_leg(route.get("polymarket"))
+    kalshi_leg = _compact_browser_delta_leg(route.get("kalshi"))
+    if polymarket_leg:
+        compact["polymarket"] = polymarket_leg
+    if kalshi_leg:
+        compact["kalshi"] = kalshi_leg
+    compact["depthAvailable"] = bool(route.get("depthBreakdown"))
+    return compact
+
+
+def _compact_browser_delta_venue(value: Any) -> Dict[str, Any]:
+    return _browser_subset(value, _BROWSER_DELTA_VENUE_KEYS)
+
+
+def _compact_browser_delta_row(row: Any) -> Dict[str, Any]:
+    compact = _browser_subset(row, _BROWSER_DELTA_ROW_KEYS)
+    if not isinstance(row, Mapping):
+        return compact
+    polymarket = _compact_browser_delta_venue(row.get("polymarket"))
+    kalshi = _compact_browser_delta_venue(row.get("kalshi"))
+    if polymarket:
+        compact["polymarket"] = polymarket
+    if kalshi:
+        compact["kalshi"] = kalshi
+    compact["routes"] = [
+        _compact_browser_delta_route(route)
+        for route in (row.get("routes") or [])
+        if isinstance(route, Mapping)
+    ]
+    best_route = row.get("bestRoute") or {}
+    best_key = str(best_route.get("key") or "") if isinstance(best_route, Mapping) else ""
+    if best_key:
+        compact["bestRouteKey"] = best_key
+    return compact
+
+
+def _compact_inventory_side(value: Any) -> Dict[str, Any]:
+    return _browser_subset(
+        value,
+        ("bestBid", "bestBidSize", "bestAsk", "bestAskSize"),
+    )
+
+
+def _compact_browser_inventory_row(row: Any) -> Dict[str, Any]:
+    compact = _browser_subset(row, _BROWSER_INVENTORY_KEYS)
+    if not isinstance(row, Mapping):
+        return compact
+    yes = _compact_inventory_side(row.get("yes"))
+    no = _compact_inventory_side(row.get("no"))
+    if yes:
+        compact["yes"] = yes
+    if no:
+        compact["no"] = no
+    # Deliberately omit askLevels and the duplicate raw Kalshi quote. Those were
+    # among the largest repeated objects in the old browser payload.
+    return compact
+
+
+def _compact_browser_delta_inventory_row(row: Any) -> Dict[str, Any]:
+    if not isinstance(row, Mapping):
+        return {}
+    compact = _browser_subset(
+        row,
+        (
+            "id",
+            "liveStatus",
+            "bestYesBid",
+            "bestYesAsk",
+            "bestNoBid",
+            "bestNoAsk",
+        ),
+    )
+    yes = _compact_inventory_side(row.get("yes"))
+    no = _compact_inventory_side(row.get("no"))
+    if yes:
+        compact["yes"] = yes
+    if no:
+        compact["no"] = no
+    return compact
+
+
+def _compact_browser_delta_stream_status(status: Any) -> Dict[str, Any]:
+    if not isinstance(status, Mapping):
+        return {}
+    return _browser_subset(status, ("venueConnected", "connectionCounts"))
+
+
+def _compact_browser_stream_status(status: Any) -> Dict[str, Any]:
+    if not isinstance(status, Mapping):
+        return {}
+    compact = _browser_subset(
+        status,
+        (
+            "manifest",
+            "venueConnected",
+            "connectionCounts",
+            "errors",
+        ),
+    )
+    return compact
+
+
+def _compact_terminal_payload(full_payload: Mapping[str, Any]) -> Dict[str, Any]:
+    market_group = str(
+        full_payload.get("marketGroup")
+        or (full_payload.get("filters") or {}).get("marketGroup")
+        or "all"
+    ).lower()
+
+    common = {
+        **terminal_version_payload(),
+        "generatedAt": full_payload.get("generatedAt") or utc_now_iso(),
+        "pricingMode": full_payload.get("pricingMode"),
+        "feeAware": full_payload.get("feeAware"),
+        "transport": "lean-delta-websocket",
+        "marketGroup": market_group,
+        "terminalRevision": _terminal_state_revision,
+        "catalogEpoch": _terminal_catalog_epoch,
+        "streamStatus": _compact_browser_stream_status(
+            full_payload.get("streamStatus") or {}
+        ),
+    }
+
+    if market_group in {"companies", "economics"}:
+        markets = [
+            _compact_browser_inventory_row(row)
+            for row in (full_payload.get("markets") or [])
+        ]
+        matched = [
+            _compact_browser_row(row)
+            for row in (full_payload.get("matchedOpportunities") or [])
+        ]
+        return {
+            **common,
+            "rowType": full_payload.get("rowType"),
+            "catalogRows": full_payload.get("catalogRows", len(markets)),
+            "returnedRows": len(markets),
+            "markets": markets,
+            "matchedOpportunities": matched,
+        }
+
+    opportunities = [
+        _compact_browser_row(row)
+        for row in (full_payload.get("opportunities") or [])
+    ]
+    finance_inventory = [
+        _compact_browser_inventory_row(row)
+        for row in (full_payload.get("financeInventory") or [])
+    ]
+    return {
+        **common,
+        "filters": full_payload.get("filters") or {"marketGroup": market_group},
+        "catalogRows": full_payload.get("catalogRows", len(opportunities)),
+        "matchedRowsBeforeLimit": full_payload.get(
+            "matchedRowsBeforeLimit", len(opportunities)
+        ),
+        "returnedRows": len(opportunities),
+        "opportunities": opportunities,
+        "financeInventory": finance_inventory,
+    }
+
+
+def build_terminal_browser_snapshot_payload(**params: Any) -> Dict[str, Any]:
+    """Return the only full-catalog payload allowed to leave the browser API."""
+    return _compact_terminal_payload(build_terminal_overview_payload(**params))
+
+
+def _build_browser_delta_payload(
+    state: Mapping[str, Any],
+    *,
+    changed_pair_ids: Sequence[str],
+    changed_inventory_ids: Sequence[str],
+    terminal_revision: int,
+    catalog_epoch: int,
+) -> Dict[str, Any]:
+    changed_pair_set = {str(value) for value in changed_pair_ids if value}
+    changed_inventory_set = {
+        str(value) for value in changed_inventory_ids if value
+    }
+    rows = [
+        _compact_browser_delta_row(row)
+        for row in (state.get("rows") or [])
+        if str(row.get("id") or "") in changed_pair_set
+    ]
+    inventory = [
+        _compact_browser_delta_inventory_row(row)
+        for row in (state.get("financeInventory") or [])
+        if str(row.get("id") or "") in changed_inventory_set
+    ]
+    # Deltas intentionally omit immutable titles, category metadata, lifecycle
+    # timestamps, manifest summaries, engine versions and depth ladders. The
+    # initial snapshot already supplied those once.
+    return {
+        "apiContractVersion": TERMINAL_API_CONTRACT_VERSION,
+        "generatedAt": state.get("generatedAt") or utc_now_iso(),
+        "terminalRevision": terminal_revision,
+        "catalogEpoch": catalog_epoch,
+        "streamStatus": _compact_browser_delta_stream_status(
+            state.get("streamStatus") or {}
+        ),
+        "opportunities": rows,
+        "financeInventory": inventory,
+        "removedOpportunityIds": [],
+        "removedFinanceInventoryIds": [],
+    }
+
+
+def build_terminal_browser_snapshot_message(**params: Any) -> str:
+    revision = _terminal_state_revision
+    cache_key = ("browser_snapshot",) + _terminal_payload_cache_key(**params)
+    cached = _terminal_ws_message_cache.get(cache_key)
+    if cached is not None and cached[0] == revision:
+        return cached[1]
+    message = json.dumps(
+        {
+            "type": "terminal_snapshot",
+            "payload": build_terminal_browser_snapshot_payload(**params),
+        },
+        separators=(",", ":"),
+        default=str,
+    )
+    if len(_terminal_ws_message_cache) >= TERMINAL_PAYLOAD_CACHE_MAX_ENTRIES:
+        _terminal_ws_message_cache.clear()
+    _terminal_ws_message_cache[cache_key] = (revision, message)
+    return message
+
+
+def build_terminal_browser_delta_message() -> Optional[str]:
+    payload = _terminal_browser_delta
+    if not isinstance(payload, dict):
+        return None
+    revision = int(payload.get("terminalRevision") or 0)
+    cache_key = ("browser_delta", revision)
+    cached = _terminal_ws_message_cache.get(cache_key)
+    if cached is not None and cached[0] == revision:
+        return cached[1]
+    message = json.dumps(
+        {"type": "terminal_delta", "payload": payload},
+        separators=(",", ":"),
+        default=str,
+    )
+    if len(_terminal_ws_message_cache) >= TERMINAL_PAYLOAD_CACHE_MAX_ENTRIES:
+        _terminal_ws_message_cache.clear()
+    _terminal_ws_message_cache[cache_key] = (revision, message)
+    return message
+
+
+def build_terminal_browser_catchup_delta_message(
+    previous_revision: int,
+    current_revision: int,
+    catalog_epoch: int,
+) -> Optional[str]:
+    """Merge every missed compact revision into one current-state delta.
+
+    Fast exchange updates can advance the singleton publisher several revisions
+    before one browser task gets CPU time. Missing a revision must never force a
+    multi-megabyte catalog resend. If the bounded history still contains the
+    complete gap, send one merged delta with the latest value for every row that
+    changed anywhere in that gap.
+    """
+    if previous_revision < 0 or current_revision <= previous_revision:
+        return None
+
+    needed = list(range(previous_revision + 1, current_revision + 1))
+    # IMPORTANT: catalog epoch 0 is the normal initial runtime epoch. Do not use
+    # ``value or -1`` here because integer 0 is falsy and would be rewritten to
+    # -1. That made every initial-runtime delta look like it belonged to the
+    # wrong catalog epoch, which forced a multi-megabyte terminal_snapshot on
+    # every live revision. Preserve zero explicitly.
+    def _history_int(item: Mapping[str, Any], key: str) -> int:
+        value = item.get(key)
+        if value is None:
+            return -1
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return -1
+
+    history_by_revision = {
+        _history_int(item, "terminalRevision"): item
+        for item in _terminal_browser_delta_history
+        if isinstance(item, Mapping)
+        and _history_int(item, "catalogEpoch") == catalog_epoch
+        and previous_revision
+        < _history_int(item, "terminalRevision")
+        <= current_revision
+    }
+    if any(revision not in history_by_revision for revision in needed):
+        return None
+
+    opportunity_by_id: Dict[str, Dict[str, Any]] = {}
+    inventory_by_id: Dict[str, Dict[str, Any]] = {}
+    removed_opportunities: Set[str] = set()
+    removed_inventory: Set[str] = set()
+    latest: Optional[Mapping[str, Any]] = None
+
+    for revision in needed:
+        item = history_by_revision[revision]
+        latest = item
+        for row in item.get("opportunities") or []:
+            if isinstance(row, Mapping):
+                row_id = str(row.get("id") or "")
+                if row_id:
+                    opportunity_by_id[row_id] = dict(row)
+        for row in item.get("financeInventory") or []:
+            if isinstance(row, Mapping):
+                row_id = str(row.get("id") or "")
+                if row_id:
+                    inventory_by_id[row_id] = dict(row)
+        removed_opportunities.update(
+            str(value) for value in (item.get("removedOpportunityIds") or []) if value
+        )
+        removed_inventory.update(
+            str(value) for value in (item.get("removedFinanceInventoryIds") or []) if value
+        )
+
+    if latest is None:
+        return None
+
+    payload = {
+        "apiContractVersion": TERMINAL_API_CONTRACT_VERSION,
+        "generatedAt": latest.get("generatedAt") or utc_now_iso(),
+        "terminalRevision": current_revision,
+        "catalogEpoch": catalog_epoch,
+        "streamStatus": latest.get("streamStatus") or {},
+        "opportunities": list(opportunity_by_id.values()),
+        "financeInventory": list(inventory_by_id.values()),
+        "removedOpportunityIds": sorted(removed_opportunities),
+        "removedFinanceInventoryIds": sorted(removed_inventory),
+    }
+    return json.dumps(
+        {"type": "terminal_delta", "payload": payload},
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def build_terminal_detail_payload(item_id: str) -> Dict[str, Any]:
+    """Return complete depth/accounting for one explicitly opened matched row."""
+    state = get_terminal_state()
+    requested = str(item_id or "").strip()
+    for row in state.get("rows") or []:
+        if str(row.get("id") or "") == requested:
+            return {
+                **terminal_version_payload(),
+                "generatedAt": state.get("generatedAt") or utc_now_iso(),
+                "terminalRevision": _terminal_state_revision,
+                "catalogEpoch": _terminal_catalog_epoch,
+                "item": row,
+            }
+    raise HTTPException(status_code=404, detail="Prediction-market row not found.")
+
+
 def _build_finance_overview_payload(
     *,
     market_group: str,
@@ -2462,7 +3145,9 @@ async def get_terminal_overview(
     limit: int = Query(2000, ge=1, le=5000),
     _user: Dict[str, Any] = Depends(require_prediction_user),
 ):
-    return build_terminal_overview_payload(
+    # Public HTTP never returns the full internal depth graph. This endpoint is
+    # now a compact recovery/bootstrap response; full depth is one-row-on-demand.
+    return build_terminal_browser_snapshot_payload(
         market_group=market_group,
         opportunity_type=opportunity_type,
         live_only=live_only,
@@ -2474,6 +3159,14 @@ async def get_terminal_overview(
         sort_by=sort_by,
         limit=limit,
     )
+
+
+@router.get("/terminal/detail/{item_id}")
+async def get_terminal_detail(
+    item_id: str,
+    _user: Dict[str, Any] = Depends(require_prediction_user),
+):
+    return build_terminal_detail_payload(item_id)
 
 
 def _query_bool(websocket: WebSocket, name: str, default: bool) -> bool:
@@ -2537,45 +3230,24 @@ async def terminal_websocket(websocket: WebSocket):
 
     await websocket.accept(subprotocol=selected_subprotocol)
 
-    market_group = websocket.query_params.get("market_group", "all")
-    if market_group not in {"all", "sports", "macro", "weather", "companies", "economics"}:
-        market_group = "all"
-
-    opportunity_type = websocket.query_params.get("opportunity_type", "all")
-    if opportunity_type not in TERMINAL_OPPORTUNITY_TYPES:
-        opportunity_type = "all"
-
-    sort_by = websocket.query_params.get("sort_by", "net_profit")
-    if sort_by not in {"edge", "net_profit", "event"}:
-        sort_by = "net_profit"
-
+    # Browser transport is intentionally one persistent all-market feed. Category
+    # changes are client-side filters, so one user never multiplies full catalog
+    # downloads or WebSocket connections by clicking around the terminal.
     params = {
-        "market_group": market_group,
-        "opportunity_type": opportunity_type,
-        "live_only": _query_bool(websocket, "live_only", False),
-        "executable_only": _query_bool(websocket, "executable_only", False),
-        "min_gross_edge": max(
-            -1.0,
-            min(1.0, _query_float(websocket, "min_gross_edge", -1.0)),
-        ),
-        "min_net_edge": max(
-            -1.0,
-            min(1.0, _query_float(websocket, "min_net_edge", -1.0)),
-        ),
-        "min_executable_contracts": max(
-            0.0,
-            _query_float(websocket, "min_executable_contracts", 0.0001),
-        ),
-        "min_net_profit_usd": _query_float(
-            websocket,
-            "min_net_profit_usd",
-            -1_000_000.0,
-        ),
-        "sort_by": sort_by,
-        "limit": max(1, min(5000, _query_int(websocket, "limit", 2000))),
+        "market_group": "all",
+        "opportunity_type": "all",
+        "live_only": False,
+        "executable_only": False,
+        "min_gross_edge": -1.0,
+        "min_net_edge": -1.0,
+        "min_executable_contracts": 0.0001,
+        "min_net_profit_usd": -1_000_000.0,
+        "sort_by": "event",
+        "limit": 5000,
     }
 
     last_revision = -1
+    last_catalog_epoch = -1
 
     try:
         while True:
@@ -2585,22 +3257,62 @@ async def terminal_websocket(websocket: WebSocket):
                 last_revision,
                 timeout=15.0,
             )
+            current_catalog_epoch = _terminal_catalog_epoch
             if current_revision == last_revision:
                 await websocket.send_text(
                     json.dumps(
                         {
                             "type": "heartbeat",
                             "terminalRevision": current_revision,
+                            "catalogEpoch": current_catalog_epoch,
                         },
                         separators=(",", ":"),
                     )
                 )
                 continue
 
-            await websocket.send_text(
-                build_terminal_websocket_message(**params)
+            must_send_snapshot = bool(
+                last_revision < 0
+                or last_catalog_epoch != current_catalog_epoch
             )
+
+            # After the first catalog snapshot, coalesce a short burst of venue
+            # updates before writing to the browser. This reduces frame count and
+            # lets one small merged delta carry every row changed during the burst.
+            if not must_send_snapshot:
+                await asyncio.sleep(
+                    max(
+                        0.25,
+                        env_float("PREDICTION_BROWSER_PUSH_INTERVAL_SECONDS", 1.0),
+                    )
+                )
+                current_revision = _terminal_state_revision
+                current_catalog_epoch = _terminal_catalog_epoch
+                if last_catalog_epoch != current_catalog_epoch:
+                    must_send_snapshot = True
+
+            delta_message = None
+            if not must_send_snapshot:
+                delta_message = build_terminal_browser_catchup_delta_message(
+                    last_revision,
+                    current_revision,
+                    current_catalog_epoch,
+                )
+                if delta_message is None:
+                    # Only fall back to a full snapshot if this browser was asleep
+                    # long enough to outrun the bounded delta history. Normal
+                    # revision skips are expected and remain delta-only.
+                    must_send_snapshot = True
+
+            if must_send_snapshot:
+                await websocket.send_text(
+                    build_terminal_browser_snapshot_message(**params)
+                )
+            else:
+                await websocket.send_text(delta_message)
+
             last_revision = current_revision
+            last_catalog_epoch = current_catalog_epoch
 
     except WebSocketDisconnect:
         return
@@ -2749,6 +3461,126 @@ def routes_self_test() -> Dict[str, Any]:
         and _bearer_from_authorization_header("") is None
     )
 
+    browser_projection_source = {
+        "id": "test-row",
+        "marketGroup": "sports",
+        "eventTitle": "Test event",
+        "contractTitle": "Test contract",
+        "bestRoute": {"key": "route-a"},
+        "settlementSignature": {"very": "large"},
+        "polymarket": {"marketId": "pm", "yesAsk": 0.4},
+        "kalshi": {"marketTicker": "kx", "yesAsk": 0.5},
+        "routes": [
+            {
+                "key": "route-a",
+                "status": "net_opportunity",
+                "pricingStatus": "net_opportunity",
+                "executable": True,
+                "depthBreakdown": [
+                    {"contracts": 1, "polymarketPrice": 0.4, "kalshiPrice": 0.5}
+                ],
+                "polymarket": {
+                    "venue": "polymarket",
+                    "side": "yes",
+                    "ask": 0.4,
+                    "askSize": 10,
+                    "status": "ready",
+                    "executable": True,
+                },
+                "kalshi": {
+                    "venue": "kalshi",
+                    "side": "no",
+                    "ask": 0.5,
+                    "askSize": 10,
+                    "status": "ready",
+                    "executable": True,
+                },
+            }
+        ],
+    }
+    compact_browser_row = _compact_browser_row(browser_projection_source)
+    browser_projection_compact = bool(
+        compact_browser_row.get("bestRouteKey") == "route-a"
+        and "bestRoute" not in compact_browser_row
+        and "settlementSignature" not in compact_browser_row
+        and compact_browser_row.get("routes", [{}])[0].get("depthAvailable") is True
+        and "depthBreakdown" not in compact_browser_row.get("routes", [{}])[0]
+    )
+    assert browser_projection_compact
+
+    # Regression: a browser that misses one or more fast publisher revisions must
+    # catch up with one merged terminal_delta rather than receiving the full
+    # catalog again. This directly protects Render outbound bandwidth.
+    saved_delta_history = list(_terminal_browser_delta_history)
+    _terminal_browser_delta_history.clear()
+    try:
+        _terminal_browser_delta_history.extend(
+            [
+                {
+                    "apiContractVersion": TERMINAL_API_CONTRACT_VERSION,
+                    "terminalRevision": 11,
+                    "catalogEpoch": 7,
+                    "generatedAt": "2026-08-31T00:00:00+00:00",
+                    "streamStatus": {},
+                    "opportunities": [{"id": "row-a", "bestNetEdge": 0.01}],
+                    "financeInventory": [],
+                    "removedOpportunityIds": [],
+                    "removedFinanceInventoryIds": [],
+                },
+                {
+                    "apiContractVersion": TERMINAL_API_CONTRACT_VERSION,
+                    "terminalRevision": 12,
+                    "catalogEpoch": 7,
+                    "generatedAt": "2026-08-31T00:00:01+00:00",
+                    "streamStatus": {},
+                    "opportunities": [
+                        {"id": "row-a", "bestNetEdge": 0.02},
+                        {"id": "row-b", "bestNetEdge": 0.03},
+                    ],
+                    "financeInventory": [],
+                    "removedOpportunityIds": [],
+                    "removedFinanceInventoryIds": [],
+                },
+            ]
+        )
+        catchup_message = build_terminal_browser_catchup_delta_message(10, 12, 7)
+        catchup_body = json.loads(catchup_message or "{}")
+        catchup_payload = catchup_body.get("payload") or {}
+        catchup_rows = {
+            str(row.get("id")): row
+            for row in (catchup_payload.get("opportunities") or [])
+        }
+        browser_revision_catchup_uses_merged_delta = bool(
+            catchup_body.get("type") == "terminal_delta"
+            and catchup_payload.get("terminalRevision") == 12
+            and catchup_rows.get("row-a", {}).get("bestNetEdge") == 0.02
+            and catchup_rows.get("row-b", {}).get("bestNetEdge") == 0.03
+        )
+        assert browser_revision_catchup_uses_merged_delta
+
+        # Epoch zero is the normal state after a fresh process start. This exact
+        # case caused the production-like snapshot flood because ``0 or -1``
+        # became -1 during delta-history lookup. Exercise it explicitly forever.
+        zero_epoch_history = []
+        for item in list(_terminal_browser_delta_history):
+            copied = dict(item)
+            copied["catalogEpoch"] = 0
+            zero_epoch_history.append(copied)
+        _terminal_browser_delta_history.clear()
+        _terminal_browser_delta_history.extend(zero_epoch_history)
+        zero_epoch_message = build_terminal_browser_catchup_delta_message(10, 12, 0)
+        zero_epoch_body = json.loads(zero_epoch_message or "{}")
+        zero_epoch_payload = zero_epoch_body.get("payload") or {}
+        browser_zero_catalog_epoch_catchup = bool(
+            zero_epoch_body.get("type") == "terminal_delta"
+            and zero_epoch_payload.get("catalogEpoch") == 0
+            and zero_epoch_payload.get("terminalRevision") == 12
+        )
+        assert browser_zero_catalog_epoch_catchup
+    finally:
+        _terminal_browser_delta_history.clear()
+        _terminal_browser_delta_history.extend(saved_delta_history)
+
     return {
         "apiContractVersion": TERMINAL_API_CONTRACT_VERSION,
         "engineVersion": ENGINE_VERSION,
@@ -2766,6 +3598,12 @@ def routes_self_test() -> Dict[str, Any]:
         "unavailablePairPreserved": unavailable in all_rows,
         "netProfitSortNoneSafe": len(net_profit_sorted_rows) == len(all_rows),
         "authorizationHeaderParsing": authorization_header_parsing,
+        "browserProjectionCompact": browser_projection_compact,
+        "browserDepthOnDemand": browser_projection_compact,
+        "browserRevisionCatchupUsesMergedDelta": (
+            browser_revision_catchup_uses_merged_delta
+        ),
+        "browserZeroCatalogEpochCatchup": browser_zero_catalog_epoch_catchup,
     }
 
 

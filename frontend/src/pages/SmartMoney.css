@@ -3812,3 +3812,197 @@ body,
     text-align: left;
   }
 }
+
+/* =========================================================
+   MOBILE FINAL SAFETY PASS
+   Desktop remains completely unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+
+  /* =========================
+     MAIN SMART MONEY HUB
+     ========================= */
+
+  .smart-money-page,
+  .smart-money-hub-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    overflow-x: hidden;
+
+    box-sizing: border-box;
+  }
+
+  .full-bubble-stage {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    padding: 16px 12px;
+
+    border-radius: 18px;
+
+    box-sizing: border-box;
+  }
+
+  .smart-money-bubble-orbit {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    grid-template-columns: 1fr;
+
+    gap: 18px;
+
+    box-sizing: border-box;
+  }
+
+  .smart-money-bubble {
+    width: min(340px, 100%);
+    max-width: 340px;
+
+    height: auto;
+    aspect-ratio: 1 / 1;
+
+    padding: 28px 24px;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     DASHBOARD BACK BUTTON
+     ========================= */
+
+  .smart-money-dashboard-back-btn {
+    top: 12px;
+    right: 12px;
+
+    padding: 8px 10px;
+
+    font-size: 11px;
+
+    border-radius: 10px;
+  }
+
+
+  /* =========================
+     SMART MONEY SUBPAGES
+     ========================= */
+
+  .insider-terminal-panel,
+  .institutional-terminal-panel,
+  .political-terminal-panel,
+  .turnover-terminal-panel,
+  .founder-terminal-panel,
+  .leadership-terminal-panel {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    padding-left: 14px;
+    padding-right: 14px;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     TABLE SECTIONS
+     ========================= */
+
+  .insider-table-card,
+  .institutional-table-card,
+  .political-table-card,
+  .turnover-table-card,
+  .founder-table-card {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    padding: 14px;
+
+    box-sizing: border-box;
+
+    overflow: hidden;
+  }
+
+  .smart-money-table-wrap {
+    width: 100%;
+    max-width: 100%;
+
+    overflow-x: auto !important;
+    overflow-y: hidden;
+
+    -webkit-overflow-scrolling: touch;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     SEARCH INPUTS
+     Prevent iPhone auto zoom
+     ========================= */
+
+  .smart-money-search,
+  .smart-money-lookup-input,
+  .insider-search-input,
+  .institutional-search-input,
+  .political-search-input,
+  .turnover-search-input,
+  .founder-search-input,
+  .leadership-main-search-input {
+    max-width: 100%;
+
+    font-size: 16px;
+
+    box-sizing: border-box;
+  }
+
+  /* =========================
+   INSIDER LEADERBOARDS
+   ========================= */
+
+.insider-market-leaders {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+}
+
+.insider-leaderboard-grid {
+  width: 100% !important;
+  max-width: 100% !important;
+
+  grid-template-columns: 1fr !important;
+
+  gap: 14px !important;
+}
+
+.insider-leaderboard-card {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+
+  padding: 16px !important;
+
+  box-sizing: border-box;
+}
+
+.insider-leaderboard-row {
+  width: 100% !important;
+
+  grid-template-columns: 38px minmax(0, 1fr) auto !important;
+
+  gap: 8px !important;
+
+  box-sizing: border-box;
+}
+
+.insider-leaderboard-row div {
+  min-width: 0;
+}
+
+}

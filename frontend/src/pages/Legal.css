@@ -84,3 +84,26 @@
     line-height: 1.65;
   }
 }
+
+.legal-back-button {
+  background: transparent;
+  color: #94a3b8;
+
+  border: 1px solid #334155;
+  border-radius: 8px;
+
+  padding: 7px 11px;
+  margin-bottom: 18px;
+
+  font-size: 12px;
+  font-weight: 700;
+
+  cursor: pointer;
+
+  transition: all 0.2s ease;
+}
+
+.legal-back-button:hover {
+  color: #ffffff;
+  border-color: #19c37d;
+}

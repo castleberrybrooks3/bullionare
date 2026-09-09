@@ -1284,3 +1284,777 @@
     text-align: left;
   }
 }
+/* =========================================================
+   MOBILE ONLY — INDIVIDUAL STOCK PAGE
+   Desktop styles above remain completely unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+
+  /* =========================
+     PAGE
+     ========================= */
+
+  .stock-analysis-page {
+    width: 100%;
+    max-width: 100vw;
+
+    padding: 14px 10px 30px;
+
+    box-sizing: border-box;
+
+    overflow-x: hidden;
+
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+
+  /* =========================
+     MOBILE CONTENT ORDER
+     ========================= */
+
+  /* Active tab content */
+  .stock-analysis-page > * {
+    order: 4;
+  }
+
+  /* Back button */
+  .stock-analysis-page > .stock-analysis-back-button {
+    order: 1;
+  }
+
+  /* Company header */
+  .stock-analysis-page > .stock-analysis-header {
+    order: 2;
+  }
+
+  /* Navigation tabs */
+  .stock-analysis-page > .stock-analysis-tabs {
+    order: 3;
+  }
+
+  /* Snapshot Score + Investment Snapshot */
+  .stock-analysis-page
+    > .stock-analysis-section:has(> .stock-analysis-advanced-top) {
+    order: 5;
+  }
+
+  /* Intelligence Coverage */
+  .stock-analysis-page > .stock-analysis-coverage-section {
+    order: 6;
+  }
+
+
+  /* =========================
+     BACK BUTTON
+     ========================= */
+
+  .stock-analysis-back-button {
+    padding: 6px 9px;
+
+    margin-bottom: 12px;
+
+    border-radius: 7px;
+
+    font-size: 12px;
+  }
+
+
+  /* =========================
+     COMPANY HEADER
+     ========================= */
+
+  .stock-analysis-header {
+    width: 100%;
+
+    gap: 12px;
+
+    padding: 15px;
+
+    margin-bottom: 12px;
+
+    border-radius: 12px;
+
+    box-sizing: border-box;
+  }
+
+  .stock-analysis-kicker {
+    font-size: 11px;
+
+    margin-bottom: 5px;
+  }
+
+  .stock-analysis-header h1 {
+    font-size: 24px;
+
+    line-height: 1.1;
+  }
+
+  .stock-analysis-subtitle {
+    margin-top: 6px;
+
+    font-size: 13px;
+
+    line-height: 1.4;
+  }
+
+  .stock-analysis-price-box {
+    min-width: 0;
+
+    width: 100%;
+
+    text-align: left;
+  }
+
+  .stock-analysis-price {
+    font-size: 25px;
+  }
+
+  .stock-analysis-change {
+    margin-top: 4px;
+
+    font-size: 15px;
+  }
+
+
+  /* =========================
+     MAIN SECTIONS
+     ========================= */
+
+  .stock-analysis-section {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    margin-top: 12px;
+
+    padding: 14px;
+
+    border-radius: 12px;
+
+    box-sizing: border-box;
+  }
+
+  .stock-analysis-section h2 {
+    margin-bottom: 12px;
+
+    font-size: 19px;
+  }
+
+  .stock-analysis-section-top {
+    align-items: flex-start;
+
+    flex-direction: column;
+
+    gap: 9px;
+  }
+
+  .stock-analysis-description,
+  .stock-analysis-muted {
+    font-size: 13px;
+
+    line-height: 1.5;
+  }
+
+
+  /* =========================
+     BASIC METRIC CARDS
+     ========================= */
+
+  .stock-analysis-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    gap: 8px;
+  }
+
+  .stock-analysis-card {
+    min-width: 0;
+
+    padding: 11px;
+
+    border-radius: 10px;
+
+    box-sizing: border-box;
+  }
+
+  .stock-analysis-card-label {
+    font-size: 11px;
+
+    margin-bottom: 5px;
+  }
+
+  .stock-analysis-card-value {
+    font-size: 17px;
+
+    overflow-wrap: anywhere;
+  }
+
+
+  /* =========================
+     PAGE TABS
+     ========================= */
+
+  .stock-analysis-tabs {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+
+  display: flex;
+  flex-wrap: nowrap;
+
+  gap: 10px;
+
+  margin: 12px 0 4px;
+
+  padding: 7px 0;
+
+  overflow-x: auto;
+  overflow-y: hidden;
+
+  -webkit-overflow-scrolling: touch;
+
+  scrollbar-width: thin;
+
+  scroll-padding-inline: 8px;
+  scroll-snap-type: x proximity;
+}
+
+.stock-analysis-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.stock-analysis-tabs::-webkit-scrollbar-thumb {
+  background: #19c37d;
+
+  border-radius: 10px;
+}
+
+.stock-analysis-tab {
+  flex: 0 0 auto;
+
+  padding: 9px 14px;
+
+  font-size: 13px;
+
+  white-space: nowrap;
+
+  scroll-snap-align: start;
+}
+
+
+ /* =========================
+   ANALYSTS MOBILE
+   ========================= */
+
+.stock-analysis-analysts-dashboard {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+
+  overflow-x: hidden;
+
+  box-sizing: border-box;
+}
+
+.stock-analysis-analysts-grid {
+  display: grid !important;
+
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+
+  grid-template-columns: minmax(0, 1fr) !important;
+
+  gap: 10px !important;
+
+  box-sizing: border-box;
+}
+
+.stock-analysis-analysts-grid > * {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+
+  box-sizing: border-box;
+}
+
+.stock-analysis-analysts-dashboard svg {
+  display: block;
+
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+
+  height: auto !important;
+}
+
+
+  /* =========================
+     CHART RANGE BUTTONS
+     ========================= */
+
+  .stock-analysis-range-buttons {
+    width: 100%;
+
+    flex-wrap: nowrap;
+
+    gap: 5px;
+
+    overflow-x: auto;
+
+    padding-bottom: 3px;
+
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .stock-analysis-range-buttons button {
+    flex: 0 0 auto;
+
+    padding: 6px 8px;
+
+    font-size: 11px;
+  }
+
+
+  /* =========================
+     CHART
+     ========================= */
+
+  .stock-analysis-chart-wrap {
+    width: 100%;
+    max-width: 100%;
+
+    height: 235px;
+
+    padding: 7px;
+
+    border-radius: 11px;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     TABLES
+     ========================= */
+
+  .stock-analysis-table-wrap {
+    width: 100%;
+    max-width: 100%;
+
+    overflow-x: auto;
+
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .stock-analysis-table {
+    min-width: 600px;
+
+    font-size: 12px;
+  }
+
+  .stock-analysis-table th,
+  .stock-analysis-table td {
+    padding: 8px;
+  }
+
+
+  /* =========================
+     ENTRY SCORE / THESIS
+     ========================= */
+
+  .stock-analysis-advanced-top {
+    grid-template-columns: 1fr;
+
+    gap: 10px;
+  }
+
+  .stock-analysis-score-card,
+  .stock-analysis-thesis-card {
+    padding: 13px;
+
+    border-radius: 11px;
+  }
+
+  .stock-analysis-score-label {
+    font-size: 18px;
+  }
+
+  .stock-analysis-score-circle {
+    width: 66px;
+    height: 66px;
+
+    border-width: 4px;
+
+    font-size: 21px;
+  }
+
+  .stock-analysis-thesis-title {
+    font-size: 17px;
+  }
+
+  .stock-analysis-thesis-card p {
+    font-size: 13px;
+
+    line-height: 1.45;
+  }
+
+  .stock-analysis-badge {
+    padding: 5px 8px;
+
+    font-size: 10px;
+  }
+
+
+  /* =========================
+     COMPARISON CARDS
+     ========================= */
+
+  .stock-analysis-comparison-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    gap: 8px;
+  }
+
+  .stock-analysis-comparison-card {
+    min-width: 0;
+
+    padding: 11px;
+
+    border-radius: 10px;
+  }
+
+  .stock-analysis-comparison-row {
+    gap: 6px;
+
+    margin-top: 7px;
+
+    font-size: 12px;
+  }
+
+  .stock-analysis-comparison-diff {
+    margin-top: 8px;
+
+    font-size: 11px;
+  }
+
+
+  /* =========================
+     MACRO / SUPPLY CHAIN
+     ========================= */
+
+  .stock-analysis-macro-grid,
+  .stock-analysis-supply-grid {
+    grid-template-columns: 1fr;
+
+    gap: 9px;
+  }
+
+  .stock-analysis-macro-card,
+  .stock-analysis-supply-card {
+    padding: 12px;
+
+    border-radius: 11px;
+  }
+
+  .stock-analysis-macro-top {
+    gap: 8px;
+  }
+
+  .stock-analysis-macro-top h3 {
+    font-size: 16px;
+  }
+
+  .stock-analysis-impact {
+    padding: 5px 8px;
+
+    font-size: 10px;
+  }
+
+  .stock-analysis-supply-row {
+    grid-template-columns: 70px 1fr;
+
+    gap: 8px;
+
+    padding: 9px 0;
+  }
+
+  .stock-analysis-supply-row p {
+    font-size: 12px;
+  }
+
+
+  /* =========================
+     COVERAGE
+     ========================= */
+
+  .stock-analysis-coverage-header {
+    gap: 10px;
+
+    margin-bottom: 12px;
+  }
+
+  .stock-analysis-coverage-badge {
+    min-width: 0;
+
+    padding: 7px 10px;
+
+    font-size: 11px;
+  }
+
+  .stock-analysis-coverage-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    gap: 7px;
+  }
+
+  .stock-analysis-coverage-pill {
+    min-width: 0;
+    min-height: 0;
+
+    padding: 9px;
+
+    border-radius: 10px;
+  }
+
+  .stock-analysis-coverage-pill span {
+    font-size: 10px;
+
+    margin-bottom: 4px;
+  }
+
+  .stock-analysis-coverage-pill strong {
+    font-size: 12px;
+  }
+
+
+  /* =========================
+     THESIS / RISK / MOVES
+     ========================= */
+
+  .stock-analysis-thesis-layout,
+  .stock-analysis-thesis-columns,
+  .stock-analysis-moves-grid,
+  .stock-analysis-thesis-hero,
+  .stock-analysis-thesis-deep-grid {
+    grid-template-columns: 1fr;
+
+    gap: 9px;
+  }
+
+  .stock-analysis-thesis-main,
+  .stock-analysis-thesis-side,
+  .stock-analysis-move-card,
+  .stock-analysis-thesis-hero > div,
+  .stock-analysis-thesis-use-case,
+  .stock-analysis-thesis-list-card {
+    padding: 12px;
+
+    border-radius: 11px;
+  }
+
+  .stock-analysis-thesis-main h3,
+  .stock-analysis-thesis-side h3,
+  .stock-analysis-thesis-hero h3 {
+    font-size: 18px;
+  }
+
+  .stock-analysis-risk-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    gap: 8px;
+  }
+
+  .stock-analysis-risk-card {
+    min-width: 0;
+
+    padding: 11px;
+
+    border-radius: 10px;
+  }
+
+  .stock-analysis-risk-card strong {
+    font-size: 17px;
+  }
+
+  .stock-analysis-compare-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+
+    gap: 7px;
+  }
+
+  .stock-analysis-compare-grid button {
+    min-width: 0;
+
+    padding: 10px 6px;
+
+    font-size: 11px;
+  }
+
+
+  /* =========================
+     SEC FINANCIALS
+     ========================= */
+
+  .stock-analysis-sec-financials,
+  .stock-analysis-sec-deep-dive {
+    gap: 10px;
+  }
+
+  .stock-analysis-sec-header {
+    padding: 12px;
+
+    border-radius: 11px;
+  }
+
+  .stock-analysis-sec-header h3 {
+    font-size: 18px;
+  }
+
+  .stock-analysis-sec-header p {
+    font-size: 12px;
+
+    line-height: 1.5;
+  }
+
+  .stock-analysis-sec-cik {
+    min-width: 0;
+
+    text-align: left;
+  }
+
+  .stock-analysis-sec-cik strong {
+    font-size: 15px;
+  }
+
+  .stock-analysis-sec-subsection {
+    gap: 9px;
+  }
+
+  .stock-analysis-sec-subsection h3 {
+    font-size: 17px;
+  }
+
+  .stock-analysis-sec-note,
+  .stock-analysis-filing-read-item {
+    padding: 9px 10px;
+
+    font-size: 11px;
+
+    line-height: 1.45;
+  }
+
+
+  /* =========================
+     FINANCIAL HEALTH
+     ========================= */
+
+  .stock-analysis-financial-health-card {
+    grid-template-columns: 1fr;
+
+    gap: 10px;
+
+    padding: 13px;
+
+    border-radius: 12px;
+  }
+
+  .stock-analysis-financial-health-card h3 {
+    font-size: 19px;
+  }
+
+  .stock-analysis-financial-health-card p {
+    font-size: 12px;
+
+    line-height: 1.5;
+  }
+
+  .stock-analysis-health-score {
+    width: 82px;
+    height: 82px;
+
+    justify-self: start;
+  }
+
+  .stock-analysis-health-score strong {
+    font-size: 25px;
+  }
+
+  .stock-analysis-health-score span {
+    font-size: 11px;
+  }
+
+  .stock-analysis-health-lists {
+    grid-template-columns: 1fr;
+
+    gap: 8px;
+  }
+
+  .stock-analysis-health-lists > div {
+    padding: 10px;
+
+    border-radius: 10px;
+  }
+
+
+  /* =========================
+     SMART MONEY
+     ========================= */
+
+  .stock-analysis-smart-money-header {
+    gap: 10px;
+
+    margin-bottom: 12px;
+  }
+
+  .stock-analysis-smart-money-signal {
+    min-width: 0;
+
+    width: 100%;
+
+    padding: 11px;
+
+    border-radius: 11px;
+
+    text-align: left;
+  }
+
+  .stock-analysis-smart-money-signal strong {
+    font-size: 20px;
+  }
+
+  .stock-analysis-smart-money-button {
+    padding: 6px 9px;
+
+    font-size: 11px;
+
+    border-radius: 7px;
+  }
+
+  .stock-analysis-smart-money-pill {
+    padding: 5px 8px;
+
+    font-size: 10px;
+  }
+
+
+  /* =========================
+     FILINGS / EMPTY STATES
+     ========================= */
+
+  .stock-analysis-filings {
+    gap: 8px;
+
+    font-size: 12px;
+  }
+
+  .stock-analysis-empty,
+  .stock-analysis-loading,
+  .stock-analysis-error {
+    padding: 18px 8px;
+
+    font-size: 13px;
+  }
+}

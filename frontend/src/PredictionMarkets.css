@@ -1434,3 +1434,94 @@ span:not(:last-child)::after {
     border-top: 1px solid rgba(141, 166, 207, 0.09);
   }
 }
+
+/* ============================================================
+   MOBILE FINAL SAFETY PASS
+   ============================================================ */
+
+@media (max-width: 768px) {
+  .prediction-markets-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    overflow-x: hidden;
+
+    padding-bottom: 20px;
+
+    box-sizing: border-box;
+  }
+
+  .pm-terminal-header,
+  .pm-control-bar,
+  .pm-results-header,
+  .pm-event-grid,
+  .pm-event-card,
+  .pm-system-warning,
+  .pm-system-error,
+  .pm-search-context {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    box-sizing: border-box;
+  }
+
+  .pm-terminal-header {
+    gap: 10px;
+  }
+
+  .pm-brand-block {
+    min-width: 0;
+  }
+
+  .pm-terminal-header-actions {
+    flex: 0 0 auto;
+  }
+
+  .pm-category-nav,
+  .pm-subcategory-nav {
+    width: 100%;
+    max-width: 100%;
+
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .pm-market-search {
+    width: 100%;
+    max-width: 100%;
+
+    box-sizing: border-box;
+  }
+
+  .pm-market-search input {
+    min-width: 0;
+
+    font-size: 16px;
+  }
+
+  .pm-event-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .pm-event-card {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    box-sizing: border-box;
+  }
+
+  .pm-results-header {
+    align-items: flex-start;
+  }
+
+  .pm-terminal-stats {
+    width: 100%;
+    max-width: 100%;
+
+    gap: 7px 12px;
+
+    box-sizing: border-box;
+  }
+}

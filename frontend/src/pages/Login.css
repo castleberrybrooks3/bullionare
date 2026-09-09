@@ -278,8 +278,131 @@
   color: #22c55e;
 }
 
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
 @media (max-width: 520px) {
+  .login-page {
+    min-height: 100svh;
+
+    padding: 16px;
+
+    box-sizing: border-box;
+  }
+
+  .login-card {
+    width: 100%;
+    max-width: 100%;
+
+    padding: 24px 18px;
+
+    border-radius: 14px;
+
+    box-sizing: border-box;
+  }
+
+  .login-card h1 {
+    font-size: 27px;
+
+    margin-top: 0;
+  }
+
+  .login-card p {
+    font-size: 14px;
+
+    margin-bottom: 20px;
+  }
+
+  .login-form {
+    gap: 12px;
+  }
+
+  .login-form input {
+    width: 100%;
+
+    padding: 13px;
+
+    font-size: 16px;
+
+    box-sizing: border-box;
+  }
+
+  .password-wrapper {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .password-wrapper input {
+    width: 100%;
+
+    padding-right: 50px;
+
+    box-sizing: border-box;
+  }
+
+  .login-form button,
+  .guest-button {
+    width: 100%;
+
+    padding: 13px;
+
+    box-sizing: border-box;
+  }
+
+  .guest-divider {
+    margin: 20px 0 14px;
+  }
+
+
+  /* =========================
+     GUEST CONSENT MODAL
+     ========================= */
+
+  .guest-consent-overlay {
+    padding: 14px;
+
+    box-sizing: border-box;
+  }
+
   .guest-consent-card {
-    padding: 26px 22px;
+    width: 100%;
+    max-width: 100%;
+
+    padding: 26px 20px;
+
+    border-radius: 14px;
+
+    box-sizing: border-box;
+  }
+
+  .guest-consent-card h2 {
+    padding-right: 26px;
+
+    font-size: 23px;
+  }
+
+  .guest-consent-card .guest-consent-description {
+    margin-bottom: 20px;
+
+    font-size: 13px;
+
+    line-height: 1.5;
+  }
+
+  .guest-legal-checkbox {
+    gap: 9px;
+
+    font-size: 13px;
+
+    line-height: 1.45;
+  }
+
+  .guest-continue-button {
+    padding: 13px;
+  }
+
+  .guest-create-account-link {
+    font-size: 13px;
   }
 }

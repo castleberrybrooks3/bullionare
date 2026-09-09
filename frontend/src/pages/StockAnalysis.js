@@ -95,8 +95,8 @@ const analysisTabs = [
   "Overview",
   "Thesis",
   "Financials",
-  "Smart Money",
   "Analysts",
+  "Smart Money",
   "Technicals",
   "Risk Radar",
   "What Moves It",
@@ -1135,7 +1135,7 @@ function AnalystsDashboard({
   const downside = targetReturnPercent(model.low, model.current);
 
   return (
-    <section className="stock-analysis-section">
+    <section className="stock-analysis-section stock-analysis-analysts-dashboard">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "end", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
         <div>
           <div className="stock-analysis-card-label">Analyst Outlook</div>
@@ -1168,12 +1168,27 @@ function AnalystsDashboard({
         />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16 }}>
+      <div
+  className="stock-analysis-analysts-grid"
+  style={{
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))",
+    gap: 16,
+  }}
+>
         <AnalystTargetRangeCard stock={stock} livePrice={livePrice} analystTargets={analystTargets} />
         <AnalystForecastFan stock={stock} livePrice={livePrice} analystTargets={analystTargets} historyPoints={historyPoints} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16, marginTop: 16 }}>
+      <div
+  className="stock-analysis-analysts-grid"
+  style={{
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))",
+    gap: 16,
+    marginTop: 16,
+  }}
+>
         <QuarterlyEpsChart quarterlyHistory={quarterlyHistory} epsEstimates={epsEstimates} />
         <RevenueEarningsChart quarterlyHistory={quarterlyHistory} reportingCurrency={reportingCurrency} />
       </div>
@@ -1320,11 +1335,23 @@ function ComparisonCard({
 }
 
 function TabButton({ tab, activeTab, setActiveTab }) {
+  const handleClick = (e) => {
+    setActiveTab(tab);
+
+    if (window.matchMedia("(max-width: 768px)").matches) {
+      e.currentTarget.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+        inline: "center",
+      });
+    }
+  };
+
   return (
     <button
       type="button"
       className={activeTab === tab ? "stock-analysis-tab active" : "stock-analysis-tab"}
-      onClick={() => setActiveTab(tab)}
+      onClick={handleClick}
     >
       {tab}
     </button>

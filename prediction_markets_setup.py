@@ -3,7 +3,7 @@ from __future__ import annotations
 from db import get_db_connection
 
 
-SETUP_VERSION = "manual-snapshot-v1.2-rls-private"
+SETUP_VERSION = "persistent-runtime-v2.0.1-timeout-safe-migration"
 
 
 # Retired database objects from older prediction-market architectures.
@@ -67,7 +67,7 @@ DDL_STATEMENTS = [
         -- row in this current-only snapshot is normalized to active; the
         -- venue's original status is preserved separately.
         status TEXT NOT NULL DEFAULT 'active'
-            CHECK (status IN ('active', 'unknown')),
+            CHECK (status IN ('active', 'inactive', 'unknown')),
         venue_status TEXT,
 
         start_time TIMESTAMPTZ,
@@ -257,7 +257,7 @@ DDL_STATEMENTS = [
         -- status is preserved separately. Exact-match safety rules belong in
         -- the engine rather than in the downloader.
         status TEXT NOT NULL DEFAULT 'active'
-            CHECK (status IN ('active', 'unknown')),
+            CHECK (status IN ('active', 'inactive', 'unknown')),
         venue_status TEXT,
 
         resolution_time TIMESTAMPTZ,
@@ -348,6 +348,94 @@ DDL_STATEMENTS = [
     WHERE primary_participant_key IS NOT NULL;
     """,
     """
+    CREATE TABLE IF NOT EXISTS public.prediction_market_runtime_generations (
+        id BIGSERIAL PRIMARY KEY,
+        catalog_ingest_run_id BIGINT,
+        matcher_version TEXT NOT NULL,
+        engine_version TEXT NOT NULL,
+        settlement_version TEXT NOT NULL,
+        pair_count INTEGER NOT NULL DEFAULT 0,
+        finance_inventory_count INTEGER NOT NULL DEFAULT 0,
+        semantic_change_count INTEGER NOT NULL DEFAULT 0,
+        diagnostics JSONB NOT NULL DEFAULT '{}'::jsonb,
+        generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS prediction_market_runtime_generations_latest_idx
+    ON public.prediction_market_runtime_generations (id DESC);
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS public.prediction_market_exact_pairs (
+        pair_uid TEXT PRIMARY KEY,
+        runtime_generation_id BIGINT NOT NULL
+            REFERENCES public.prediction_market_runtime_generations(id)
+            ON DELETE CASCADE,
+        polymarket_external_market_id TEXT NOT NULL,
+        kalshi_external_market_id TEXT NOT NULL,
+        market_group TEXT NOT NULL,
+        event_identity TEXT NOT NULL,
+        contract_identity TEXT NOT NULL,
+        event_title TEXT NOT NULL,
+        contract_title TEXT NOT NULL,
+        scheduled_time TEXT,
+        match_method TEXT NOT NULL,
+        pair_relationship TEXT NOT NULL DEFAULT 'direct',
+        settlement_status TEXT NOT NULL,
+        settlement_stream_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+        settlement_verified BOOLEAN NOT NULL DEFAULT FALSE,
+        settlement_signature JSONB NOT NULL DEFAULT '{}'::jsonb,
+        settlement_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+        polymarket_semantic_fingerprint TEXT,
+        kalshi_semantic_fingerprint TEXT,
+        matcher_version TEXT NOT NULL,
+        settlement_version TEXT NOT NULL,
+        polymarket_contract JSONB NOT NULL,
+        kalshi_contract JSONB NOT NULL,
+        polymarket_market_payload JSONB NOT NULL,
+        kalshi_market_payload JSONB NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        first_verified_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_validated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (polymarket_external_market_id, kalshi_external_market_id, contract_identity, pair_relationship)
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS prediction_market_exact_pairs_generation_idx
+    ON public.prediction_market_exact_pairs (runtime_generation_id, active);
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS public.prediction_market_runtime_inventory (
+        id TEXT PRIMARY KEY,
+        runtime_generation_id BIGINT NOT NULL
+            REFERENCES public.prediction_market_runtime_generations(id)
+            ON DELETE CASCADE,
+        venue TEXT NOT NULL CHECK (venue IN ('polymarket', 'kalshi')),
+        market_group TEXT NOT NULL,
+        family TEXT NOT NULL,
+        external_market_id TEXT NOT NULL,
+        external_event_id TEXT,
+        yes_key TEXT,
+        no_key TEXT,
+        close_time TEXT,
+        resolution_time TEXT,
+        liquidity DOUBLE PRECISION,
+        volume_24h DOUBLE PRECISION,
+        total_volume DOUBLE PRECISION,
+        open_interest DOUBLE PRECISION,
+        rank_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+        subject_key TEXT,
+        market_payload JSONB NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS prediction_market_runtime_inventory_generation_idx
+    ON public.prediction_market_runtime_inventory (runtime_generation_id, active);
+    """,
+    """
     CREATE TABLE IF NOT EXISTS public.prediction_market_ingest_runs (
         id BIGSERIAL PRIMARY KEY,
 
@@ -392,6 +480,25 @@ DDL_STATEMENTS = [
     """,
 ]
 
+MIGRATION_DDL_STATEMENTS = [
+    """ALTER TABLE public.prediction_market_events ADD COLUMN IF NOT EXISTS semantic_fingerprint TEXT;""",
+    """ALTER TABLE public.prediction_market_entities ADD COLUMN IF NOT EXISTS semantic_fingerprint TEXT;""",
+    """ALTER TABLE public.prediction_market_catalog ADD COLUMN IF NOT EXISTS semantic_fingerprint TEXT;""",
+    """ALTER TABLE public.prediction_market_ingest_runs ADD COLUMN IF NOT EXISTS semantic_change_count INTEGER NOT NULL DEFAULT 0;""",
+    """ALTER TABLE public.prediction_market_ingest_runs ADD COLUMN IF NOT EXISTS runtime_published BOOLEAN NOT NULL DEFAULT FALSE;""",
+    """ALTER TABLE public.prediction_market_ingest_runs ADD COLUMN IF NOT EXISTS runtime_generation_id BIGINT;""",
+    """ALTER TABLE public.prediction_market_events DROP CONSTRAINT IF EXISTS prediction_market_events_status_check;""",
+    """
+    ALTER TABLE public.prediction_market_events ADD CONSTRAINT prediction_market_events_status_check
+        CHECK (status IN ('active', 'inactive', 'unknown')) NOT VALID;
+    """,
+    """ALTER TABLE public.prediction_market_catalog DROP CONSTRAINT IF EXISTS prediction_market_catalog_status_check;""",
+    """
+    ALTER TABLE public.prediction_market_catalog ADD CONSTRAINT prediction_market_catalog_status_check
+        CHECK (status IN ('active', 'inactive', 'unknown')) NOT VALID;
+    """,
+]
+
 # These tables are server-side reference/catalog infrastructure. The browser
 # never needs direct Supabase Data API access to them. RLS + explicit revokes
 # prevent anon/authenticated browser roles from reading or mutating the tables,
@@ -406,6 +513,9 @@ SECURITY_DDL_STATEMENTS = [
             "prediction_market_entity_links",
             "prediction_market_catalog",
             "prediction_market_ingest_runs",
+            "prediction_market_runtime_generations",
+            "prediction_market_exact_pairs",
+            "prediction_market_runtime_inventory",
         )
     ),
     *(
@@ -417,6 +527,9 @@ SECURITY_DDL_STATEMENTS = [
             "prediction_market_entity_links",
             "prediction_market_catalog",
             "prediction_market_ingest_runs",
+            "prediction_market_runtime_generations",
+            "prediction_market_exact_pairs",
+            "prediction_market_runtime_inventory",
         )
     ),
 ]
@@ -429,6 +542,9 @@ EXPECTED_TABLES = (
     "prediction_market_entity_links",
     "prediction_market_catalog",
     "prediction_market_ingest_runs",
+    "prediction_market_runtime_generations",
+    "prediction_market_exact_pairs",
+    "prediction_market_runtime_inventory",
 )
 
 
@@ -438,10 +554,20 @@ def main() -> None:
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Supabase can inherit a short statement_timeout from the database role.
+            # This migration performs metadata DDL against tables that the live Render
+            # service is reading, so give DDL enough time while still failing quickly
+            # on an actual lock pile-up. NOT VALID checks below avoid a full-table scan.
+            cur.execute("SET LOCAL statement_timeout = '10min'")
+            cur.execute("SET LOCAL lock_timeout = '60s'")
+
             for statement in LEGACY_DDL_STATEMENTS:
                 cur.execute(statement)
 
             for statement in DDL_STATEMENTS:
+                cur.execute(statement)
+
+            for statement in MIGRATION_DDL_STATEMENTS:
                 cur.execute(statement)
 
             for statement in SECURITY_DDL_STATEMENTS:
@@ -510,14 +636,15 @@ def main() -> None:
     print("Not created:")
     print("  - no quote snapshot table")
     print("  - no price-history table")
-    print("  - no stored matches table")
+    print("  - persistent exact-pair registry enabled")
+    print("  - persistent runtime generation/inventory enabled")
     print("  - no stored arbitrage table")
     print("  - no recurring cleanup function")
     print("")
     print(
         "Important: this setup script creates schema only. "
         "The service refresh will download both venues first, then "
-        "transactionally replace the current snapshot."
+        "incrementally upsert the catalog and publish a validated runtime generation."
     )
 
 

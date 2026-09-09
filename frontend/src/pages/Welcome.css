@@ -44,3 +44,50 @@
     transform: rotate(360deg);
   }
 }
+
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
+@media (max-width: 520px) {
+  .welcome-page {
+    min-height: 100svh;
+
+    padding: 16px;
+
+    box-sizing: border-box;
+  }
+
+  .welcome-card {
+    width: 100%;
+    max-width: 100%;
+
+    padding: 28px 20px;
+
+    border-radius: 14px;
+
+    box-sizing: border-box;
+  }
+
+  .welcome-card h1 {
+    font-size: 1.6rem;
+
+    margin-bottom: 10px;
+  }
+
+  .welcome-card p {
+    font-size: 0.9rem;
+
+    margin-bottom: 20px;
+
+    line-height: 1.5;
+  }
+
+  .welcome-spinner {
+    width: 36px;
+    height: 36px;
+
+    border-width: 3px;
+    border-top-width: 3px;
+  }
+}

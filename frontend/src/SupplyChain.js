@@ -6,6 +6,7 @@ import ReactFlow, {
   MarkerType,
 } from "reactflow";
 import "reactflow/dist/style.css";
+import "./SupplyChain.css";
 
 const companies = Object.keys(supplyChainTree);
 
@@ -369,7 +370,7 @@ export default function SupplyChain({ onBuildStrategy }) {
   }, [selectedData]);
 
   return (
-    <div style={{ color: "white", padding: "20px" }}>
+    <div className="supply-chain-page" style={{ color: "white", padding: "20px" }}>
       <h1>DOW & Mega Cap Supply Chains</h1>
 
       {!selectedCompany ? (
@@ -377,6 +378,7 @@ export default function SupplyChain({ onBuildStrategy }) {
           <p>Select a company to explore its supply chain</p>
 
           <input
+            className="supply-chain-search-input"
             type="text"
             placeholder="Search companies..."
             value={searchTerm}
@@ -395,6 +397,7 @@ export default function SupplyChain({ onBuildStrategy }) {
           />
 
           <div
+            className="supply-chain-company-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(4, 1fr)",
@@ -406,7 +409,7 @@ export default function SupplyChain({ onBuildStrategy }) {
               <div
   key={ticker}
   onClick={() => setSelectedCompany(ticker)}
-  className="hover-glow"
+  className="hover-glow supply-chain-company-card"
   style={{
     padding: "20px",
     background: "#1a2238",
@@ -435,8 +438,9 @@ export default function SupplyChain({ onBuildStrategy }) {
           </div>
         </>
       ) : (
-        <div style={{ marginTop: "30px" }}>
+        <div className="supply-chain-selected-view" style={{ marginTop: "30px" }}>
           <button
+            className="supply-chain-back-button"
             onClick={() => setSelectedCompany(null)}
             style={{
               marginBottom: "20px",
@@ -453,6 +457,7 @@ export default function SupplyChain({ onBuildStrategy }) {
           </button>
 
           <h1
+            className="supply-chain-selected-title"
             style={{
               fontSize: "52px",
               fontWeight: "700",
@@ -464,6 +469,7 @@ export default function SupplyChain({ onBuildStrategy }) {
           </h1>
 
            <div
+            className="supply-chain-selected-ticker"
             style={{
               textAlign: "center",
               opacity: 0.7,
@@ -473,8 +479,9 @@ export default function SupplyChain({ onBuildStrategy }) {
             {selectedCompany}
           </div>
 
-          <div style={{ textAlign: "center", marginBottom: "20px" }}>
+          <div className="supply-chain-strategy-actions" style={{ textAlign: "center", marginBottom: "20px" }}>
             <button
+              className="supply-chain-build-button"
               onClick={handleBuildSupplyChainStrategy}
               style={{
                 padding: "10px 16px",
@@ -491,6 +498,7 @@ export default function SupplyChain({ onBuildStrategy }) {
           </div>
 
           <div
+            className="supply-chain-flow-container"
             style={{
               height: "75vh",
               width: "100%",

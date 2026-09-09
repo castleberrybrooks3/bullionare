@@ -510,3 +510,330 @@
   font-weight: 600;
   opacity: 0.85;
 }
+
+/* =========================================================
+   MOBILE ONLY — STOCK TABLE
+   Desktop styles above remain completely unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+
+  /* =========================
+     MAIN STOCK AREA
+     ========================= */
+
+  .stock-table-container {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    padding: 12px 6px 24px 6px;
+
+    box-sizing: border-box;
+
+    overflow-x: hidden;
+  }
+
+
+  /* =========================
+     BULLIONAIRE HEADER
+     ========================= */
+
+  .dashboard-header {
+  display: none;
+}
+
+  /* =========================
+     MARKET ANALYTICS TITLE
+     ========================= */
+
+  .stock-table-container h2 {
+  font-size: 22px;
+  line-height: 1.1;
+  margin-top: 0;
+  margin-bottom: 5px;
+}
+
+  /* =========================
+     SEARCH + TYPE FILTER
+     ========================= */
+
+  .stock-table-container input.search-input {
+  flex: 1 1 58% !important;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+
+  height: 34px;
+  padding: 5px 9px;
+  font-size: 13px;
+
+  box-sizing: border-box;
+}
+
+.stock-table-container select.search-input {
+  flex: 0 0 38% !important;
+  width: auto;
+  max-width: none;
+  min-width: 0;
+
+  height: 34px;
+  padding: 5px 9px;
+  font-size: 13px;
+
+  box-sizing: border-box;
+}
+
+  /* =========================
+     ALL DATA / FUNDAMENTALS /
+     TECHNICALS
+     ========================= */
+
+  .stock-table-container div:has(> .view-toggle-button) {
+  width: 100%;
+  display: flex !important;
+  gap: 5px !important;
+}
+
+.view-toggle-button {
+  flex: 1 1 0;
+
+  min-width: 0;
+
+  height: 30px;
+
+  padding: 0 5px !important;
+
+  justify-content: center;
+
+  font-size: 11px;
+
+  white-space: nowrap;
+}
+
+  /* =========================
+     REFRESH / CLEAR FILTERS
+     ========================= */
+
+  .stock-table-container input.search-input ~ button {
+  flex: 1 1 calc(50% - 5px);
+
+  min-height: 29px;
+
+  padding: 4px 8px;
+
+  border: 1px solid #d1d5db;
+
+  border-radius: 5px;
+
+  background-color: #ffffff;
+
+  color: #000000;
+
+  font-size: 11px;
+
+  cursor: pointer;
+
+  box-sizing: border-box;
+}
+
+.stock-table-container div:has(> input.search-input) {
+  gap: 6px !important;
+  margin-bottom: 10px !important;
+}
+
+
+  /* =========================
+     TOP GREEN SCROLLBAR
+     ========================= */
+
+  .top-scrollbar {
+    width: 100%;
+
+    height: 18px;
+
+    margin-top: 8px;
+    margin-bottom: 6px;
+
+    overflow-x: auto;
+    overflow-y: hidden;
+
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .top-scrollbar::-webkit-scrollbar {
+    height: 6px;
+  }
+
+
+  /* =========================
+     AG GRID
+     ========================= */
+
+  .stock-table-wrapper {
+    width: 100%;
+    max-width: 100%;
+
+    overflow-x: auto;
+
+    border-radius: 8px;
+
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .ag-theme-alpine {
+    width: 100%;
+
+    font-size: 12px;
+  }
+
+  .ag-theme-alpine .ag-header {
+    font-size: 12px;
+  }
+
+  .ag-theme-alpine .ag-header-cell-label {
+    font-size: 12px;
+
+    line-height: 1.15;
+  }
+
+  .ag-theme-alpine .ag-cell {
+    font-size: 12px;
+
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+
+
+  /* =========================
+     FILTER POPUPS
+     ========================= */
+
+  .ag-theme-alpine .ag-menu,
+  .ag-theme-alpine .ag-filter-wrapper {
+    max-width: calc(100vw - 24px) !important;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     WATCHLIST MOBILE
+     ========================= */
+
+  .watchlist-top-row {
+    width: 100%;
+
+    flex-direction: column;
+
+    gap: 14px;
+  }
+
+  .watchlist-controls-left {
+    width: 100%;
+
+    min-width: 0;
+
+    flex: 1 1 auto;
+  }
+
+  .watchlist-controls-row,
+  .watchlist-search-row {
+    width: 100%;
+
+    flex-direction: column;
+
+    align-items: stretch;
+
+    gap: 8px;
+  }
+
+  .watchlist-search-row .search-input {
+    flex: 1 1 auto !important;
+
+    width: 100%;
+
+    min-width: 0;
+
+    max-width: 100%;
+  }
+
+  .watchlist-controls-row button,
+  .watchlist-search-row button,
+  .watchlist-controls-row select {
+    width: 100%;
+  }
+
+  .watchlist-analytics-side {
+    width: 100%;
+
+    min-width: 0;
+    max-width: 100%;
+
+    margin-top: 0;
+
+    justify-content: center;
+  }
+
+
+  /* =========================
+     LOADING STATE
+     ========================= */
+
+  .loading-container {
+    width: 100%;
+
+    height: 520px;
+
+    font-size: 15px;
+  }
+
+  .spinner {
+    width: 32px;
+    height: 32px;
+
+    border-width: 5px;
+
+    border-top-width: 5px;
+  }
+
+
+  /* =========================
+     EMPTY RESULTS
+     ========================= */
+
+  .bullionaire-no-rows-overlay {
+    min-height: 200px;
+
+    padding: 20px 12px;
+
+    box-sizing: border-box;
+
+    text-align: center;
+  }
+
+  .bullionaire-no-rows-title {
+    font-size: 24px;
+  }
+
+  .bullionaire-no-rows-subtitle {
+    font-size: 13px;
+  }
+
+
+  /* =========================
+     NOTIFICATION
+     ========================= */
+
+  .notification-toast {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+
+    width: auto;
+
+    text-align: center;
+
+    box-sizing: border-box;
+  }
+}

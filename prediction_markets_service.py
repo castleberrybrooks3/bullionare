@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -20,7 +21,7 @@ import requests
 from db import get_db_connection_dict
 
 
-SERVICE_VERSION = "manual-current-snapshot-v4.1-atomic-db-retry"
+SERVICE_VERSION = "incremental-catalog-v5.0.1-bootstrap-timeout-safe"
 
 POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -2138,7 +2139,9 @@ def download_current_snapshot(paths: SnapshotPaths) -> SnapshotSummary:
             "currentOnly": True,
             "historicalPricesStored": False,
             "quoteSnapshotsStored": False,
-            "fullReplacement": True,
+            "fullReplacement": False,
+            "incrementalCatalog": True,
+            "persistentRuntime": True,
             "venues": ["polymarket", "kalshi"],
             "kalshiMultivariateIncluded": INCLUDE_KALSHI_MULTIVARIATE,
         },
@@ -2198,6 +2201,9 @@ def ensure_snapshot_schema(cur) -> None:
         "prediction_market_entity_links",
         "prediction_market_catalog",
         "prediction_market_ingest_runs",
+        "prediction_market_runtime_generations",
+        "prediction_market_exact_pairs",
+        "prediction_market_runtime_inventory",
     }
 
     cur.execute(
@@ -2236,6 +2242,7 @@ def ensure_snapshot_schema(cur) -> None:
         "settlement_time",
         "accepting_orders",
         "open_interest",
+        "semantic_fingerprint",
     }
     missing_columns = sorted(required_columns - catalog_columns)
 
@@ -2248,409 +2255,461 @@ def ensure_snapshot_schema(cur) -> None:
         )
 
 
-def insert_entities(
+@dataclass
+class SnapshotApplyStats:
+    new_events: int = 0
+    changed_events: int = 0
+    retired_events: int = 0
+    new_entities: int = 0
+    changed_entities: int = 0
+    link_changes: int = 0
+    new_markets: int = 0
+    changed_markets: int = 0
+    retired_markets: int = 0
+
+    @property
+    def total_semantic_changes(self) -> int:
+        return sum(
+            (
+                self.new_events,
+                self.changed_events,
+                self.retired_events,
+                self.new_entities,
+                self.changed_entities,
+                self.link_changes,
+                self.new_markets,
+                self.changed_markets,
+                self.retired_markets,
+            )
+        )
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "newEvents": self.new_events,
+            "changedEvents": self.changed_events,
+            "retiredEvents": self.retired_events,
+            "newEntities": self.new_entities,
+            "changedEntities": self.changed_entities,
+            "linkChanges": self.link_changes,
+            "newMarkets": self.new_markets,
+            "changedMarkets": self.changed_markets,
+            "retiredMarkets": self.retired_markets,
+            "totalSemanticChanges": self.total_semantic_changes,
+        }
+
+
+def _semantic_hash(payload: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _event_semantic_fingerprint(row: Dict[str, Any]) -> str:
+    return _semantic_hash({
+        key: row.get(key)
+        for key in (
+            "venue", "external_event_id", "external_series_id", "title", "subtitle",
+            "category", "event_type", "venue_status", "start_time", "end_time",
+            "close_time", "settlement_time", "native_game_id", "milestone_id",
+            "source_id", "source_ids", "details",
+        )
+    })
+
+
+def _entity_semantic_fingerprint(row: Dict[str, Any]) -> str:
+    return _semantic_hash({
+        key: row.get(key)
+        for key in (
+            "venue", "external_entity_id", "name", "entity_type", "league",
+            "abbreviation", "alias", "source_id", "source_ids", "details",
+        )
+    })
+
+
+def _market_semantic_fingerprint(row: Dict[str, Any]) -> str:
+    # Activity/price telemetry is deliberately excluded. Contract identity,
+    # settlement terms and lifecycle fields are deliberately included.
+    return _semantic_hash({
+        key: row.get(key)
+        for key in (
+            "venue", "external_market_id", "external_event_id", "external_series_id",
+            "event_title", "market_title", "market_slug", "category", "market_type",
+            "sports_market_type", "venue_status", "resolution_time", "event_start_time",
+            "close_time", "settlement_time", "accepting_orders", "rules_url",
+            "rules_primary", "rules_secondary", "native_condition_id", "native_game_id",
+            "primary_participant_key", "line_value", "floor_strike", "cap_strike",
+            "functional_strike", "custom_strike", "contract_semantics", "outcomes",
+        )
+    })
+
+
+def _existing_catalog_state(cur) -> Dict[str, Any]:
+    cur.execute(
+        "SELECT venue, external_event_id, semantic_fingerprint, status FROM public.prediction_market_events"
+    )
+    events = {
+        (row["venue"], str(row["external_event_id"])): (row.get("semantic_fingerprint"), row.get("status"))
+        for row in cur.fetchall()
+    }
+    cur.execute(
+        "SELECT venue, external_entity_id, semantic_fingerprint FROM public.prediction_market_entities"
+    )
+    entities = {
+        (row["venue"], str(row["external_entity_id"])): row.get("semantic_fingerprint")
+        for row in cur.fetchall()
+    }
+    cur.execute(
+        "SELECT venue, external_market_id, semantic_fingerprint, status FROM public.prediction_market_catalog"
+    )
+    markets = {
+        (row["venue"], str(row["external_market_id"])): (row.get("semantic_fingerprint"), row.get("status"))
+        for row in cur.fetchall()
+    }
+    cur.execute(
+        """
+        SELECT e.venue, e.external_event_id, n.external_entity_id, l.role
+        FROM public.prediction_market_event_entities AS l
+        JOIN public.prediction_market_events AS e ON e.id = l.event_id
+        JOIN public.prediction_market_entities AS n ON n.id = l.entity_id
+        """
+    )
+    links = {
+        (row["venue"], str(row["external_event_id"]), str(row["external_entity_id"]), str(row["role"]))
+        for row in cur.fetchall()
+    }
+    return {"events": events, "entities": entities, "markets": markets, "links": links}
+
+
+def _upsert_entities_incremental(
     cur,
     paths: SnapshotPaths,
+    existing: Dict[Tuple[str, str], Optional[str]],
+    stats: SnapshotApplyStats,
 ) -> Dict[Tuple[str, str], int]:
     entity_ids: Dict[Tuple[str, str], int] = {}
-
     for batch in read_jsonl_batches(paths.entities, DATABASE_BATCH_SIZE):
-        rows = [
-            (
-                row["venue"],
-                row["external_entity_id"],
-                row["name"],
-                row.get("entity_type"),
-                row.get("league"),
-                row.get("abbreviation"),
-                row.get("alias"),
-                row.get("source_id"),
+        rows = []
+        for row in batch:
+            key = (row["venue"], str(row["external_entity_id"]))
+            fingerprint = _entity_semantic_fingerprint(row)
+            old = existing.get(key)
+            if key not in existing:
+                stats.new_entities += 1
+            elif old != fingerprint:
+                stats.changed_entities += 1
+            rows.append((
+                row["venue"], row["external_entity_id"], row["name"], row.get("entity_type"),
+                row.get("league"), row.get("abbreviation"), row.get("alias"), row.get("source_id"),
                 psycopg2.extras.Json(row.get("source_ids") or {}),
                 psycopg2.extras.Json(row.get("details") or {}),
-                psycopg2.extras.Json(row.get("raw_payload") or {}),
-            )
-            for row in batch
-        ]
-
+                psycopg2.extras.Json(row.get("raw_payload") or {}), fingerprint,
+            ))
         returned = psycopg2.extras.execute_values(
             cur,
             """
             INSERT INTO public.prediction_market_entities (
-                venue,
-                external_entity_id,
-                name,
-                entity_type,
-                league,
-                abbreviation,
-                alias,
-                source_id,
-                source_ids,
-                details,
-                raw_payload
-            )
-            VALUES %s
+                venue, external_entity_id, name, entity_type, league, abbreviation, alias,
+                source_id, source_ids, details, raw_payload, semantic_fingerprint
+            ) VALUES %s
+            ON CONFLICT (venue, external_entity_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                entity_type = EXCLUDED.entity_type,
+                league = EXCLUDED.league,
+                abbreviation = EXCLUDED.abbreviation,
+                alias = EXCLUDED.alias,
+                source_id = EXCLUDED.source_id,
+                source_ids = EXCLUDED.source_ids,
+                details = EXCLUDED.details,
+                raw_payload = EXCLUDED.raw_payload,
+                semantic_fingerprint = EXCLUDED.semantic_fingerprint,
+                updated_at = NOW()
             RETURNING id, venue, external_entity_id
             """,
-            rows,
-            page_size=DATABASE_BATCH_SIZE,
-            fetch=True,
+            rows, page_size=DATABASE_BATCH_SIZE, fetch=True,
         )
-
-        for row in returned:
-            entity_ids[(row["venue"], str(row["external_entity_id"]))] = row["id"]
-
+        for returned_row in returned:
+            entity_ids[(returned_row["venue"], str(returned_row["external_entity_id"]))] = returned_row["id"]
     return entity_ids
 
 
-def insert_events(
+def _upsert_events_incremental(
     cur,
     paths: SnapshotPaths,
-) -> Dict[Tuple[str, str], int]:
+    existing: Dict[Tuple[str, str], Tuple[Optional[str], Optional[str]]],
+    stats: SnapshotApplyStats,
+) -> Tuple[Dict[Tuple[str, str], int], Set[Tuple[str, str]]]:
     event_ids: Dict[Tuple[str, str], int] = {}
-
+    current_keys: Set[Tuple[str, str]] = set()
     for batch in read_jsonl_batches(paths.events, DATABASE_BATCH_SIZE):
-        rows = [
-            (
-                row["venue"],
-                row["external_event_id"],
-                row.get("external_series_id"),
-                row["title"],
-                row.get("subtitle"),
-                row.get("category"),
-                row.get("event_type"),
-                row.get("status") or "active",
-                row.get("venue_status"),
-                row.get("start_time"),
-                row.get("end_time"),
-                row.get("close_time"),
-                row.get("settlement_time"),
-                row.get("native_game_id"),
-                row.get("milestone_id"),
-                row.get("source_id"),
-                psycopg2.extras.Json(row.get("source_ids") or {}),
-                psycopg2.extras.Json(row.get("details") or {}),
-                psycopg2.extras.Json(row.get("raw_payload") or {}),
-            )
-            for row in batch
-        ]
-
+        rows = []
+        for row in batch:
+            key = (row["venue"], str(row["external_event_id"]))
+            current_keys.add(key)
+            fingerprint = _event_semantic_fingerprint(row)
+            old = existing.get(key)
+            if old is None:
+                stats.new_events += 1
+            elif old[0] != fingerprint or old[1] == "inactive":
+                stats.changed_events += 1
+            rows.append((
+                row["venue"], row["external_event_id"], row.get("external_series_id"), row["title"],
+                row.get("subtitle"), row.get("category"), row.get("event_type"), "active",
+                row.get("venue_status"), row.get("start_time"), row.get("end_time"), row.get("close_time"),
+                row.get("settlement_time"), row.get("native_game_id"), row.get("milestone_id"), row.get("source_id"),
+                psycopg2.extras.Json(row.get("source_ids") or {}), psycopg2.extras.Json(row.get("details") or {}),
+                psycopg2.extras.Json(row.get("raw_payload") or {}), fingerprint,
+            ))
         returned = psycopg2.extras.execute_values(
             cur,
             """
             INSERT INTO public.prediction_market_events (
-                venue,
-                external_event_id,
-                external_series_id,
-                title,
-                subtitle,
-                category,
-                event_type,
-                status,
-                venue_status,
-                start_time,
-                end_time,
-                close_time,
-                settlement_time,
-                native_game_id,
-                milestone_id,
-                source_id,
-                source_ids,
-                details,
-                raw_payload
-            )
-            VALUES %s
+                venue, external_event_id, external_series_id, title, subtitle, category, event_type,
+                status, venue_status, start_time, end_time, close_time, settlement_time,
+                native_game_id, milestone_id, source_id, source_ids, details, raw_payload, semantic_fingerprint
+            ) VALUES %s
+            ON CONFLICT (venue, external_event_id) DO UPDATE SET
+                external_series_id = EXCLUDED.external_series_id,
+                title = EXCLUDED.title,
+                subtitle = EXCLUDED.subtitle,
+                category = EXCLUDED.category,
+                event_type = EXCLUDED.event_type,
+                status = 'active',
+                venue_status = EXCLUDED.venue_status,
+                start_time = EXCLUDED.start_time,
+                end_time = EXCLUDED.end_time,
+                close_time = EXCLUDED.close_time,
+                settlement_time = EXCLUDED.settlement_time,
+                native_game_id = EXCLUDED.native_game_id,
+                milestone_id = EXCLUDED.milestone_id,
+                source_id = EXCLUDED.source_id,
+                source_ids = EXCLUDED.source_ids,
+                details = EXCLUDED.details,
+                raw_payload = EXCLUDED.raw_payload,
+                semantic_fingerprint = EXCLUDED.semantic_fingerprint,
+                updated_at = NOW()
             RETURNING id, venue, external_event_id
             """,
-            rows,
-            page_size=DATABASE_BATCH_SIZE,
-            fetch=True,
+            rows, page_size=DATABASE_BATCH_SIZE, fetch=True,
         )
+        for returned_row in returned:
+            event_ids[(returned_row["venue"], str(returned_row["external_event_id"]))] = returned_row["id"]
+    retired = {key for key, value in existing.items() if value[1] == "active" and key not in current_keys}
+    stats.retired_events = len(retired)
+    cur.execute("UPDATE public.prediction_market_events SET status='inactive', updated_at=NOW() WHERE status='active'")
+    if current_keys:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            UPDATE public.prediction_market_events AS e
+            SET status='active', updated_at=NOW()
+            FROM (VALUES %s) AS seen(venue, external_event_id)
+            WHERE e.venue=seen.venue AND e.external_event_id=seen.external_event_id
+            """,
+            list(current_keys), page_size=DATABASE_BATCH_SIZE,
+        )
+    return event_ids, current_keys
 
-        for row in returned:
-            event_ids[(row["venue"], str(row["external_event_id"]))] = row["id"]
 
-    return event_ids
-
-
-def insert_event_entity_links(
+def _replace_event_links_incremental(
     cur,
     paths: SnapshotPaths,
     event_ids: Dict[Tuple[str, str], int],
     entity_ids: Dict[Tuple[str, str], int],
+    existing_links: Set[Tuple[str, str, str, str]],
+    stats: SnapshotApplyStats,
 ) -> int:
-    inserted = 0
-
+    local_rows: List[Tuple[str, str, str, str]] = []
     for batch in read_jsonl_batches(paths.links, DATABASE_BATCH_SIZE):
-        rows: List[Tuple[int, int, str]] = []
-
         for row in batch:
-            event_id = event_ids.get(
-                (row["venue"], row["external_event_id"])
-            )
-            entity_id = entity_ids.get(
-                (row["venue"], row["external_entity_id"])
-            )
-
-            if event_id is None or entity_id is None:
-                continue
-
-            rows.append((event_id, entity_id, row.get("role") or "unknown"))
-
-        if not rows:
+            local_rows.append((
+                row["venue"], str(row["external_event_id"]),
+                str(row["external_entity_id"]), str(row.get("role") or "unknown"),
+            ))
+    local_set = set(local_rows)
+    stats.link_changes = len(existing_links.symmetric_difference(local_set))
+    cur.execute("DELETE FROM public.prediction_market_event_entities")
+    inserted = 0
+    mapped_rows: List[Tuple[int, int, str]] = []
+    for venue, external_event_id, external_entity_id, role in local_rows:
+        event_id = event_ids.get((venue, external_event_id))
+        entity_id = entity_ids.get((venue, external_entity_id))
+        if event_id is None or entity_id is None:
             continue
-
+        mapped_rows.append((event_id, entity_id, role))
+    for index in range(0, len(mapped_rows), DATABASE_BATCH_SIZE):
+        chunk = mapped_rows[index:index + DATABASE_BATCH_SIZE]
         psycopg2.extras.execute_values(
             cur,
             """
-            INSERT INTO public.prediction_market_event_entities (
-                event_id,
-                entity_id,
-                role
-            )
-            VALUES %s
-            ON CONFLICT (event_id, entity_id, role) DO NOTHING
+            INSERT INTO public.prediction_market_event_entities (event_id, entity_id, role)
+            VALUES %s ON CONFLICT (event_id, entity_id, role) DO NOTHING
             """,
-            rows,
-            page_size=DATABASE_BATCH_SIZE,
+            chunk, page_size=DATABASE_BATCH_SIZE,
         )
-        inserted += len(rows)
-
+        inserted += len(chunk)
     return inserted
 
 
-def insert_markets(
+def _upsert_markets_incremental(
     cur,
     paths: SnapshotPaths,
     event_ids: Dict[Tuple[str, str], int],
-) -> int:
-    inserted = 0
-
+    existing: Dict[Tuple[str, str], Tuple[Optional[str], Optional[str]]],
+    stats: SnapshotApplyStats,
+) -> Tuple[int, Set[Tuple[str, str]]]:
+    processed = 0
+    current_keys: Set[Tuple[str, str]] = set()
     for batch in read_jsonl_batches(paths.markets, DATABASE_BATCH_SIZE):
         rows = []
-
         for row in batch:
-            event_catalog_id = event_ids.get(
-                (row["venue"], row["external_event_id"])
-            )
+            event_catalog_id = event_ids.get((row["venue"], str(row["external_event_id"])))
             if event_catalog_id is None:
                 raise RuntimeError(
-                    "Market references a missing event: "
-                    f"{row['venue']} {row['external_market_id']} -> "
-                    f"{row['external_event_id']}"
+                    f"Market references a missing event: {row['venue']} {row['external_market_id']} -> {row['external_event_id']}"
                 )
-
-            rows.append(
-                (
-                    row["venue"],
-                    event_catalog_id,
-                    row["external_market_id"],
-                    row.get("external_event_id"),
-                    row.get("external_series_id"),
-                    row.get("event_title"),
-                    row["market_title"],
-                    row.get("market_slug"),
-                    row.get("category"),
-                    row.get("market_type"),
-                    row.get("sports_market_type"),
-                    row.get("status") or "active",
-                    row.get("venue_status"),
-                    row.get("resolution_time"),
-                    row.get("event_start_time"),
-                    row.get("close_time"),
-                    row.get("settlement_time"),
-                    row.get("accepting_orders"),
-                    row.get("rules_url"),
-                    row.get("rules_primary"),
-                    row.get("rules_secondary"),
-                    row.get("native_condition_id"),
-                    row.get("native_game_id"),
-                    row.get("primary_participant_key"),
-                    row.get("line_value"),
-                    row.get("floor_strike"),
-                    row.get("cap_strike"),
-                    row.get("functional_strike"),
-                    psycopg2.extras.Json(row.get("custom_strike") or {}),
-                    psycopg2.extras.Json(
-                        row.get("contract_semantics") or {}
-                    ),
-                    psycopg2.extras.Json(row.get("outcomes") or []),
-                    psycopg2.extras.Json(row.get("raw_payload") or {}),
-                    row.get("liquidity"),
-                    row.get("volume_24h"),
-                    row.get("total_volume"),
-                    row.get("open_interest"),
-                )
-            )
-
+            key = (row["venue"], str(row["external_market_id"]))
+            current_keys.add(key)
+            fingerprint = _market_semantic_fingerprint(row)
+            old = existing.get(key)
+            if old is None:
+                stats.new_markets += 1
+            elif old[0] != fingerprint or old[1] == "inactive":
+                stats.changed_markets += 1
+            rows.append((
+                row["venue"], event_catalog_id, row["external_market_id"], row.get("external_event_id"),
+                row.get("external_series_id"), row.get("event_title"), row["market_title"], row.get("market_slug"),
+                row.get("category"), row.get("market_type"), row.get("sports_market_type"), "active", row.get("venue_status"),
+                row.get("resolution_time"), row.get("event_start_time"), row.get("close_time"), row.get("settlement_time"),
+                row.get("accepting_orders"), row.get("rules_url"), row.get("rules_primary"), row.get("rules_secondary"),
+                row.get("native_condition_id"), row.get("native_game_id"), row.get("primary_participant_key"), row.get("line_value"),
+                row.get("floor_strike"), row.get("cap_strike"), row.get("functional_strike"),
+                psycopg2.extras.Json(row.get("custom_strike") or {}),
+                psycopg2.extras.Json(row.get("contract_semantics") or {}),
+                psycopg2.extras.Json(row.get("outcomes") or []), psycopg2.extras.Json(row.get("raw_payload") or {}),
+                row.get("liquidity"), row.get("volume_24h"), row.get("total_volume"), row.get("open_interest"), fingerprint,
+            ))
         psycopg2.extras.execute_values(
             cur,
             """
             INSERT INTO public.prediction_market_catalog (
-                venue,
-                event_catalog_id,
-                external_market_id,
-                external_event_id,
-                external_series_id,
-                event_title,
-                market_title,
-                market_slug,
-                category,
-                market_type,
-                sports_market_type,
-                status,
-                venue_status,
-                resolution_time,
-                event_start_time,
-                close_time,
-                settlement_time,
-                accepting_orders,
-                rules_url,
-                rules_primary,
-                rules_secondary,
-                native_condition_id,
-                native_game_id,
-                primary_participant_key,
-                line_value,
-                floor_strike,
-                cap_strike,
-                functional_strike,
-                custom_strike,
-                contract_semantics,
-                outcomes,
-                raw_payload,
-                liquidity,
-                volume_24h,
-                total_volume,
-                open_interest
-            )
-            VALUES %s
+                venue, event_catalog_id, external_market_id, external_event_id, external_series_id,
+                event_title, market_title, market_slug, category, market_type, sports_market_type,
+                status, venue_status, resolution_time, event_start_time, close_time, settlement_time,
+                accepting_orders, rules_url, rules_primary, rules_secondary, native_condition_id,
+                native_game_id, primary_participant_key, line_value, floor_strike, cap_strike,
+                functional_strike, custom_strike, contract_semantics, outcomes, raw_payload,
+                liquidity, volume_24h, total_volume, open_interest, semantic_fingerprint
+            ) VALUES %s
+            ON CONFLICT (venue, external_market_id) DO UPDATE SET
+                event_catalog_id=EXCLUDED.event_catalog_id,
+                external_event_id=EXCLUDED.external_event_id,
+                external_series_id=EXCLUDED.external_series_id,
+                event_title=EXCLUDED.event_title,
+                market_title=EXCLUDED.market_title,
+                market_slug=EXCLUDED.market_slug,
+                category=EXCLUDED.category,
+                market_type=EXCLUDED.market_type,
+                sports_market_type=EXCLUDED.sports_market_type,
+                status='active',
+                venue_status=EXCLUDED.venue_status,
+                resolution_time=EXCLUDED.resolution_time,
+                event_start_time=EXCLUDED.event_start_time,
+                close_time=EXCLUDED.close_time,
+                settlement_time=EXCLUDED.settlement_time,
+                accepting_orders=EXCLUDED.accepting_orders,
+                rules_url=EXCLUDED.rules_url,
+                rules_primary=EXCLUDED.rules_primary,
+                rules_secondary=EXCLUDED.rules_secondary,
+                native_condition_id=EXCLUDED.native_condition_id,
+                native_game_id=EXCLUDED.native_game_id,
+                primary_participant_key=EXCLUDED.primary_participant_key,
+                line_value=EXCLUDED.line_value,
+                floor_strike=EXCLUDED.floor_strike,
+                cap_strike=EXCLUDED.cap_strike,
+                functional_strike=EXCLUDED.functional_strike,
+                custom_strike=EXCLUDED.custom_strike,
+                contract_semantics=EXCLUDED.contract_semantics,
+                outcomes=EXCLUDED.outcomes,
+                raw_payload=EXCLUDED.raw_payload,
+                liquidity=EXCLUDED.liquidity,
+                volume_24h=EXCLUDED.volume_24h,
+                total_volume=EXCLUDED.total_volume,
+                open_interest=EXCLUDED.open_interest,
+                semantic_fingerprint=EXCLUDED.semantic_fingerprint,
+                updated_at=NOW()
             """,
-            rows,
-            page_size=DATABASE_BATCH_SIZE,
+            rows, page_size=DATABASE_BATCH_SIZE,
         )
-        inserted += len(rows)
+        processed += len(rows)
+        if processed % 5000 < len(rows):
+            print(f"Incremental catalog: {processed} current markets upserted...")
+    retired = {key for key, value in existing.items() if value[1] == "active" and key not in current_keys}
+    stats.retired_markets = len(retired)
+    cur.execute("UPDATE public.prediction_market_catalog SET status='inactive', updated_at=NOW() WHERE status='active'")
+    if current_keys:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            UPDATE public.prediction_market_catalog AS m
+            SET status='active', updated_at=NOW()
+            FROM (VALUES %s) AS seen(venue, external_market_id)
+            WHERE m.venue=seen.venue AND m.external_market_id=seen.external_market_id
+            """,
+            list(current_keys), page_size=DATABASE_BATCH_SIZE,
+        )
+    return processed, current_keys
 
-        if inserted % 5000 < len(rows):
-            print(f"Database replacement: {inserted} markets inserted...")
 
-    return inserted
-
-
-def _replace_database_snapshot_once(
+def _apply_database_snapshot_once(
     paths: SnapshotPaths,
     summary: SnapshotSummary,
-) -> None:
-    """Atomically replace the current snapshot using one database transaction."""
+) -> Tuple[int, SnapshotApplyStats]:
+    """Incrementally upsert the validated snapshot while preserving stable DB IDs."""
     conn = get_db_connection_dict()
+    stats = SnapshotApplyStats()
     try:
         with conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = 0")
             cur.execute("SET LOCAL lock_timeout = '60s'")
-
-            # Use a transaction-scoped advisory lock on the SAME connection as
-            # the replacement.  This avoids keeping a second idle lock
-            # connection alive for the entire large insert.  PostgreSQL releases
-            # this lock automatically on commit, rollback, or disconnect.
-            cur.execute(
-                "SELECT pg_try_advisory_xact_lock(%s) AS acquired",
-                (CATALOG_REFRESH_LOCK_ID,),
-            )
+            cur.execute("SELECT pg_try_advisory_xact_lock(%s) AS acquired", (CATALOG_REFRESH_LOCK_ID,))
             row = cur.fetchone()
-            acquired = bool(row and row["acquired"])
-            if not acquired:
-                raise RuntimeError(
-                    "Another prediction-market replacement is already running."
-                )
-
+            if not bool(row and row["acquired"]):
+                raise RuntimeError("Another prediction-market catalog refresh is already running.")
             ensure_snapshot_schema(cur)
-
-            cur.execute(
-                """
-                TRUNCATE TABLE
-                    public.prediction_market_entity_links,
-                    public.prediction_market_event_entities,
-                    public.prediction_market_catalog,
-                    public.prediction_market_entities,
-                    public.prediction_market_events,
-                    public.prediction_market_ingest_runs
-                RESTART IDENTITY CASCADE
-                """
+            state = _existing_catalog_state(cur)
+            entity_ids = _upsert_entities_incremental(cur, paths, state["entities"], stats)
+            event_ids, _ = _upsert_events_incremental(cur, paths, state["events"], stats)
+            relationships_inserted = _replace_event_links_incremental(
+                cur, paths, event_ids, entity_ids, state["links"], stats
             )
-
-            entity_ids = insert_entities(cur, paths)
-            print(
-                f"Database replacement: {len(entity_ids)} entities inserted."
-            )
-
-            event_ids = insert_events(cur, paths)
-            print(
-                f"Database replacement: {len(event_ids)} events inserted."
-            )
-
-            relationships_inserted = insert_event_entity_links(
-                cur,
-                paths,
-                event_ids,
-                entity_ids,
-            )
-            print(
-                "Database replacement: "
-                f"{relationships_inserted} participant links inserted."
-            )
-
-            markets_inserted = insert_markets(
-                cur,
-                paths,
-                event_ids,
-            )
-
-            if markets_inserted != summary.total_markets:
+            markets_processed, _ = _upsert_markets_incremental(cur, paths, event_ids, state["markets"], stats)
+            if markets_processed != summary.total_markets:
                 raise RuntimeError(
-                    "Market insertion count mismatch: expected "
-                    f"{summary.total_markets}, inserted "
-                    f"{markets_inserted}."
+                    f"Market upsert count mismatch: expected {summary.total_markets}, processed {markets_processed}."
                 )
-
             cur.execute(
                 """
                 INSERT INTO public.prediction_market_ingest_runs (
-                    venue,
-                    run_type,
-                    status,
-                    events_seen,
-                    entities_seen,
-                    relationships_seen,
-                    markets_seen,
-                    started_at,
-                    finished_at
-                )
-                VALUES (
-                    'combined',
-                    'manual_snapshot',
-                    'completed',
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    NOW(),
-                    NOW()
-                )
+                    venue, run_type, status, events_seen, entities_seen,
+                    relationships_seen, markets_seen, semantic_change_count,
+                    runtime_published, started_at, finished_at
+                ) VALUES ('combined', 'incremental_snapshot', 'completed', %s, %s, %s, %s, %s, FALSE, NOW(), NOW())
+                RETURNING id
                 """,
                 (
-                    summary.total_events,
-                    summary.total_entities,
-                    relationships_inserted,
-                    summary.total_markets,
+                    summary.total_events, summary.total_entities, relationships_inserted,
+                    summary.total_markets, stats.total_semantic_changes,
                 ),
             )
-
+            ingest_run_id = int(cur.fetchone()["id"])
         conn.commit()
-
+        return ingest_run_id, stats
     except Exception:
-        # A dead psycopg connection cannot be rolled back explicitly, but
-        # PostgreSQL automatically discards its uncommitted transaction.  Do
-        # not let a secondary "connection already closed" error hide the real
-        # database failure that triggered the retry.
         try:
             if not getattr(conn, "closed", 1):
                 conn.rollback()
@@ -2667,43 +2726,30 @@ def _replace_database_snapshot_once(
 def replace_database_snapshot(
     paths: SnapshotPaths,
     summary: SnapshotSummary,
-) -> None:
+) -> Tuple[int, SnapshotApplyStats]:
     print(
-        "Both venue downloads validated. Replacing the Supabase snapshot "
-        "inside one atomic transaction..."
+        "Both venue downloads validated. Incrementally upserting Supabase while preserving stable market IDs..."
     )
-
     attempts = max(1, DATABASE_REPLACEMENT_ATTEMPTS)
-
     for attempt in range(1, attempts + 1):
         try:
             if attempt > 1:
-                print(
-                    "Retrying the SAME validated local snapshot; venue downloads "
-                    "will not be repeated."
-                )
-
-            _replace_database_snapshot_once(paths, summary)
-            print(
-                "Supabase replacement committed successfully. The database now "
-                "contains only the newly downloaded current snapshot."
-            )
-            return
-
+                print("Retrying the SAME validated local snapshot; venue downloads will not be repeated.")
+            ingest_run_id, stats = _apply_database_snapshot_once(paths, summary)
+            print("Incremental Supabase catalog commit succeeded.")
+            print("Catalog semantic changes: " + json.dumps(stats.as_dict(), sort_keys=True))
+            return ingest_run_id, stats
         except (psycopg2.InterfaceError, psycopg2.OperationalError) as exc:
             if attempt >= attempts:
                 raise
-
             delay = min(15, 3 * attempt)
             print(
-                "Database connection dropped during atomic replacement "
+                "Database connection dropped during incremental catalog commit "
                 f"(attempt {attempt}/{attempts}): {type(exc).__name__}: {exc}"
             )
-            print(
-                "The failed transaction was not committed. Waiting "
-                f"{delay}s, then retrying from the preserved local snapshot..."
-            )
+            print(f"Waiting {delay}s, then retrying from the preserved local snapshot...")
             time.sleep(delay)
+    raise RuntimeError("Incremental prediction-market catalog commit failed unexpectedly.")
 
 
 # ---------------------------------------------------------------------------
@@ -2764,7 +2810,50 @@ def run_manual_refresh(
     try:
         summary = download_current_snapshot(paths)
         print_summary(summary, paths)
-        replace_database_snapshot(paths, summary)
+        ingest_run_id, apply_stats = replace_database_snapshot(paths, summary)
+
+        # Heavy matching is a maintenance-process responsibility. Render's live
+        # service watches only the published runtime generation marker, so the
+        # production process never sees the broad 20k+ candidate catalog.
+        from prediction_market_engine import (
+            has_persisted_runtime_generation,
+            persisted_runtime_rebuild_pending,
+            rebuild_and_publish_persisted_runtime,
+        )
+
+        runtime_exists = has_persisted_runtime_generation()
+        rebuild_pending = persisted_runtime_rebuild_pending()
+        if apply_stats.total_semantic_changes > 0 or not runtime_exists or rebuild_pending:
+            print(
+                "Building validated persistent runtime outside the live web process "
+                f"({apply_stats.total_semantic_changes} semantic changes; pending={rebuild_pending})..."
+            )
+            runtime_marker = rebuild_and_publish_persisted_runtime(
+                catalog_ingest_run_id=ingest_run_id,
+                semantic_change_count=apply_stats.total_semantic_changes,
+            )
+            print(f"Persistent runtime published: {runtime_marker}")
+        else:
+            with get_db_connection_dict() as reuse_conn:
+                with reuse_conn.cursor() as reuse_cur:
+                    reuse_cur.execute(
+                        "SELECT id FROM public.prediction_market_runtime_generations ORDER BY id DESC LIMIT 1"
+                    )
+                    generation_row = reuse_cur.fetchone()
+                    if generation_row:
+                        reuse_cur.execute(
+                            """
+                            UPDATE public.prediction_market_ingest_runs
+                            SET runtime_published = TRUE, runtime_generation_id = %s
+                            WHERE id = %s
+                            """,
+                            (int(generation_row["id"]), int(ingest_run_id)),
+                        )
+                reuse_conn.commit()
+            print(
+                "No semantic catalog changes detected. Existing exact matches and "
+                "runtime generation were reused; Render hot reload is not required."
+            )
 
         if keep_snapshot or requested_directory:
             print(f"Local snapshot files retained at: {paths.root}")
@@ -2795,6 +2884,151 @@ def run_download_only(directory: str) -> None:
     summary = download_current_snapshot(paths)
     print_summary(summary, paths)
     print("Download-only completed. Supabase was not modified.")
+
+
+def backfill_semantic_fingerprints_from_current_catalog() -> Dict[str, int]:
+    """One-time/bootstrap backfill so an existing healthy catalog is not treated as entirely new.
+
+    This path intentionally ignores the account-level short statement timeout: the bootstrap
+    scans the already-committed catalog once, computes only missing fingerprints, and never
+    publishes a runtime until the later matcher/persistence stage succeeds.  The SELECTs avoid
+    raw_payload so the bootstrap does not pull large venue JSON blobs across the DB connection.
+    """
+    counts = {"events": 0, "entities": 0, "markets": 0}
+    with get_db_connection_dict() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = 0")
+                cur.execute("SET LOCAL lock_timeout = '60s'")
+                ensure_snapshot_schema(cur)
+
+                print("Fingerprint bootstrap: loading events missing fingerprints...")
+                cur.execute(
+                    """
+                    SELECT id, venue, external_event_id, external_series_id, title, subtitle,
+                           category, event_type, venue_status, start_time, end_time, close_time,
+                           settlement_time, native_game_id, milestone_id, source_id, source_ids, details
+                    FROM public.prediction_market_events
+                    WHERE semantic_fingerprint IS NULL OR semantic_fingerprint = ''
+                    """
+                )
+                event_updates = [
+                    (_event_semantic_fingerprint(dict(row)), int(row["id"]))
+                    for row in cur.fetchall()
+                ]
+                for index in range(0, len(event_updates), DATABASE_BATCH_SIZE):
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        UPDATE public.prediction_market_events AS e
+                        SET semantic_fingerprint = v.fingerprint
+                        FROM (VALUES %s) AS v(fingerprint, id)
+                        WHERE e.id = v.id
+                        """,
+                        event_updates[index:index + DATABASE_BATCH_SIZE],
+                        page_size=DATABASE_BATCH_SIZE,
+                    )
+                counts["events"] = len(event_updates)
+                print(f"Fingerprint bootstrap: {counts['events']} event fingerprints written.")
+
+                print("Fingerprint bootstrap: loading entities missing fingerprints...")
+                cur.execute(
+                    """
+                    SELECT id, venue, external_entity_id, name, entity_type, league,
+                           abbreviation, alias, source_id, source_ids, details
+                    FROM public.prediction_market_entities
+                    WHERE semantic_fingerprint IS NULL OR semantic_fingerprint = ''
+                    """
+                )
+                entity_updates = [
+                    (_entity_semantic_fingerprint(dict(row)), int(row["id"]))
+                    for row in cur.fetchall()
+                ]
+                for index in range(0, len(entity_updates), DATABASE_BATCH_SIZE):
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        UPDATE public.prediction_market_entities AS e
+                        SET semantic_fingerprint = v.fingerprint
+                        FROM (VALUES %s) AS v(fingerprint, id)
+                        WHERE e.id = v.id
+                        """,
+                        entity_updates[index:index + DATABASE_BATCH_SIZE],
+                        page_size=DATABASE_BATCH_SIZE,
+                    )
+                counts["entities"] = len(entity_updates)
+                print(f"Fingerprint bootstrap: {counts['entities']} entity fingerprints written.")
+
+                print("Fingerprint bootstrap: loading markets missing fingerprints...")
+                cur.execute(
+                    """
+                    SELECT id, venue, external_market_id, external_event_id, external_series_id,
+                           event_title, market_title, market_slug, category, market_type,
+                           sports_market_type, venue_status, resolution_time, event_start_time,
+                           close_time, settlement_time, accepting_orders, rules_url, rules_primary,
+                           rules_secondary, native_condition_id, native_game_id, primary_participant_key,
+                           line_value, floor_strike, cap_strike, functional_strike, custom_strike,
+                           contract_semantics, outcomes
+                    FROM public.prediction_market_catalog
+                    WHERE semantic_fingerprint IS NULL OR semantic_fingerprint = ''
+                    """
+                )
+                market_updates = [
+                    (_market_semantic_fingerprint(dict(row)), int(row["id"]))
+                    for row in cur.fetchall()
+                ]
+                for index in range(0, len(market_updates), DATABASE_BATCH_SIZE):
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        UPDATE public.prediction_market_catalog AS m
+                        SET semantic_fingerprint = v.fingerprint
+                        FROM (VALUES %s) AS v(fingerprint, id)
+                        WHERE m.id = v.id
+                        """,
+                        market_updates[index:index + DATABASE_BATCH_SIZE],
+                        page_size=DATABASE_BATCH_SIZE,
+                    )
+                counts["markets"] = len(market_updates)
+                print(f"Fingerprint bootstrap: {counts['markets']} market fingerprints written.")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return counts
+
+
+def rebuild_runtime_from_current_catalog() -> None:
+    """Build/publish the runtime from the already committed catalog without redownloading venues."""
+    with get_db_connection_dict() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 0")
+            cur.execute("SET LOCAL lock_timeout = '60s'")
+            ensure_snapshot_schema(cur)
+            cur.execute(
+                """
+                SELECT id, semantic_change_count
+                FROM public.prediction_market_ingest_runs
+                WHERE venue = 'combined' AND status = 'completed'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            row = cur.fetchone()
+    if not row:
+        raise RuntimeError("No completed prediction-market catalog ingest exists.")
+    fingerprint_counts = backfill_semantic_fingerprints_from_current_catalog()
+    print("Semantic fingerprint backfill: " + json.dumps(fingerprint_counts, sort_keys=True))
+    from prediction_market_engine import rebuild_and_publish_persisted_runtime
+    print(
+        "Rebuilding persistent runtime from the current committed catalog; "
+        "venue downloads will NOT be repeated..."
+    )
+    marker = rebuild_and_publish_persisted_runtime(
+        catalog_ingest_run_id=int(row["id"]),
+        semantic_change_count=int(row.get("semantic_change_count") or 0),
+    )
+    print(f"Persistent runtime published: {marker}")
 
 
 def show_database_status() -> None:
@@ -2852,6 +3086,12 @@ def show_database_status() -> None:
             f"{market_counts.get(venue, 0)} markets"
         )
 
+    try:
+        from prediction_market_engine import prediction_snapshot_marker
+        print(f"Published runtime: {prediction_snapshot_marker()}")
+    except Exception as exc:
+        print(f"Published runtime: unavailable ({type(exc).__name__}: {exc})")
+
     if last_run:
         print(
             "Last combined refresh: "
@@ -2866,8 +3106,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Download the complete current Polymarket catalog and all "
-            "standard current Kalshi markets, then transactionally replace "
-            "the Supabase snapshot. Kalshi multivariate combos are opt-in."
+            "standard current Kalshi markets, incrementally upsert Supabase, "
+            "and publish a validated persistent runtime. Kalshi multivariate combos are opt-in."
         )
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -2875,8 +3115,8 @@ def build_parser() -> argparse.ArgumentParser:
     refresh_parser = subparsers.add_parser(
         "refresh",
         help=(
-            "Download both venues, validate them, and completely replace "
-            "the current Supabase snapshot."
+            "Download both venues, validate them, incrementally update the catalog, "
+            "and publish a runtime generation only when semantics changed."
         ),
     )
     refresh_parser.add_argument(
@@ -2905,6 +3145,13 @@ def build_parser() -> argparse.ArgumentParser:
         "status",
         help="Show current prediction-market row counts in Supabase.",
     )
+    subparsers.add_parser(
+        "rebuild-runtime",
+        help=(
+            "Rebuild and publish the persistent runtime from the already committed "
+            "catalog without downloading Polymarket/Kalshi again."
+        ),
+    )
 
     return parser
 
@@ -2932,6 +3179,10 @@ def main() -> None:
 
     if args.command == "status":
         show_database_status()
+        return
+
+    if args.command == "rebuild-runtime":
+        rebuild_runtime_from_current_catalog()
         return
 
     raise RuntimeError(f"Unsupported command: {args.command}")

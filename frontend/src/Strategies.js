@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "./lib/supabaseClient";
+import "./Strategies.css";
 
 const API_BASE =
   process.env.NODE_ENV === "development"
@@ -1101,6 +1102,7 @@ function QuantMetricTooltip({ title, help, guide }) {
 
   return (
     <div
+      className="strategies-quant-tooltip"
       style={{
         position: "absolute",
         top: "10px",
@@ -1111,6 +1113,7 @@ function QuantMetricTooltip({ title, help, guide }) {
       onMouseLeave={() => setIsOpen(false)}
     >
       <button
+        className="strategies-quant-tooltip-button"
         type="button"
         aria-label={`Learn more about ${title}`}
         onFocus={() => setIsOpen(true)}
@@ -1142,6 +1145,7 @@ function QuantMetricTooltip({ title, help, guide }) {
 
       {isOpen && (
         <div
+          className="strategies-quant-tooltip-popover"
           role="tooltip"
           style={{
             position: "absolute",
@@ -2808,8 +2812,8 @@ const benchmarkDisplayedReturn =
     : 0;
 
   return (
-    <div style={{ color: "white" }}>
-      <div style={{ marginBottom: "24px" }}>
+    <div className="strategies-page" style={{ color: "white" }}>
+      <div className="strategies-page-header" style={{ marginBottom: "24px" }}>
         <h1 style={{ fontSize: "32px", marginBottom: "8px" }}>
           Build and Test Your Own Strategies
         </h1>
@@ -2819,6 +2823,7 @@ const benchmarkDisplayedReturn =
       </div>
 
       <div
+        className="strategies-main-grid"
         style={{
           display: "grid",
           gridTemplateColumns: "390px minmax(0, 1fr)",
@@ -2827,6 +2832,7 @@ const benchmarkDisplayedReturn =
         }}
       >
         <div
+          className="strategies-builder-panel"
           style={{
             background: "rgba(255,255,255,0.035)",
             border: "1px solid rgba(255,255,255,0.08)",
@@ -2837,6 +2843,7 @@ const benchmarkDisplayedReturn =
           <h2 style={{ marginTop: 0 }}>Strategy Builder</h2>
 
           <div
+            className="strategies-mode-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
@@ -2953,6 +2960,7 @@ const benchmarkDisplayedReturn =
 
 
 <div
+  className="strategies-active-pills"
   style={{
     display: "flex",
     flexWrap: "wrap",
@@ -3045,6 +3053,7 @@ const benchmarkDisplayedReturn =
 
 <label style={{ color: "#94a3b8", fontSize: "13px" }}>Benchmark</label>
           <input
+            className="strategies-benchmark-input"
             value={benchmark}
             onChange={(e) => setBenchmark(e.target.value.toUpperCase())}
             style={{
@@ -3063,6 +3072,7 @@ const benchmarkDisplayedReturn =
           {positions.map((position, index) => (
             <div
               key={index}
+              className="strategies-position-row"
               style={{
                 display: "grid",
                 gridTemplateColumns: "minmax(0, 1fr) 72px 34px",
@@ -3290,6 +3300,7 @@ const benchmarkDisplayedReturn =
         </div>
 
         <div
+          className="strategies-analysis-panel"
           style={{
             background: "rgba(255,255,255,0.035)",
             border: "1px solid rgba(255,255,255,0.08)",
@@ -3304,6 +3315,7 @@ const benchmarkDisplayedReturn =
             </h2>
 
             <div
+              className="strategies-analysis-header-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "auto auto 1fr",
@@ -3366,6 +3378,7 @@ const benchmarkDisplayedReturn =
             </div>
 
             <div
+              className="strategies-range-row"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -3395,6 +3408,7 @@ const benchmarkDisplayedReturn =
           </div>
 
           <div
+            className="strategies-summary-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(5, 1fr)",
@@ -3435,6 +3449,7 @@ const benchmarkDisplayedReturn =
           </div>
 
           <div
+            className="strategies-chart"
             onMouseMove={handleMouseMove}
             onMouseLeave={() => setHoverIndex(null)}
             style={{
@@ -3589,6 +3604,7 @@ const benchmarkDisplayedReturn =
           </div>
 
           <div
+            className="strategies-quant-panel"
             style={{
               marginTop: "18px",
               padding: "16px",
@@ -3659,6 +3675,7 @@ const benchmarkDisplayedReturn =
             </div>
 
             <div
+              className="strategies-quant-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
@@ -3758,6 +3775,7 @@ const benchmarkDisplayedReturn =
 
         {holdingAttribution && (
           <div
+            className="strategies-attribution-panel"
             style={{
               marginTop: "18px",
               padding: "18px",
@@ -3774,6 +3792,7 @@ const benchmarkDisplayedReturn =
             </div>
 
             <div
+              className="strategies-attribution-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
@@ -3826,6 +3845,7 @@ const benchmarkDisplayedReturn =
         )}
 
         <div
+          className="strategies-bottom-grid"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
@@ -3835,6 +3855,7 @@ const benchmarkDisplayedReturn =
           }}
         >
           <div
+            className="strategies-stress-card"
             style={{
               padding: "18px",
               borderRadius: "18px",
@@ -3903,7 +3924,7 @@ const benchmarkDisplayedReturn =
                 <div style={{ color: "#9ca3af", fontSize: "13px", marginTop: "4px" }}>
                   {stressResult.description}
                 </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "12px" }}>
+                <div className="strategies-stress-impact-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "12px" }}>
                   <div>
                     <div style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 850 }}>Best Impact</div>
                     <div style={{ color: "#e5e7eb", fontWeight: 950 }}>
@@ -3926,6 +3947,7 @@ const benchmarkDisplayedReturn =
           </div>
 
           <div
+            className="strategies-score-card"
             style={{
               padding: "18px",
               borderRadius: "18px",
@@ -3987,7 +4009,7 @@ const benchmarkDisplayedReturn =
               </button>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "132px minmax(0, 1fr)", gap: "18px", alignItems: "center" }}>
+            <div className="strategies-score-grid" style={{ display: "grid", gridTemplateColumns: "132px minmax(0, 1fr)", gap: "18px", alignItems: "center" }}>
               <div
                 style={{
                   width: "132px",
@@ -4092,6 +4114,7 @@ const benchmarkDisplayedReturn =
         </div>
 
     <div
+      className="strategies-create-panel"
       style={{
         marginTop: "22px",
         padding: "20px",
@@ -4128,6 +4151,7 @@ const benchmarkDisplayedReturn =
   }}
 >
   <div
+    className="strategies-save-row"
     style={{
       display: "grid",
       gridTemplateColumns: "1fr auto",
@@ -4167,6 +4191,7 @@ const benchmarkDisplayedReturn =
   </div>
 
     <div
+  className="strategies-notes-grid"
   style={{
     display: "grid",
     gridTemplateColumns: "1fr 190px",
@@ -4242,6 +4267,7 @@ const benchmarkDisplayedReturn =
   {builderPositions.map((position, index) => (
     <div
       key={index}
+      className="strategies-builder-position-row"
       style={{
         display: "grid",
         gridTemplateColumns: "minmax(0, 1fr) 90px 38px",
@@ -4324,6 +4350,7 @@ const benchmarkDisplayedReturn =
 )}
 
         <div
+          className="strategies-bank-grid"
           style={{
             display: "grid",
             gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
@@ -4333,6 +4360,7 @@ const benchmarkDisplayedReturn =
           {strategyBank.map((strategy) => (
   <div
     key={strategy.id}
+    className="strategies-bank-card"
               style={{
                 display: "grid",
                 gridTemplateColumns: "1fr auto",
@@ -4425,7 +4453,7 @@ const benchmarkDisplayedReturn =
   )}
 </div>
 
-                <div style={{ position: "relative", display: "flex", gap: "8px", alignItems: "center" }}>
+                <div className="strategies-bank-actions" style={{ position: "relative", display: "flex", gap: "8px", alignItems: "center" }}>
   <button
     onClick={() => moveStrategyToActive(strategy.id)}
     style={{
@@ -4467,6 +4495,7 @@ const benchmarkDisplayedReturn =
 
   {openStrategyMenu === strategy.id && (
   <div
+    className="strategies-bank-menu"
     style={{
       position: "absolute",
       top: "42px",

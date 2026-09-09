@@ -1,0 +1,387 @@
+/* =========================================================
+   STRATEGIES — MOBILE ONLY
+   Desktop remains completely unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+  .strategies-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: hidden;
+    box-sizing: border-box;
+  }
+
+  .strategies-page,
+  .strategies-page * {
+    box-sizing: border-box;
+  }
+
+  .strategies-page-header {
+    margin-bottom: 18px !important;
+  }
+
+  .strategies-page-header h1 {
+    margin-top: 0 !important;
+    margin-bottom: 7px !important;
+    font-size: 27px !important;
+    line-height: 1.12;
+  }
+
+  .strategies-page-header p {
+    margin-top: 0;
+    font-size: 14px !important;
+    line-height: 1.45;
+  }
+
+  /* =========================
+     MAIN PAGE LAYOUT
+     ========================= */
+
+  .strategies-main-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 14px !important;
+  }
+
+  .strategies-builder-panel,
+  .strategies-analysis-panel,
+  .strategies-attribution-panel,
+  .strategies-stress-card,
+  .strategies-score-card,
+  .strategies-create-panel {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    padding: 14px !important;
+    box-sizing: border-box;
+  }
+
+  .strategies-builder-panel h2,
+  .strategies-analysis-panel h2 {
+    line-height: 1.2;
+  }
+
+  /* =========================
+     STRATEGY BUILDER
+     ========================= */
+
+  .strategies-mode-grid {
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 7px !important;
+  }
+
+  .strategies-mode-grid button {
+    min-width: 0;
+    padding: 9px 6px !important;
+    font-size: 12px;
+  }
+
+  .strategies-active-pills {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+  }
+
+  .strategies-active-pills > div {
+    max-width: 100% !important;
+    min-width: 0;
+  }
+
+  .strategies-active-pills button:first-of-type {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .strategies-benchmark-input,
+  .strategies-page input,
+  .strategies-page select,
+  .strategies-page textarea {
+    max-width: 100%;
+    min-width: 0;
+    font-size: 16px !important;
+  }
+
+  .strategies-position-row {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) 72px 34px !important;
+    gap: 7px !important;
+  }
+
+  .strategies-position-row > *,
+  .strategies-builder-position-row > * {
+    min-width: 0;
+  }
+
+  /* =========================
+     PERFORMANCE HEADER
+     ========================= */
+
+  .strategies-analysis-header-grid {
+    width: 100%;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+    margin-top: 8px !important;
+  }
+
+  .strategies-analysis-header-grid > * {
+    min-width: 0;
+    justify-self: stretch !important;
+  }
+
+  .strategies-analysis-header-grid > div:last-child {
+    width: 100%;
+    min-width: 0 !important;
+    padding: 12px 14px !important;
+    text-align: center;
+  }
+
+  .strategies-range-row {
+    width: 100%;
+    max-width: 100%;
+    flex-wrap: nowrap !important;
+    gap: 8px !important;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 2px 0 6px;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+  }
+
+  .strategies-range-row button {
+    flex: 0 0 auto;
+    padding: 7px 14px !important;
+  }
+
+  /* =========================
+     SUMMARY METRICS
+     ========================= */
+
+  .strategies-summary-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+    margin: 16px 0 !important;
+  }
+
+  .strategies-summary-grid > div {
+    min-width: 0;
+    padding: 10px !important;
+  }
+
+  /* =========================
+     PERFORMANCE CHART
+     ========================= */
+
+  .strategies-chart {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: 300px !important;
+    padding: 14px 48px 14px 12px !important;
+    box-sizing: border-box;
+  }
+
+  /* =========================
+     RISK-ADJUSTED ANALYTICS
+     ========================= */
+
+  .strategies-quant-panel {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    padding: 13px !important;
+    box-sizing: border-box;
+  }
+
+  .strategies-quant-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+
+  .strategies-quant-grid > div {
+    min-width: 0;
+  }
+
+  .strategies-quant-tooltip-popover {
+    width: min(270px, calc(100vw - 58px)) !important;
+    max-width: calc(100vw - 58px) !important;
+  }
+
+  /* =========================
+     ATTRIBUTION
+     ========================= */
+
+  .strategies-attribution-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 8px !important;
+  }
+
+  /* =========================
+     STRESS TESTS + SCORE
+     ========================= */
+
+  .strategies-bottom-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 12px !important;
+    margin-top: 14px !important;
+  }
+
+  .strategies-stress-impact-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+  }
+
+  .strategies-score-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 14px !important;
+  }
+
+  .strategies-score-grid > div:first-child {
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  /* =========================
+     CREATE YOUR OWN STRATEGIES
+     ========================= */
+
+  .strategies-create-panel {
+    margin-top: 16px !important;
+  }
+
+  .strategies-save-row,
+  .strategies-notes-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 9px !important;
+  }
+
+  .strategies-save-row button {
+    width: 100%;
+  }
+
+  .strategies-builder-position-row {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) 78px 34px !important;
+    gap: 7px !important;
+  }
+
+  /* =========================
+     SAVED STRATEGY BANK
+     ========================= */
+
+  .strategies-bank-grid {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 10px !important;
+  }
+
+  .strategies-bank-card {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) auto !important;
+    gap: 8px !important;
+    padding: 12px !important;
+  }
+
+  .strategies-bank-card > div:first-child {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .strategies-bank-actions {
+    flex: 0 0 auto;
+  }
+
+  .strategies-bank-menu {
+    max-width: calc(100vw - 48px);
+  }
+}
+
+
+/* =========================================================
+   VERY SMALL PHONES
+   ========================================================= */
+
+@media (max-width: 430px) {
+  .strategies-page-header h1 {
+    font-size: 24px !important;
+  }
+
+  .strategies-builder-panel,
+  .strategies-analysis-panel,
+  .strategies-attribution-panel,
+  .strategies-stress-card,
+  .strategies-score-card,
+  .strategies-create-panel {
+    padding: 12px !important;
+  }
+
+  .strategies-mode-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .strategies-position-row {
+    grid-template-columns: minmax(0, 1fr) 66px 32px !important;
+    gap: 6px !important;
+  }
+
+  .strategies-builder-position-row {
+    grid-template-columns: minmax(0, 1fr) 72px 32px !important;
+    gap: 6px !important;
+  }
+
+  .strategies-summary-grid,
+  .strategies-quant-grid,
+  .strategies-stress-impact-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .strategies-chart {
+    height: 270px !important;
+    padding: 12px 44px 12px 10px !important;
+  }
+
+  .strategies-bank-card {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .strategies-bank-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .strategies-bank-menu {
+    left: 0;
+    right: auto !important;
+  }
+}

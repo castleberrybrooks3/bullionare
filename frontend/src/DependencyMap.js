@@ -2,6 +2,7 @@ import React, { useState, useMemo } from "react";
 import dependencyTree from "./data/macroDependencyTree";
 import { buildReverseMacroMap } from "./data/buildReverseMacroMap";
 import { summarizeTickerMacroExposure } from "./data/macroLookupHelpers";
+import "./DependencyMap.css";
 
 const macroDrivers = Object.keys(dependencyTree);
 const macroDriverDescriptions = {
@@ -33,8 +34,6 @@ export default function DependencyMap({ onBuildStrategy }) {
   const [showWhyIndex, setShowWhyIndex] = useState(null);
   const [hoveredDriver, setHoveredDriver] = useState(null);
   const [tickerQuery, setTickerQuery] = useState("");
-
-  const currentNode = chain[chain.length - 1];
 
   const reverseMacroMap = useMemo(() => buildReverseMacroMap(), []);
   const normalizedTickerQuery = tickerQuery.trim().toUpperCase();
@@ -130,20 +129,20 @@ export default function DependencyMap({ onBuildStrategy }) {
 
   const renderNodeCard = (node, clickable = false, onClick = null, idx = null) => (
     <div
-  key={idx ?? node.name}
-  onClick={onClick || undefined}
-  className={clickable ? "hover-glow" : ""}
-  style={{
-    padding: "14px",
-    background: "#1a2238",
-    borderRadius: "8px",
-    display: "block",
-    width: "100%",
-    cursor: clickable ? "pointer" : "default",
-    boxSizing: "border-box",
-    border: "1px solid transparent"
-  }}
->
+      key={idx ?? node.name}
+      onClick={onClick || undefined}
+      className={`dependency-map-node-card${clickable ? " hover-glow" : ""}`}
+      style={{
+        padding: "14px",
+        background: "#1a2238",
+        borderRadius: "8px",
+        display: "block",
+        width: "100%",
+        cursor: clickable ? "pointer" : "default",
+        boxSizing: "border-box",
+        border: "1px solid transparent"
+      }}
+    >
       <div style={{ fontWeight: "bold", marginBottom: "8px" }}>
         {node.name} {node.direction === "up" ? "↑" : "↓"}
       </div>
@@ -174,14 +173,160 @@ export default function DependencyMap({ onBuildStrategy }) {
     </div>
   );
 
+  const renderExpandedNode = (node, depth) => (
+    <div
+      className="dependency-map-inline-expansion"
+      style={{
+        gridColumn: "1 / -1",
+        width: "100%",
+        minWidth: 0,
+        marginTop: "4px",
+        marginBottom: "8px",
+        padding: "18px",
+        background: "rgba(26, 34, 56, 0.56)",
+        border: "1px solid #2d3a59",
+        borderRadius: "10px",
+        boxSizing: "border-box"
+      }}
+    >
+      <h3 style={{ marginTop: 0 }}>{node.name}</h3>
+
+      <div style={{ marginBottom: "12px", lineHeight: "1.8" }}>
+        <div>Direction: {node.direction === "up" ? "Up ↑" : "Down ↓"}</div>
+        {node.magnitude != null && <div>Magnitude: {node.magnitude}/10</div>}
+        {node.speed && <div>Speed: {node.speed}</div>}
+        {node.confidence != null && <div>Confidence: {node.confidence}/10</div>}
+        {node.mechanism && <div>Mechanism: {node.mechanism}</div>}
+        {node.order != null && <div>Order: {node.order}</div>}
+        {node.whyShort && <div>Why: {node.whyShort}</div>}
+
+        {node.whyLong && (
+          <div style={{ marginTop: "10px" }}>
+            <button
+              onClick={() =>
+                setShowWhyIndex(showWhyIndex === depth ? null : depth)
+              }
+              style={{
+                padding: "6px 12px",
+                borderRadius: "6px",
+                border: "none",
+                cursor: "pointer"
+              }}
+            >
+              {showWhyIndex === depth ? "Hide Why" : "Show Why"}
+            </button>
+
+            {showWhyIndex === depth && (
+              <div
+                style={{
+                  marginTop: "10px",
+                  padding: "12px",
+                  background: "#24304d",
+                  borderRadius: "8px"
+                }}
+              >
+                {node.whyLong}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {node.stocks && node.stocks.length > 0 && (
+        <div style={{ marginBottom: node.next?.length ? "20px" : 0 }}>
+          <div
+            className="dependency-map-ticker-list"
+            style={{ marginBottom: "12px" }}
+          >
+            {node.stocks.map((ticker) => (
+              <span
+                key={ticker}
+                onClick={() => handleTickerClick(ticker, node)}
+                className="hover-glow"
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid transparent",
+                  background: node.direction === "up" ? "#19C37D" : "#E5484D",
+                  color: "white",
+                  borderRadius: "6px",
+                  marginRight: "8px",
+                  display: "inline-block",
+                  fontWeight: "bold",
+                  cursor: "pointer"
+                }}
+              >
+                {ticker}
+              </span>
+            ))}
+          </div>
+
+          <button
+            className="dependency-map-build-button"
+            onClick={() => handleBuildStrategyFromNode(node)}
+            style={{
+              padding: "9px 14px",
+              background: "#19C37D",
+              color: "#001f3f",
+              border: "none",
+              borderRadius: "8px",
+              fontWeight: "800",
+              cursor: "pointer"
+            }}
+          >
+            Build Strategy from These Tickers
+          </button>
+        </div>
+      )}
+
+      {node.next && node.next.length > 0 && (
+        <div style={{ marginTop: node.stocks?.length ? "22px" : "14px" }}>
+          <h3 style={{ marginBottom: "14px" }}>Secondary Effects</h3>
+
+          <div
+            className="dependency-map-secondary-grid"
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+              gap: "20px"
+            }}
+          >
+            {node.next.map((effect, i) => {
+              const isSelected =
+                chain[depth + 1] &&
+                chain[depth + 1].name === effect.name &&
+                chain[depth + 1].direction === effect.direction;
+
+              return (
+                <React.Fragment key={`${effect.name}-${effect.direction}-${i}`}>
+                  {renderNodeCard(
+                    effect,
+                    true,
+                    () => {
+                      setChain([...chain.slice(0, depth + 1), effect]);
+                      setShowWhyIndex(null);
+                    },
+                    `${depth}-${i}`
+                  )}
+
+                  {isSelected && renderExpandedNode(effect, depth + 1)}
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   return (
-    <div style={{ color: "white" }}>
+    <div className="dependency-map-page" style={{ color: "white" }}>
       <h1>Market Dependency Map</h1>
       <p>Select a macro driver and choose ↑ or ↓ to see market impact.</p>
 
       <div style={{ marginTop: "24px", marginBottom: "10px" }}>
         <h2 style={{ marginBottom: "10px" }}>Search a Stock</h2>
         <input
+          className="dependency-map-search-input"
           type="text"
           placeholder="Enter ticker (e.g. NVDA)"
           value={tickerQuery}
@@ -218,6 +363,7 @@ export default function DependencyMap({ onBuildStrategy }) {
             </div>
           ) : (
             <div
+              className="dependency-map-exposure-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
@@ -265,6 +411,7 @@ export default function DependencyMap({ onBuildStrategy }) {
       )}
 
       <div
+        className="dependency-map-driver-grid"
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(4, 1fr)",
@@ -276,7 +423,7 @@ export default function DependencyMap({ onBuildStrategy }) {
         {macroDrivers.map((driver) => (
 <div
   key={driver}
-  className="hover-glow"
+  className="dependency-map-driver-card hover-glow"
   onMouseEnter={() => setHoveredDriver(driver)}
   onMouseLeave={() => setHoveredDriver(null)}
   onClick={() => {
@@ -331,6 +478,7 @@ export default function DependencyMap({ onBuildStrategy }) {
           <h2>{selectedDriver}</h2>
 
           <div
+            className="dependency-map-direction-row"
             style={{
               display: "flex",
               justifyContent: "space-between",
@@ -339,7 +487,7 @@ export default function DependencyMap({ onBuildStrategy }) {
               flexWrap: "wrap"
             }}
           >
-            <div>
+            <div className="dependency-map-direction-buttons">
               <button
                 onClick={() => {
                   setDirection("up");
@@ -364,6 +512,7 @@ export default function DependencyMap({ onBuildStrategy }) {
             </div>
 
             <div
+              className="dependency-map-speed-key"
               style={{
                 minWidth: "260px",
                 maxWidth: "320px",
@@ -394,7 +543,10 @@ export default function DependencyMap({ onBuildStrategy }) {
           </h3>
 
           {chain.length > 0 && (
-            <div style={{ marginTop: "15px", marginBottom: "20px" }}>
+            <div
+              className="dependency-map-impact-chain"
+              style={{ marginTop: "15px", marginBottom: "20px" }}
+            >
               <strong>Impact Chain:</strong>{" "}
               {chain.map((c, i) => (
                 <span key={i}>
@@ -406,6 +558,7 @@ export default function DependencyMap({ onBuildStrategy }) {
           )}
 
           <div
+            className="dependency-map-impact-grid"
             style={{
               marginTop: "20px",
               display: "grid",
@@ -413,130 +566,29 @@ export default function DependencyMap({ onBuildStrategy }) {
               gap: "20px"
             }}
           >
-            {(dependencyTree[selectedDriver]?.[direction] || []).map((item, i) =>
-              renderNodeCard(
-                item,
-                true,
-                () => {
-                  setChain([item]);
-                  setShowWhyIndex(null);
-                },
-                i
-              )
-            )}
-          </div>
+            {(dependencyTree[selectedDriver]?.[direction] || []).map((item, i) => {
+              const isSelected =
+                chain[0] &&
+                chain[0].name === item.name &&
+                chain[0].direction === item.direction;
 
-          {chain.map((node, idx) => (
-            <div key={idx} style={{ marginTop: "30px" }}>
-              <h3>{node.name}</h3>
-
-              <div style={{ marginBottom: "12px", lineHeight: "1.8" }}>
-                <div>Direction: {node.direction === "up" ? "Up ↑" : "Down ↓"}</div>
-                {node.magnitude != null && <div>Magnitude: {node.magnitude}/10</div>}
-                {node.speed && <div>Speed: {node.speed}</div>}
-                {node.confidence != null && <div>Confidence: {node.confidence}/10</div>}
-                {node.mechanism && <div>Mechanism: {node.mechanism}</div>}
-                {node.order != null && <div>Order: {node.order}</div>}
-                {node.whyShort && <div>Why: {node.whyShort}</div>}
-
-                {node.whyLong && (
-                  <div style={{ marginTop: "10px" }}>
-                    <button
-                      onClick={() =>
-                        setShowWhyIndex(showWhyIndex === idx ? null : idx)
-                      }
-                      style={{
-                        padding: "6px 12px",
-                        borderRadius: "6px",
-                        border: "none",
-                        cursor: "pointer"
-                      }}
-                    >
-                      {showWhyIndex === idx ? "Hide Why" : "Show Why"}
-                    </button>
-
-                    {showWhyIndex === idx && (
-                      <div
-                        style={{
-                          marginTop: "10px",
-                          padding: "12px",
-                          background: "#24304d",
-                          borderRadius: "8px"
-                        }}
-                      >
-                        {node.whyLong}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {node.stocks && node.stocks.length > 0 && (
-                <div>
-                  <div style={{ marginBottom: "12px" }}>
-                    {node.stocks.map((ticker) => (
-                      <span
-                        key={ticker}
-                        onClick={() => handleTickerClick(ticker, node)}
-                        className="hover-glow"
-                        style={{
-                          padding: "8px 12px",
-                          border: "1px solid transparent",
-                          background: node.direction === "up" ? "#19C37D" : "#E5484D",
-                          color: "white",
-                          borderRadius: "6px",
-                          marginRight: "8px",
-                          display: "inline-block",
-                          fontWeight: "bold",
-                          cursor: "pointer"
-                        }}
-                      >
-                        {ticker}
-                      </span>
-                    ))}
-                  </div>
-
-                  <button
-                    onClick={() => handleBuildStrategyFromNode(node)}
-                    style={{
-                      padding: "9px 14px",
-                      background: "#19C37D",
-                      color: "#001f3f",
-                      border: "none",
-                      borderRadius: "8px",
-                      fontWeight: "800",
-                      cursor: "pointer"
-                    }}
-                  >
-                    Build Strategy from These Tickers
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-
-          {currentNode?.next && currentNode.next.length > 0 && (
-            <div style={{ marginTop: "30px" }}>
-              <h3>Secondary Effects</h3>
-
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-                  gap: "20px"
-                }}
-              >
-                {currentNode.next.map((effect, i) =>
-                  renderNodeCard(
-                    effect,
+              return (
+                <React.Fragment key={`${item.name}-${item.direction}-${i}`}>
+                  {renderNodeCard(
+                    item,
                     true,
-                    () => setChain([...chain, effect]),
+                    () => {
+                      setChain([item]);
+                      setShowWhyIndex(null);
+                    },
                     i
-                  )
-                )}
-              </div>
-            </div>
-          )}
+                  )}
+
+                  {isSelected && renderExpandedNode(item, 0)}
+                </React.Fragment>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>

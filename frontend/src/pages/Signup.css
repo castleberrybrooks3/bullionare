@@ -143,3 +143,105 @@
 .legal-checkbox a:hover {
   text-decoration: underline;
 }
+
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
+@media (max-width: 520px) {
+  .signup-page {
+    min-height: 100svh;
+
+    padding: 16px;
+
+    box-sizing: border-box;
+  }
+
+  .signup-card {
+    width: 100%;
+    max-width: 100%;
+
+    padding: 24px 18px;
+
+    border-radius: 14px;
+
+    box-sizing: border-box;
+  }
+
+  .signup-card h1 {
+    margin-top: 0;
+
+    font-size: 27px;
+  }
+
+  .signup-card p {
+    margin-bottom: 20px;
+
+    font-size: 14px;
+  }
+
+  .signup-form {
+    gap: 12px;
+  }
+
+  .signup-form input,
+  .signup-form select {
+    width: 100%;
+
+    padding: 13px;
+
+    font-size: 16px;
+
+    box-sizing: border-box;
+  }
+
+  .password-wrapper {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .password-wrapper input {
+    width: 100%;
+
+    padding-right: 50px;
+
+    box-sizing: border-box;
+  }
+
+  .signup-form button {
+    width: 100%;
+
+    padding: 13px;
+
+    box-sizing: border-box;
+  }
+
+  .signup-footer {
+    margin-top: 18px;
+
+    font-size: 13px;
+  }
+
+  .legal-checkbox {
+    gap: 9px;
+
+    margin: 12px 0 16px;
+
+    font-size: 13px;
+
+    line-height: 1.45;
+  }
+
+  .legal-checkbox input {
+    flex: 0 0 auto;
+
+    margin-top: 2px;
+  }
+
+  .auth-error,
+  .auth-success {
+    font-size: 13px;
+
+    line-height: 1.4;
+  }
+}

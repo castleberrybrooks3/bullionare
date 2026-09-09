@@ -123,3 +123,15 @@
   margin-top: 0px; /* moves it upward */
   margin-bottom: -50px;
 }
+
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
+@media (max-width: 768px) {
+  .home-title {
+    font-size: 56px;
+    letter-spacing: 3px;
+    margin-bottom: -38px;
+  }
+}

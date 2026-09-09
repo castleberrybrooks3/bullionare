@@ -1,7 +1,7 @@
 """
 Bullionaire Prediction Terminal — real-time market stream layer.
 
-Version: live-streams-v3.9-finance-inventory
+Version: live-streams-v4.0-stable-persisted-pairs
 
 Purpose
 -------
@@ -85,7 +85,7 @@ except ImportError as exc:  # pragma: no cover - dependency guidance
         'pip install "websockets>=12,<16" "cryptography>=42,<46"'
     ) from exc
 
-STREAMS_VERSION = "live-streams-v3.9-finance-inventory"
+STREAMS_VERSION = "live-streams-v4.0-stable-persisted-pairs"
 POLYMARKET_MARKET_WS_URL = (
     "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 )
@@ -440,7 +440,11 @@ def build_stream_manifest(
     context: Optional[Any] = None,
 ) -> StreamManifest:
     # Lazy import keeps parser/self-tests usable without opening the database.
-    from prediction_market_engine import ENGINE_VERSION, build_exact_pair_context
+    from prediction_market_engine import (
+        ENGINE_VERSION,
+        build_exact_pair_context,
+        stable_runtime_pair_uid,
+    )
 
     if context is None:
         context = build_exact_pair_context(market_group)
@@ -450,9 +454,12 @@ def build_stream_manifest(
         poly_market = context.markets[poly_contract.market_id]
         kalshi_market = context.markets[kalshi_contract.market_id]
         pair_group = str(poly_contract.market_group or "unknown")
-        pair_id = (
-            f"{pair_group}-{poly_market.id}-{kalshi_market.id}-"
-            f"{poly_contract.contract_identity}"
+        pair_id = stable_runtime_pair_uid(
+            pair_group,
+            poly_market.external_market_id,
+            kalshi_market.external_market_id,
+            poly_contract.contract_identity,
+            poly_contract.pair_relationship,
         )
         yes_asset = str(poly_contract.yes_key or "")
         no_asset = str(poly_contract.no_key or "")

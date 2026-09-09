@@ -88,3 +88,51 @@
     stroke-dashoffset: 0;
   }
 }
+
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
+@media (max-width: 768px) {
+  .dashboard-loading-overlay {
+    padding: 14px;
+  }
+
+  .dashboard-loading-card {
+    width: 100%;
+    max-width: 360px;
+
+    padding: 28px 18px;
+
+    border-radius: 14px;
+
+    box-sizing: border-box;
+  }
+
+  .dashboard-loading-card h1 {
+    font-size: 1.5rem;
+
+    margin-bottom: 8px;
+  }
+
+  .dashboard-loading-card p {
+    font-size: 0.9rem;
+
+    margin-bottom: 22px;
+  }
+
+  .logo-ring-wrap {
+    width: 120px;
+    height: 120px;
+  }
+
+  .overlay-logo {
+    width: 62px;
+    height: 62px;
+  }
+
+  .progress-ring {
+    width: 120px;
+    height: 120px;
+  }
+}

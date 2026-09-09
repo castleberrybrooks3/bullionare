@@ -1,0 +1,184 @@
+/* =========================================================
+   SUPPLY CHAIN — MOBILE ONLY
+   Desktop remains unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+  .supply-chain-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    padding: 14px 10px 24px !important;
+
+    overflow-x: hidden;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     PAGE TITLE
+     ========================= */
+
+  .supply-chain-page > h1 {
+    margin-top: 0;
+    margin-bottom: 8px;
+
+    font-size: 26px;
+    line-height: 1.15;
+  }
+
+  .supply-chain-page > p {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+
+  /* =========================
+     COMPANY SEARCH
+     ========================= */
+
+  .supply-chain-search-input {
+    width: 100% !important;
+    max-width: 100% !important;
+
+    font-size: 16px !important;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     COMPANY SELECTOR
+     4 columns -> 2 columns
+     ========================= */
+
+  .supply-chain-company-grid {
+    width: 100%;
+    max-width: 100%;
+
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+
+    gap: 10px !important;
+
+    margin-top: 20px !important;
+
+    box-sizing: border-box;
+  }
+
+  .supply-chain-company-card {
+    width: 100%;
+    min-width: 0;
+
+    padding: 14px 10px !important;
+
+    font-size: 13px;
+
+    box-sizing: border-box;
+
+    overflow-wrap: anywhere;
+  }
+
+
+  /* =========================
+     SELECTED COMPANY VIEW
+     ========================= */
+
+  .supply-chain-selected-view {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    margin-top: 18px !important;
+
+    box-sizing: border-box;
+  }
+
+  .supply-chain-back-button {
+    width: 100%;
+
+    margin-bottom: 16px !important;
+
+    box-sizing: border-box;
+  }
+
+  .supply-chain-selected-title {
+    margin-top: 4px !important;
+    margin-bottom: 6px !important;
+
+    font-size: 32px !important;
+    line-height: 1.08;
+
+    overflow-wrap: anywhere;
+  }
+
+  .supply-chain-selected-ticker {
+    margin-bottom: 16px !important;
+
+    font-size: 13px;
+  }
+
+
+  /* =========================
+     STRATEGY ACTION
+     ========================= */
+
+  .supply-chain-strategy-actions {
+    width: 100%;
+    max-width: 100%;
+
+    margin-bottom: 16px !important;
+
+    box-sizing: border-box;
+  }
+
+  .supply-chain-build-button {
+    width: 100%;
+
+    padding: 11px 14px !important;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     REACT FLOW MAP
+     ========================= */
+
+  .supply-chain-flow-container {
+    width: 100% !important;
+    max-width: 100% !important;
+
+    height: 62vh !important;
+    min-height: 480px;
+
+    border-radius: 12px !important;
+
+    box-sizing: border-box;
+  }
+
+  .supply-chain-flow-container .react-flow__controls {
+    transform: scale(0.88);
+    transform-origin: bottom left;
+  }
+}
+
+
+/* =========================================================
+   VERY SMALL PHONES
+   ========================================================= */
+
+@media (max-width: 430px) {
+  .supply-chain-company-grid {
+    grid-template-columns: 1fr !important;
+  }
+
+  .supply-chain-selected-title {
+    font-size: 28px !important;
+  }
+
+  .supply-chain-flow-container {
+    min-height: 440px;
+  }
+}

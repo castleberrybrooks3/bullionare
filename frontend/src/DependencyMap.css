@@ -1,0 +1,230 @@
+/* =========================================================
+   DEPENDENCY MAP — MOBILE ONLY
+   Desktop remains unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+  .dependency-map-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    overflow-x: hidden;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     PAGE TITLE
+     ========================= */
+
+  .dependency-map-page h1 {
+    font-size: 26px;
+    line-height: 1.15;
+    margin-top: 0;
+    margin-bottom: 8px;
+  }
+
+  .dependency-map-page > p {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+
+  /* =========================
+     STOCK SEARCH
+     ========================= */
+
+  .dependency-map-search-input {
+    width: 100% !important;
+    max-width: 100% !important;
+
+    font-size: 16px !important;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     STOCK MACRO EXPOSURES
+     2 columns -> 1 column
+     ========================= */
+
+  .dependency-map-exposure-grid {
+    width: 100%;
+    max-width: 100%;
+
+    grid-template-columns: 1fr !important;
+
+    gap: 12px !important;
+
+    box-sizing: border-box;
+  }
+
+  .dependency-map-exposure-grid > div {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     MACRO DRIVER CARDS
+     4 columns -> 2 columns
+     ========================= */
+
+  .dependency-map-driver-grid {
+    width: 100%;
+    max-width: 100%;
+
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+
+    gap: 10px !important;
+
+    margin-top: 20px !important;
+
+    box-sizing: border-box;
+  }
+
+  .dependency-map-driver-card {
+    width: 100%;
+    min-width: 0;
+
+    padding: 14px 10px !important;
+
+    font-size: 13px;
+
+    box-sizing: border-box;
+
+    overflow-wrap: anywhere;
+  }
+
+
+  /* =========================
+     DRIVER DIRECTION + SPEED KEY
+     ========================= */
+
+  .dependency-map-direction-row {
+    width: 100%;
+
+    flex-direction: column !important;
+
+    gap: 16px !important;
+
+    box-sizing: border-box;
+  }
+
+  .dependency-map-direction-buttons {
+    width: 100%;
+
+    display: flex;
+
+    gap: 10px;
+  }
+
+  .dependency-map-direction-buttons button {
+    flex: 1;
+
+    margin-right: 0 !important;
+
+    box-sizing: border-box;
+  }
+
+  .dependency-map-speed-key {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     IMPACT CARDS
+     4 columns -> 1 column
+     ========================= */
+
+  .dependency-map-impact-grid,
+  .dependency-map-secondary-grid {
+    width: 100%;
+    max-width: 100%;
+
+    grid-template-columns: 1fr !important;
+
+    gap: 12px !important;
+
+    box-sizing: border-box;
+  }
+
+  .dependency-map-node-card {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     IMPACT CHAIN
+     ========================= */
+
+  .dependency-map-impact-chain {
+    width: 100%;
+    max-width: 100%;
+
+    line-height: 1.7;
+
+    overflow-wrap: anywhere;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     TICKER BUTTONS
+     ========================= */
+
+  .dependency-map-ticker-list {
+    width: 100%;
+
+    display: flex;
+
+    flex-wrap: wrap;
+
+    gap: 8px;
+
+    box-sizing: border-box;
+  }
+
+  .dependency-map-ticker-list .hover-glow {
+    margin-right: 0 !important;
+  }
+
+
+  /* =========================
+     BUILD STRATEGY BUTTON
+     ========================= */
+
+  .dependency-map-build-button {
+    width: 100%;
+
+    padding: 11px 12px !important;
+
+    box-sizing: border-box;
+  }
+}
+
+
+/* =========================================================
+   VERY SMALL PHONES
+   ========================================================= */
+
+@media (max-width: 430px) {
+  .dependency-map-driver-grid {
+    grid-template-columns: 1fr !important;
+  }
+}

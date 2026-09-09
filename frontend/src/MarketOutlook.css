@@ -1,0 +1,109 @@
+/* =========================================================
+   MARKET OUTLOOK — MOBILE ONLY
+   Desktop remains unchanged
+   ========================================================= */
+
+@media (max-width: 768px) {
+  .market-outlook-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+
+    overflow-x: hidden;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     TOP MARKET CARDS
+     8 across -> 2 across
+     ========================= */
+
+  .market-outlook-index-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+
+    gap: 8px !important;
+
+    margin-bottom: 16px !important;
+  }
+
+
+  /* =========================
+     GAINERS / LOSERS
+     Side-by-side -> stacked
+     ========================= */
+
+  .market-outlook-two-column {
+    grid-template-columns: 1fr !important;
+
+    gap: 14px !important;
+
+    margin-bottom: 16px !important;
+  }
+
+  .market-outlook-two-column > div {
+    min-width: 0;
+
+    padding: 14px !important;
+
+    box-sizing: border-box;
+  }
+
+
+  /* =========================
+     MARKET BREADTH CHART
+     Allow horizontal scrolling
+     ========================= */
+
+  .market-outlook-breadth-chart {
+    width: 100%;
+
+    justify-content: flex-start !important;
+
+    gap: 10px !important;
+
+    overflow-x: auto;
+
+    overflow-y: hidden;
+
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .market-outlook-breadth-chart > div {
+    flex: 0 0 46px !important;
+  }
+
+
+  /* =========================
+     STOCK ROWS
+     ========================= */
+
+  .market-outlook-stock-row {
+    width: 100%;
+
+    grid-template-columns:
+      52px
+      minmax(0, 1fr)
+      66px
+      58px !important;
+
+    gap: 6px !important;
+
+    font-size: 12px;
+
+    box-sizing: border-box;
+  }
+
+  .market-outlook-stock-row > * {
+    min-width: 0;
+  }
+
+  .market-outlook-stock-row > span:nth-child(2) {
+    overflow: hidden;
+
+    text-overflow: ellipsis;
+
+    white-space: nowrap;
+  }
+}

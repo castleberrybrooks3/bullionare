@@ -80,21 +80,21 @@ function WatchlistAnalytics({
       }
 
       // Allocation-weighted 1Y standard deviation
-const rawStdDevValue = stock["Standard Deviation (1Y)"];
+      const rawStdDevValue = stock["Standard Deviation (1Y)"];
 
-if (rawStdDevValue !== null && rawStdDevValue !== "") {
-  const rawStdDev = Number(rawStdDevValue);
+      if (rawStdDevValue !== null && rawStdDevValue !== "") {
+        const rawStdDev = Number(rawStdDevValue);
 
-  if (
-    Number.isFinite(rawStdDev) &&
-    rawStdDev >= 0 &&
-    Number.isFinite(allocation) &&
-    allocation >= 0
-  ) {
-    stdDevWeightedSum += rawStdDev * (allocation / 100);
-    stdDevWeightTotal += allocation / 100;
-  }
-}
+        if (
+          Number.isFinite(rawStdDev) &&
+          rawStdDev >= 0 &&
+          Number.isFinite(allocation) &&
+          allocation >= 0
+        ) {
+          stdDevWeightedSum += rawStdDev * (allocation / 100);
+          stdDevWeightTotal += allocation / 100;
+        }
+      }
     });
 
     const labels = Object.keys(breakdown);
@@ -106,9 +106,7 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
             labels,
             datasets: [
               {
-                data: values.map((value) =>
-                  Number(value.toFixed(1))
-                ),
+                data: values.map((value) => Number(value.toFixed(1))),
                 backgroundColor: labels.map((sector) =>
                   getSectorColor(sector)
                 ),
@@ -124,9 +122,9 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
         : null;
 
     const avgStdDev =
-  stdDevWeightTotal > 0
-    ? stdDevWeightedSum / stdDevWeightTotal
-    : null;
+      stdDevWeightTotal > 0
+        ? stdDevWeightedSum / stdDevWeightTotal
+        : null;
 
     return {
       chartData,
@@ -168,6 +166,7 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
 
   return (
     <div
+      className="watchlist-analytics"
       style={{
         width: "100%",
         maxWidth: "650px",
@@ -185,6 +184,7 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
       }}
     >
       <div
+        className="watchlist-analytics-chart-side"
         style={{
           flex: "1 1 220px",
           minWidth: "220px",
@@ -197,6 +197,7 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
       >
         {chartData ? (
           <div
+            className="watchlist-analytics-pie"
             style={{
               width: "200px",
               maxWidth: "100%",
@@ -220,6 +221,7 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
       </div>
 
       <div
+        className="watchlist-analytics-metrics"
         style={{
           flex: "1 1 260px",
           minWidth: "240px",
@@ -276,8 +278,7 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
                   height: "14px",
                   backgroundColor: "#ffffff",
                   borderRadius: "2px",
-                  boxShadow:
-                    "0 0 6px rgba(255,255,255,0.6)",
+                  boxShadow: "0 0 6px rgba(255,255,255,0.6)",
                 }}
               />
             )}
@@ -316,11 +317,11 @@ if (rawStdDevValue !== null && rawStdDevValue !== "") {
         </div>
 
         <div
+          className="watchlist-analytics-stddev-row"
           style={{
             marginTop: "12px",
             paddingTop: "10px",
-            borderTop:
-              "1px solid rgba(255,255,255,0.10)",
+            borderTop: "1px solid rgba(255,255,255,0.10)",
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",

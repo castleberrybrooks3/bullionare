@@ -19,6 +19,8 @@ from prediction_market_engine import (
     GENERIC_MARKET_GROUPS,
     UNAVAILABLE_ROUTE_STATUSES,
     build_exact_pair_context,
+    load_persisted_runtime_context,
+    stable_runtime_pair_uid,
     route_pricing_self_test,
 )
 from prediction_market_settlement import (
@@ -43,7 +45,7 @@ from prediction_markets_routes import (
 )
 
 
-REGRESSION_VERSION = "prediction-backend-regression-v4.8-zero-epoch-delta-verified"
+REGRESSION_VERSION = "prediction-backend-regression-v5.0-persisted-runtime"
 DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_REPORT = "prediction_market_backend_regression_report.json"
 LIVE_BEARER_TOKEN = ""
@@ -446,7 +448,7 @@ def component_self_tests(state: Dict[str, Any]) -> None:
     )
 
 
-def context_checks(state: Dict[str, Any]) -> None:
+def context_checks(state: Dict[str, Any], *, full_rebuild_oracle: bool = False) -> None:
     # Regression compatibility should be behavior/contract based. Engine and
     # stream implementation version strings may advance without invalidating
     # the API contract, so avoid hard-coding a specific implementation version.
@@ -462,8 +464,13 @@ def context_checks(state: Dict[str, Any]) -> None:
         SETTLEMENT_VERSION,
     )
 
-    context = build_exact_pair_context("all")
+    context = (
+        build_exact_pair_context("all")
+        if full_rebuild_oracle
+        else load_persisted_runtime_context("all")
+    )
     state["context"] = context
+    state["contextSource"] = "full-rebuild-oracle" if full_rebuild_oracle else "persisted-runtime"
 
     require(len(context.exact_pairs) > 0, "no exact pairs were built")
     require(
@@ -513,10 +520,12 @@ def context_checks(state: Dict[str, Any]) -> None:
             "settlementVerified does not match settlementStatus",
         )
 
+        poly_market = context.markets[poly.market_id]
+        kalshi_market = context.markets[kalshi.market_id]
         key = (
             poly.market_group,
-            poly.market_id,
-            kalshi.market_id,
+            str(poly_market.external_market_id),
+            str(kalshi_market.external_market_id),
             poly.contract_identity,
         )
         require(key not in unique_keys, f"duplicate exact pair: {key}")
@@ -633,6 +642,14 @@ def manifest_checks(state: Dict[str, Any]) -> None:
         require(bool(pair.polymarket_yes_asset_id), f"missing YES asset: {pair.id}")
         require(bool(pair.polymarket_no_asset_id), f"missing NO asset: {pair.id}")
         require(bool(pair.kalshi_market_ticker), f"missing Kalshi ticker: {pair.id}")
+        expected_pair_id = stable_runtime_pair_uid(
+            pair.market_group,
+            pair.polymarket_market_id,
+            pair.kalshi_market_ticker,
+            pair.contract_key,
+            pair.pair_relationship,
+        )
+        require(pair.id == expected_pair_id, f"unstable manifest pair ID: {pair.id}")
 
 
 def expected_opportunity_class(row: Mapping[str, Any]) -> str:
@@ -1056,6 +1073,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-url", default=DEFAULT_API_URL)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument(
+        "--full-rebuild-oracle",
+        action="store_true",
+        help="Run the expensive full matcher instead of validating the persisted runtime.",
+    )
     parser.add_argument("--startup-timeout", type=int, default=240)
     parser.add_argument("--report", default=DEFAULT_REPORT)
     parser.add_argument(
@@ -1083,7 +1105,11 @@ def main() -> int:
 
     run_check("settlement normalizers", parser_checks, records)
     run_check("component route-accounting self-tests", lambda: component_self_tests(state), records)
-    run_check("exact-pair context", lambda: context_checks(state), records)
+    run_check(
+        "exact-pair context",
+        lambda: context_checks(state, full_rebuild_oracle=bool(args.full_rebuild_oracle)),
+        records,
+    )
     run_check("stream manifest", lambda: manifest_checks(state), records)
 
     if not args.offline:
@@ -1106,6 +1132,7 @@ def main() -> int:
         "streamsVersion": STREAMS_VERSION,
         "apiContractVersion": TERMINAL_API_CONTRACT_VERSION,
         "offline": args.offline,
+        "contextSource": state.get("contextSource"),
         "successful": successful,
         "records": records,
         "componentSelfTests": state.get("componentSelfTests"),

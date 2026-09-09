@@ -74,11 +74,13 @@ function PageTracker() {
 
   useEffect(() => {
     if (window.gtag) {
-      window.gtag("config", "G-L6BKRZE20E", {
-        page_path: location.pathname,
+      window.gtag("event", "page_view", {
+        page_path: location.pathname + location.search,
+        page_location: window.location.href,
+        page_title: document.title,
       });
     }
-  }, [location]);
+  }, [location.pathname, location.search]);
 
   return null;
 }
@@ -128,10 +130,10 @@ function MobileDashboardBlock() {
   );
 }
 
-function DesktopProtected({ isMobile, children }) {
+function DesktopProtected({ children }) {
   return (
     <ProtectedRoute>
-      {isMobile ? <MobileDashboardBlock /> : children}
+      {children}
     </ProtectedRoute>
   );
 }

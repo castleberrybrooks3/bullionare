@@ -34,6 +34,7 @@ from prediction_market_engine import (
     LiveFeePricingContext,
     build_exact_pair_context,
     build_live_fee_pricing_context,
+    load_persisted_runtime_context,
     prediction_snapshot_marker,
     price_live_pair_snapshot,
     scan_prediction_market_discrepancies,
@@ -581,10 +582,24 @@ async def prediction_market_lifespan(_app):
     try:
         _validate_auth_configuration()
 
-        exact_context = await asyncio.to_thread(
-            build_exact_pair_context,
-            "all",
-        )
+        published_snapshot = await asyncio.to_thread(prediction_snapshot_marker)
+        if published_snapshot and str(published_snapshot).startswith("runtime:"):
+            exact_context = await asyncio.to_thread(
+                load_persisted_runtime_context,
+                "all",
+                expected_snapshot_marker=str(published_snapshot),
+            )
+        elif env_flag("PREDICTION_ALLOW_FULL_BUILD_IN_WEB", False):
+            LOGGER.warning(
+                "No persisted prediction runtime exists; performing explicitly enabled "
+                "full in-web build. This should remain disabled on Render production."
+            )
+            exact_context = await asyncio.to_thread(build_exact_pair_context, "all")
+        else:
+            raise RuntimeError(
+                "No persisted prediction-market runtime generation is published. "
+                "Run prediction_markets_service.py refresh before starting production."
+            )
         manifest = build_stream_manifest(
             "all",
             context=exact_context,
@@ -1202,7 +1217,11 @@ async def _hot_reload_prediction_terminal(target_snapshot: str) -> bool:
         )
 
         try:
-            exact_context = await asyncio.to_thread(build_exact_pair_context, "all")
+            exact_context = await asyncio.to_thread(
+                load_persisted_runtime_context,
+                "all",
+                expected_snapshot_marker=str(target_snapshot),
+            )
             context_snapshot = getattr(exact_context, "snapshot_marker", None)
             if context_snapshot is None or str(context_snapshot) != str(target_snapshot):
                 raise RuntimeError(

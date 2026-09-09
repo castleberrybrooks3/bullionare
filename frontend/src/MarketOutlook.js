@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import "./MarketOutlook.css";
 
 export default function MarketOutlook() {
   const [gainers, setGainers] = useState([]);
@@ -107,10 +108,11 @@ export default function MarketOutlook() {
     : 1;
 
   return (
-    <div style={{ color: "white" }}>
+    <div className="market-outlook-page" style={{ color: "white" }}>
       <h1 style={{ marginBottom: "8px" }}>Market Outlook</h1>
 
       <div
+        className="market-outlook-index-grid"
   style={{
     display: "grid",
     gridTemplateColumns: "repeat(8, minmax(0, 1fr))",
@@ -227,6 +229,7 @@ export default function MarketOutlook() {
             {breadth && (
               <>
                 <div
+                  className="market-outlook-breadth-chart"
                   style={{
                     height: "260px",
                     display: "flex",
@@ -336,6 +339,7 @@ export default function MarketOutlook() {
           </div>
 
           <div
+            className="market-outlook-two-column"
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
@@ -379,6 +383,7 @@ export default function MarketOutlook() {
 
               {gainersAbove5.map((stock) => (
                 <div
+                  className="market-outlook-stock-row"
                   key={stock.Ticker}
                   style={{
                     display: "grid",
@@ -435,6 +440,7 @@ export default function MarketOutlook() {
 
               {losersAbove5.map((stock) => (
                 <div
+                  className="market-outlook-stock-row"
                   key={stock.Ticker}
                   style={{
                     display: "grid",
@@ -457,6 +463,7 @@ export default function MarketOutlook() {
           </div>
 
           <div
+            className="market-outlook-two-column"
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
@@ -499,6 +506,7 @@ export default function MarketOutlook() {
 
               {gainers.map((stock) => (
                 <div
+                  className="market-outlook-stock-row"
                   key={stock.Ticker}
                   style={{
                     display: "grid",
@@ -555,6 +563,7 @@ export default function MarketOutlook() {
 
               {losers.map((stock) => (
                 <div
+                  className="market-outlook-stock-row"
                   key={stock.Ticker}
                   style={{
                     display: "grid",

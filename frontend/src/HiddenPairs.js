@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import hiddenPairsTree from "./data/hiddenPairsTree";
 import tickerNames from "./data/tickerNames";
+import "./HiddenPairs.css";
 
 export default function HiddenPairs({ onBuildStrategy }) {
   const [search, setSearch] = useState("");
@@ -179,7 +180,7 @@ const handleClearSearch = () => {
   };
 
   return (
-    <div style={{ color: "white" }}>
+    <div className="hidden-pairs-page" style={{ color: "white" }}>
       <h1 style={{ marginBottom: "8px" }}>Hidden Pairs</h1>
 
       <p style={{ opacity: 0.75, maxWidth: "950px", lineHeight: 1.5 }}>
@@ -188,6 +189,7 @@ const handleClearSearch = () => {
 </p>
 
       <form
+        className="hidden-pairs-search-form"
         onSubmit={handleSubmit}
         style={{
           display: "grid",
@@ -200,6 +202,7 @@ const handleClearSearch = () => {
         }}
       >
         <input
+          className="hidden-pairs-search-input"
           value={search}
           onChange={(e) => {
   setSearch(e.target.value);
@@ -219,6 +222,7 @@ const handleClearSearch = () => {
         />
 
         <select
+          className="hidden-pairs-filter-select"
           value={filterType}
           onChange={(e) => setFilterType(e.target.value)}
           style={{
@@ -237,6 +241,7 @@ const handleClearSearch = () => {
         </select>
 
         <button
+          className="hidden-pairs-search-button"
           type="submit"
           style={{
             padding: "14px 16px",
@@ -252,6 +257,7 @@ const handleClearSearch = () => {
         </button>
 
   <button
+  className="hidden-pairs-clear-button"
   type="button"
   onClick={handleClearSearch}
   disabled={!search && !selectedData && !error}
@@ -303,6 +309,7 @@ const handleClearSearch = () => {
       {selectedData && (
         <>
           <div
+            className="hidden-pairs-result-card"
             style={{
               marginTop: "24px",
               padding: "24px",
@@ -314,6 +321,7 @@ const handleClearSearch = () => {
           >
             {topMatch && (
   <div
+    className="hidden-pairs-top-grid"
     style={{
       display: "grid",
       gridTemplateColumns: "minmax(0, 1.5fr) minmax(260px, 0.7fr)",
@@ -324,14 +332,15 @@ const handleClearSearch = () => {
     <div>
       <div style={{ fontSize: "13px", opacity: 0.6 }}>Search result</div>
 
-      <h2 style={{ margin: "6px 0 34px", fontSize: "34px" }}>
+      <h2 className="hidden-pairs-search-result-title" style={{ margin: "6px 0 34px", fontSize: "34px" }}>
         {selectedData.ticker}
-        <span style={{ fontSize: "16px", opacity: 0.65, marginLeft: "10px" }}>
+        <span className="hidden-pairs-search-result-name" style={{ fontSize: "16px", opacity: 0.65, marginLeft: "10px" }}>
           {selectedData.name}
         </span>
       </h2>
 
       <div
+        className="hidden-pairs-closest-card"
         style={{
   padding: "18px",
   background: "rgba(25,195,125,0.1)",
@@ -354,7 +363,7 @@ const handleClearSearch = () => {
           {formatRelationship(topMatch.relationship)}
         </div>
 
-        <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
+        <div className="hidden-pairs-action-row" style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
           <button
             onClick={() => handleViewPair(selectedData.ticker, topMatch.ticker)}
             style={{
@@ -389,6 +398,7 @@ const handleClearSearch = () => {
     </div>
 
     <div
+  className="hidden-pairs-result-group"
   style={{
     padding: "18px",
     background: "rgba(15,23,42,0.72)",
@@ -499,6 +509,7 @@ const handleClearSearch = () => {
 )}
 
     <div
+      className="hidden-pairs-results-grid"
       style={{
         display: "grid",
         gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
@@ -511,7 +522,7 @@ const handleClearSearch = () => {
   .map((match) => (
         <div
           key={`${activeResultsView}-${match.ticker}`}
-          className="hover-glow"
+          className="hover-glow hidden-pairs-match-card"
           style={{
             padding: "18px",
             background:
@@ -522,7 +533,7 @@ const handleClearSearch = () => {
             border: "1px solid rgba(255,255,255,0.08)"
           }}
         >
-          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
+          <div className="hidden-pairs-match-header" style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
             <div>
               <div style={{ fontSize: "22px", fontWeight: 900 }}>
                 {selectedData.ticker} ↔ {match.ticker}
@@ -564,7 +575,7 @@ color:
 {activeResultsView === "hedges" ? " · Inverse Movement" : ` · ${match.type}`}
           </div>
 
-          <div style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
+          <div className="hidden-pairs-match-actions" style={{ display: "flex", gap: "10px", marginTop: "16px" }}>
             <button
               onClick={() => handleViewPair(selectedData.ticker, match.ticker)}
               style={{
@@ -608,6 +619,7 @@ color:
       {/* OLD CURATED HIDDEN PAIRS SECTION */}
       <div style={{ marginTop: "42px" }}>
         <div
+          className="hidden-pairs-curated-header"
           style={{
             display: "flex",
             justifyContent: "space-between",
@@ -644,6 +656,7 @@ color:
 
         {!selectedCategory && (
           <div
+            className="hidden-pairs-curated-grid"
             style={{
               display: "grid",
               gridTemplateColumns: "repeat(3, 1fr)",
@@ -679,6 +692,7 @@ color:
             </h3>
 
             <div
+              className="hidden-pairs-curated-pairs-grid"
               style={{
                 display: "grid",
                 gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",

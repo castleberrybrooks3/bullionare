@@ -18,8 +18,23 @@ const PredictionMarkets = lazy(() => import("../PredictionMarkets"));
 
 export default function Dashboard() {
   const [activeMenu, setActiveMenu] = useState("Stocks");
-  const [selectedSector, setSelectedSector] = useState(null);
-  const [sidebarWidth, setSidebarWidth] = useState(220);
+
+const [selectedSector, setSelectedSector] = useState(() => {
+  try {
+    const saved = sessionStorage.getItem(
+      "bullionaire_stocks_dashboard_filters_v1"
+    );
+
+    if (!saved) return null;
+
+    const parsed = JSON.parse(saved);
+    return parsed?.selectedSector || null;
+  } catch {
+    return null;
+  }
+});
+
+const [sidebarWidth, setSidebarWidth] = useState(220);
   const [collapsed, setCollapsed] = useState(false);
   const sidebarRef = useRef(null);
   const isResizing = useRef(false);
@@ -56,7 +71,24 @@ export default function Dashboard() {
     "/dashboard/feedback": "Feedback",
   };
 
+  const clearSavedStockFilters = () => {
+  try {
+    sessionStorage.removeItem(
+      "bullionaire_stocks_dashboard_filters_v1"
+    );
+
+    sessionStorage.removeItem(
+      "bullionaire_stocks_dashboard_scroll_v1"
+    );
+  } catch {
+    // Ignore storage errors
+  }
+
+  setSelectedSector(null);
+};
+
   if (location.pathname.startsWith("/prediction-markets")) {
+    clearSavedStockFilters();
     setActiveMenu("PredictionMarkets");
     setSectorOpen(false);
     return;
@@ -69,7 +101,7 @@ export default function Dashboard() {
     setSectorOpen(false);
 
     if (menuFromPath !== "Stocks") {
-      setSelectedSector(null);
+      clearSavedStockFilters();
     }
   }
 }, [location.pathname]);
@@ -443,9 +475,10 @@ const openStrategyFromIdea = (strategyIdea) => {
     <Feedback />
   ) : (
     <StockTable
-      view={activeMenu}
-      selectedSector={selectedSector}
-    />
+  view={activeMenu}
+  selectedSector={selectedSector}
+  setSelectedSector={setSelectedSector}
+/>
   )}
 </main>
       </div>

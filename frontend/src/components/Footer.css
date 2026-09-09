@@ -39,3 +39,52 @@
 .footer-right a:hover {
   text-decoration: underline;
 }
+
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
+@media (max-width: 768px) {
+  .app-footer {
+    padding: 16px 12px;
+    font-size: 11px;
+  }
+
+  .footer-content {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+
+    gap: 10px;
+
+    text-align: center;
+  }
+
+  .footer-left {
+    width: 100%;
+    text-align: center;
+  }
+
+  .footer-center {
+    width: 100%;
+    flex: none;
+
+    text-align: center;
+
+    line-height: 1.45;
+  }
+
+  .footer-right {
+    width: 100%;
+
+    justify-content: center;
+
+    gap: 12px;
+
+    flex-wrap: wrap;
+  }
+
+  .footer-right a {
+    font-size: 11px;
+  }
+}

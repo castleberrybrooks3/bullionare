@@ -29,3 +29,45 @@
   background: #19C37D;
   color: #001f3f;
 }
+
+/* =========================
+   MOBILE ONLY
+   ========================= */
+
+@media (max-width: 768px) {
+  .account-type-page {
+    min-height: 100svh;
+    height: auto;
+
+    padding: 24px 16px;
+
+    box-sizing: border-box;
+
+    text-align: center;
+  }
+
+  .account-options {
+    width: 100%;
+
+    flex-direction: column;
+
+    gap: 12px;
+
+    margin-top: 24px;
+  }
+
+  .account-options button {
+    width: 100%;
+    max-width: 340px;
+
+    margin: 0 auto;
+
+    padding: 16px 18px;
+
+    font-size: 15px;
+
+    border-radius: 10px;
+
+    box-sizing: border-box;
+  }
+}

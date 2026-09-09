@@ -24,6 +24,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, 
 from urllib.parse import quote
 
 import requests
+import psycopg2.extras
 from pypdf import PdfReader
 
 from db import get_db_connection_dict
@@ -36,7 +37,10 @@ from prediction_market_settlement import (
 )
 
 
-ENGINE_VERSION = "native-exact-v20.18-soccer-only-cap"
+ENGINE_VERSION = "native-exact-v20.19.1-bootstrap-timeout-safe"
+
+
+MATCH_CACHE_VERSION = "exact-pair-cache-v1"
 
 POLYMARKET_CLOB_URL = "https://clob.polymarket.com"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -6976,7 +6980,7 @@ def load_catalog(
 
     with get_db_connection_dict() as conn:
         with conn.cursor() as cur:
-            cur.execute("SET LOCAL statement_timeout = '120s'")
+            cur.execute("SET LOCAL statement_timeout = '600s'")
 
             cur.execute(
                 """
@@ -7456,7 +7460,16 @@ def load_catalog(
         generic_diagnostics,
         finance_company_candidate_rows,
     )
-def prediction_snapshot_marker() -> Optional[str]:
+def _runtime_generation_marker(row: Mapping[str, Any]) -> str:
+    generated = iso_value(row.get("generated_at")) or ""
+    return (
+        f"runtime:{row.get('id')}:{generated}:"
+        f"{int(row.get('pair_count') or 0)}:"
+        f"{int(row.get('finance_inventory_count') or 0)}"
+    )
+
+
+def _legacy_ingest_snapshot_marker() -> Optional[str]:
     try:
         with get_db_connection_dict() as conn:
             with conn.cursor() as cur:
@@ -7472,12 +7485,654 @@ def prediction_snapshot_marker() -> Optional[str]:
                 row = cur.fetchone()
     except Exception:
         return None
-
     if not row:
         return None
-
     finished = iso_value(row.get("finished_at"))
-    return f"{row.get('id')}:{finished}:{row.get('markets_seen')}"
+    return f"ingest:{row.get('id')}:{finished}:{row.get('markets_seen')}"
+
+
+def prediction_snapshot_marker() -> Optional[str]:
+    """
+    Return the published live-runtime generation marker.
+
+    Catalog ingests no longer force production hot reloads. Only a fully built,
+    persisted runtime generation advances this marker. The legacy ingest marker
+    remains a bootstrap fallback until the persistent-runtime schema is installed.
+    """
+    try:
+        with get_db_connection_dict() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, generated_at, pair_count, finance_inventory_count
+                    FROM public.prediction_market_runtime_generations
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+        if row:
+            return _runtime_generation_marker(row)
+    except Exception:
+        pass
+    return _legacy_ingest_snapshot_marker()
+
+
+def has_persisted_runtime_generation() -> bool:
+    marker = prediction_snapshot_marker()
+    return bool(marker and str(marker).startswith("runtime:"))
+
+
+def persisted_runtime_rebuild_pending() -> bool:
+    """Return True when catalog semantics or verifier versions outran the published runtime."""
+    try:
+        with get_db_connection_dict() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, catalog_ingest_run_id, matcher_version, settlement_version
+                    FROM public.prediction_market_runtime_generations
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """
+                )
+                generation = cur.fetchone()
+                if not generation:
+                    return True
+                if str(generation.get("matcher_version") or "") != MATCH_CACHE_VERSION:
+                    return True
+                if str(generation.get("settlement_version") or "") != SETTLEMENT_VERSION:
+                    return True
+                published_ingest = int(generation.get("catalog_ingest_run_id") or 0)
+                cur.execute(
+                    """
+                    SELECT COALESCE(MAX(id), 0) AS latest_semantic_ingest
+                    FROM public.prediction_market_ingest_runs
+                    WHERE status = 'completed'
+                      AND semantic_change_count > 0
+                    """
+                )
+                row = cur.fetchone() or {}
+                return int(row.get("latest_semantic_ingest") or 0) > published_ingest
+    except Exception:
+        return True
+
+
+def stable_runtime_pair_uid(
+    market_group: str,
+    polymarket_external_market_id: Any,
+    kalshi_external_market_id: Any,
+    contract_identity: str,
+    pair_relationship: str = "direct",
+) -> str:
+    """Stable pair identity independent of transient PostgreSQL BIGSERIAL IDs."""
+    raw = "|".join(
+        [
+            str(market_group or "unknown"),
+            str(polymarket_external_market_id or ""),
+            str(kalshi_external_market_id or ""),
+            str(contract_identity or ""),
+            str(pair_relationship or "direct"),
+        ]
+    )
+    return "pair-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _runtime_event_payload(event: Event) -> Dict[str, Any]:
+    return {
+        "id": event.id,
+        "venue": event.venue,
+        "external_event_id": event.external_event_id,
+        "external_series_id": event.external_series_id,
+        "title": event.title,
+        "category": event.category,
+        "event_type": event.event_type,
+        "venue_status": event.venue_status,
+        "start_time": iso_value(event.start_time),
+        "end_time": iso_value(event.end_time),
+        "close_time": iso_value(event.close_time),
+        "settlement_time": iso_value(event.settlement_time),
+        "native_game_id": event.native_game_id,
+        "milestone_id": event.milestone_id,
+        "source_id": event.source_id,
+        "source_ids": event.source_ids,
+        "details": event.details,
+        "raw": event.raw,
+    }
+
+
+def _runtime_market_payload(market: Market) -> Dict[str, Any]:
+    return {
+        "id": market.id,
+        "venue": market.venue,
+        "event": _runtime_event_payload(market.event),
+        "external_market_id": market.external_market_id,
+        "external_event_id": market.external_event_id,
+        "external_series_id": market.external_series_id,
+        "event_title": market.event_title,
+        "market_title": market.market_title,
+        "market_slug": market.market_slug,
+        "category": market.category,
+        "market_type": market.market_type,
+        "sports_market_type": market.sports_market_type,
+        "venue_status": market.venue_status,
+        "resolution_time": iso_value(market.resolution_time),
+        "event_start_time": iso_value(market.event_start_time),
+        "close_time": iso_value(market.close_time),
+        "settlement_time": iso_value(market.settlement_time),
+        "rules_url": market.rules_url,
+        "rules_primary": market.rules_primary,
+        "rules_secondary": market.rules_secondary,
+        "accepting_orders": market.accepting_orders,
+        "primary_participant_key": market.primary_participant_key,
+        "line_value": market.line_value,
+        "floor_strike": market.floor_strike,
+        "cap_strike": market.cap_strike,
+        "functional_strike": market.functional_strike,
+        "custom_strike": market.custom_strike,
+        "contract_semantics": market.contract_semantics,
+        "outcomes": market.outcomes,
+        "raw": market.raw,
+        "liquidity": market.liquidity,
+        "volume_24h": market.volume_24h,
+        "total_volume": market.total_volume,
+        "open_interest": market.open_interest,
+        "updated_at": iso_value(market.updated_at),
+    }
+
+
+def _runtime_event_from_payload(payload: Mapping[str, Any]) -> Event:
+    return Event(
+        id=int(payload.get("id") or 0),
+        venue=str(payload.get("venue") or ""),
+        external_event_id=str(payload.get("external_event_id") or ""),
+        external_series_id=payload.get("external_series_id"),
+        title=str(payload.get("title") or ""),
+        category=payload.get("category"),
+        event_type=payload.get("event_type"),
+        venue_status=payload.get("venue_status"),
+        start_time=parse_datetime(payload.get("start_time")),
+        end_time=parse_datetime(payload.get("end_time")),
+        close_time=parse_datetime(payload.get("close_time")),
+        settlement_time=parse_datetime(payload.get("settlement_time")),
+        native_game_id=payload.get("native_game_id"),
+        milestone_id=payload.get("milestone_id"),
+        source_id=payload.get("source_id"),
+        source_ids=as_json(payload.get("source_ids"), dict, {}),
+        details=as_json(payload.get("details"), dict, {}),
+        raw=as_json(payload.get("raw"), dict, {}),
+        entities=[],
+    )
+
+
+def _runtime_market_from_payload(payload: Mapping[str, Any]) -> Market:
+    event_payload = as_json(payload.get("event"), dict, {})
+    event = _runtime_event_from_payload(event_payload)
+    return Market(
+        id=int(payload.get("id") or 0),
+        venue=str(payload.get("venue") or ""),
+        event=event,
+        external_market_id=str(payload.get("external_market_id") or ""),
+        external_event_id=payload.get("external_event_id"),
+        external_series_id=payload.get("external_series_id"),
+        event_title=str(payload.get("event_title") or event.title),
+        market_title=str(payload.get("market_title") or ""),
+        market_slug=payload.get("market_slug"),
+        category=payload.get("category"),
+        market_type=payload.get("market_type"),
+        sports_market_type=payload.get("sports_market_type"),
+        venue_status=payload.get("venue_status"),
+        resolution_time=parse_datetime(payload.get("resolution_time")),
+        event_start_time=parse_datetime(payload.get("event_start_time")),
+        close_time=parse_datetime(payload.get("close_time")),
+        settlement_time=parse_datetime(payload.get("settlement_time")),
+        rules_url=payload.get("rules_url"),
+        rules_primary=payload.get("rules_primary"),
+        rules_secondary=payload.get("rules_secondary"),
+        accepting_orders=payload.get("accepting_orders"),
+        primary_participant_key=payload.get("primary_participant_key"),
+        line_value=payload.get("line_value"),
+        floor_strike=payload.get("floor_strike"),
+        cap_strike=payload.get("cap_strike"),
+        functional_strike=payload.get("functional_strike"),
+        custom_strike=as_json(payload.get("custom_strike"), dict, {}),
+        contract_semantics=as_json(payload.get("contract_semantics"), dict, {}),
+        outcomes=as_json(payload.get("outcomes"), list, []),
+        raw=as_json(payload.get("raw"), dict, {}),
+        liquidity=as_float(payload.get("liquidity")),
+        volume_24h=as_float(payload.get("volume_24h")),
+        total_volume=as_float(payload.get("total_volume")),
+        open_interest=as_float(payload.get("open_interest")),
+        updated_at=parse_datetime(payload.get("updated_at")),
+    )
+
+
+def _exact_contract_runtime_payload(contract: ExactContract) -> Dict[str, Any]:
+    return {
+        "market_id": contract.market_id,
+        "venue": contract.venue,
+        "event_identity": contract.event_identity,
+        "contract_identity": contract.contract_identity,
+        "market_group": contract.market_group,
+        "event_title": contract.event_title,
+        "contract_title": contract.contract_title,
+        "scheduled_time": contract.scheduled_time,
+        "yes_key": contract.yes_key,
+        "no_key": contract.no_key,
+        "yes_label": contract.yes_label,
+        "no_label": contract.no_label,
+        "event_match_method": contract.event_match_method,
+        "pair_relationship": contract.pair_relationship,
+        "settlement_status": contract.settlement_status,
+        "settlement_stream_eligible": contract.settlement_stream_eligible,
+        "settlement_verified": contract.settlement_verified,
+        "settlement_signature": contract.settlement_signature,
+        "settlement_reasons": list(contract.settlement_reasons),
+    }
+
+
+def _exact_contract_from_runtime_payload(payload: Mapping[str, Any]) -> ExactContract:
+    return ExactContract(
+        market_id=int(payload.get("market_id") or 0),
+        venue=str(payload.get("venue") or ""),
+        event_identity=str(payload.get("event_identity") or ""),
+        contract_identity=str(payload.get("contract_identity") or ""),
+        market_group=str(payload.get("market_group") or ""),
+        event_title=str(payload.get("event_title") or ""),
+        contract_title=str(payload.get("contract_title") or ""),
+        scheduled_time=payload.get("scheduled_time"),
+        yes_key=str(payload.get("yes_key") or ""),
+        no_key=str(payload.get("no_key") or ""),
+        yes_label=str(payload.get("yes_label") or ""),
+        no_label=str(payload.get("no_label") or ""),
+        event_match_method=str(payload.get("event_match_method") or "persisted"),
+        pair_relationship=str(payload.get("pair_relationship") or "direct"),
+        settlement_status=str(payload.get("settlement_status") or "unverified"),
+        settlement_stream_eligible=bool(payload.get("settlement_stream_eligible")),
+        settlement_verified=bool(payload.get("settlement_verified")),
+        settlement_signature=as_json(payload.get("settlement_signature"), dict, {}),
+        settlement_reasons=tuple(as_json(payload.get("settlement_reasons"), list, [])),
+    )
+
+
+def _semantic_fingerprint_for_runtime_market(market: Market) -> str:
+    payload = _runtime_market_payload(market)
+    payload.pop("liquidity", None)
+    payload.pop("volume_24h", None)
+    payload.pop("total_volume", None)
+    payload.pop("open_interest", None)
+    payload.pop("updated_at", None)
+    # raw payloads often contain telemetry. Identity-relevant normalized fields
+    # above remain authoritative for cache invalidation.
+    payload.pop("raw", None)
+    event = as_json(payload.get("event"), dict, {})
+    event.pop("raw", None)
+    payload["event"] = event
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _runtime_pg_json(value: Any):
+    return psycopg2.extras.Json(
+        value,
+        dumps=lambda obj: json.dumps(obj, default=str, separators=(",", ":")),
+    )
+
+
+def persist_runtime_context(
+    context: ExactPairContext,
+    *,
+    catalog_ingest_run_id: Optional[int] = None,
+    semantic_change_count: int = 0,
+) -> str:
+    """Atomically publish a fully validated exact-pair/runtime generation."""
+    diagnostics_payload = dict(context.diagnostics or {})
+    diagnostics_payload["persistentRuntime"] = True
+    diagnostics_payload["matcherCacheVersion"] = MATCH_CACHE_VERSION
+    diagnostics_payload["persistedVenueCounts"] = dict(context.venue_counts or {})
+
+    with get_db_connection_dict() as conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL statement_timeout = 0")
+                cur.execute(
+                    """
+                    INSERT INTO public.prediction_market_runtime_generations (
+                        catalog_ingest_run_id,
+                        matcher_version,
+                        engine_version,
+                        settlement_version,
+                        pair_count,
+                        finance_inventory_count,
+                        semantic_change_count,
+                        diagnostics
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, generated_at, pair_count, finance_inventory_count
+                    """,
+                    (
+                        catalog_ingest_run_id,
+                        MATCH_CACHE_VERSION,
+                        ENGINE_VERSION,
+                        SETTLEMENT_VERSION,
+                        len(context.exact_pairs),
+                        len(context.finance_inventory),
+                        int(semantic_change_count),
+                        _runtime_pg_json(diagnostics_payload),
+                    ),
+                )
+                generation = cur.fetchone()
+                generation_id = int(generation["id"])
+
+                cur.execute(
+                    "UPDATE public.prediction_market_exact_pairs SET active = FALSE WHERE active IS TRUE"
+                )
+
+                pair_rows: List[Tuple[Any, ...]] = []
+                for poly_contract, kalshi_contract in context.exact_pairs:
+                    poly_market = context.markets[poly_contract.market_id]
+                    kalshi_market = context.markets[kalshi_contract.market_id]
+                    pair_uid = stable_runtime_pair_uid(
+                        poly_contract.market_group,
+                        poly_market.external_market_id,
+                        kalshi_market.external_market_id,
+                        poly_contract.contract_identity,
+                        poly_contract.pair_relationship,
+                    )
+                    pair_rows.append(
+                        (
+                            pair_uid,
+                            generation_id,
+                            str(poly_market.external_market_id),
+                            str(kalshi_market.external_market_id),
+                            poly_contract.market_group,
+                            poly_contract.event_identity,
+                            poly_contract.contract_identity,
+                            poly_contract.event_title,
+                            poly_contract.contract_title,
+                            poly_contract.scheduled_time,
+                            poly_contract.event_match_method,
+                            poly_contract.pair_relationship,
+                            poly_contract.settlement_status,
+                            bool(poly_contract.settlement_stream_eligible),
+                            bool(poly_contract.settlement_verified),
+                            _runtime_pg_json(poly_contract.settlement_signature or {}),
+                            _runtime_pg_json(list(poly_contract.settlement_reasons or ())),
+                            _semantic_fingerprint_for_runtime_market(poly_market),
+                            _semantic_fingerprint_for_runtime_market(kalshi_market),
+                            MATCH_CACHE_VERSION,
+                            SETTLEMENT_VERSION,
+                            _runtime_pg_json(_exact_contract_runtime_payload(poly_contract)),
+                            _runtime_pg_json(_exact_contract_runtime_payload(kalshi_contract)),
+                            _runtime_pg_json(_runtime_market_payload(poly_market)),
+                            _runtime_pg_json(_runtime_market_payload(kalshi_market)),
+                        )
+                    )
+
+                if pair_rows:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO public.prediction_market_exact_pairs (
+                            pair_uid, runtime_generation_id,
+                            polymarket_external_market_id, kalshi_external_market_id,
+                            market_group, event_identity, contract_identity,
+                            event_title, contract_title, scheduled_time, match_method,
+                            pair_relationship, settlement_status,
+                            settlement_stream_eligible, settlement_verified,
+                            settlement_signature, settlement_reasons,
+                            polymarket_semantic_fingerprint, kalshi_semantic_fingerprint,
+                            matcher_version, settlement_version,
+                            polymarket_contract, kalshi_contract,
+                            polymarket_market_payload, kalshi_market_payload,
+                            active, first_verified_at, last_validated_at, last_seen_at
+                        ) VALUES %s
+                        ON CONFLICT (pair_uid) DO UPDATE SET
+                            runtime_generation_id = EXCLUDED.runtime_generation_id,
+                            polymarket_external_market_id = EXCLUDED.polymarket_external_market_id,
+                            kalshi_external_market_id = EXCLUDED.kalshi_external_market_id,
+                            market_group = EXCLUDED.market_group,
+                            event_identity = EXCLUDED.event_identity,
+                            contract_identity = EXCLUDED.contract_identity,
+                            event_title = EXCLUDED.event_title,
+                            contract_title = EXCLUDED.contract_title,
+                            scheduled_time = EXCLUDED.scheduled_time,
+                            match_method = EXCLUDED.match_method,
+                            pair_relationship = EXCLUDED.pair_relationship,
+                            settlement_status = EXCLUDED.settlement_status,
+                            settlement_stream_eligible = EXCLUDED.settlement_stream_eligible,
+                            settlement_verified = EXCLUDED.settlement_verified,
+                            settlement_signature = EXCLUDED.settlement_signature,
+                            settlement_reasons = EXCLUDED.settlement_reasons,
+                            polymarket_semantic_fingerprint = EXCLUDED.polymarket_semantic_fingerprint,
+                            kalshi_semantic_fingerprint = EXCLUDED.kalshi_semantic_fingerprint,
+                            matcher_version = EXCLUDED.matcher_version,
+                            settlement_version = EXCLUDED.settlement_version,
+                            polymarket_contract = EXCLUDED.polymarket_contract,
+                            kalshi_contract = EXCLUDED.kalshi_contract,
+                            polymarket_market_payload = EXCLUDED.polymarket_market_payload,
+                            kalshi_market_payload = EXCLUDED.kalshi_market_payload,
+                            active = TRUE,
+                            last_validated_at = NOW(),
+                            last_seen_at = NOW()
+                        """,
+                        [row + (True, datetime.now(timezone.utc), datetime.now(timezone.utc), datetime.now(timezone.utc)) for row in pair_rows],
+                        page_size=500,
+                    )
+
+                cur.execute("DELETE FROM public.prediction_market_runtime_inventory")
+                inventory_rows: List[Tuple[Any, ...]] = []
+                for item in context.finance_inventory:
+                    market = context.markets.get(item.database_market_id)
+                    if market is None:
+                        continue
+                    inventory_rows.append(
+                        (
+                            item.id, generation_id, item.venue, item.market_group,
+                            item.family, item.external_market_id, item.external_event_id,
+                            item.yes_key, item.no_key, item.close_time, item.resolution_time,
+                            item.liquidity, item.volume_24h, item.total_volume,
+                            item.open_interest, item.rank_score, item.subject_key,
+                            _runtime_pg_json(_runtime_market_payload(market)), True,
+                        )
+                    )
+                if inventory_rows:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        """
+                        INSERT INTO public.prediction_market_runtime_inventory (
+                            id, runtime_generation_id, venue, market_group, family,
+                            external_market_id, external_event_id, yes_key, no_key,
+                            close_time, resolution_time, liquidity, volume_24h,
+                            total_volume, open_interest, rank_score, subject_key,
+                            market_payload, active
+                        ) VALUES %s
+                        """,
+                        inventory_rows,
+                        page_size=500,
+                    )
+
+                if catalog_ingest_run_id is not None:
+                    cur.execute(
+                        """
+                        UPDATE public.prediction_market_ingest_runs
+                        SET runtime_published = TRUE,
+                            runtime_generation_id = %s
+                        WHERE id = %s
+                        """,
+                        (generation_id, int(catalog_ingest_run_id)),
+                    )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    return _runtime_generation_marker(generation)
+
+
+def load_persisted_runtime_context(
+    market_group: str = "all",
+    *,
+    expected_snapshot_marker: Optional[str] = None,
+) -> ExactPairContext:
+    """Load the compact, already-matched runtime without rerunning discovery."""
+    if market_group not in {"all", "sports", "macro", "weather", "generic", *GENERIC_MARKET_GROUPS}:
+        raise ValueError(f"unsupported market_group: {market_group}")
+
+    with get_db_connection_dict() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, generated_at, pair_count, finance_inventory_count,
+                       diagnostics, matcher_version, settlement_version
+                FROM public.prediction_market_runtime_generations
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            )
+            generation = cur.fetchone()
+            if not generation:
+                raise RuntimeError("No persisted prediction-market runtime generation exists.")
+            marker = _runtime_generation_marker(generation)
+            if expected_snapshot_marker is not None and str(marker) != str(expected_snapshot_marker):
+                raise RuntimeError(
+                    f"Persisted runtime marker mismatch: expected {expected_snapshot_marker}, got {marker}."
+                )
+
+            cur.execute(
+                """
+                SELECT *
+                FROM public.prediction_market_exact_pairs
+                WHERE active IS TRUE
+                  AND runtime_generation_id = %s
+                ORDER BY market_group, event_title, contract_title, pair_uid
+                """,
+                (generation["id"],),
+            )
+            pair_rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT *
+                FROM public.prediction_market_runtime_inventory
+                WHERE active IS TRUE
+                  AND runtime_generation_id = %s
+                ORDER BY rank_score DESC, market_group, id
+                """,
+                (generation["id"],),
+            )
+            inventory_rows = cur.fetchall()
+
+    events: Dict[int, Event] = {}
+    markets: Dict[int, Market] = {}
+    markets_by_event: Dict[int, List[Market]] = defaultdict(list)
+    sports_pairs: List[Tuple[ExactContract, ExactContract]] = []
+    macro_pairs: List[Tuple[ExactContract, ExactContract]] = []
+    weather_pairs: List[Tuple[ExactContract, ExactContract]] = []
+    generic_pairs: List[Tuple[ExactContract, ExactContract]] = []
+
+    allowed_groups = None if market_group == "all" else ({market_group} if market_group != "generic" else set(GENERIC_MARKET_GROUPS))
+
+    def register_market(payload: Mapping[str, Any]) -> Market:
+        market = _runtime_market_from_payload(payload)
+        existing = markets.get(market.id)
+        if existing is not None:
+            return existing
+        event = events.get(market.event.id)
+        if event is None:
+            event = market.event
+            events[event.id] = event
+        market.event = event
+        markets[market.id] = market
+        markets_by_event[event.id].append(market)
+        return market
+
+    for row in pair_rows:
+        group = str(row.get("market_group") or "")
+        if allowed_groups is not None and group not in allowed_groups:
+            continue
+        poly_market = register_market(as_json(row.get("polymarket_market_payload"), dict, {}))
+        kalshi_market = register_market(as_json(row.get("kalshi_market_payload"), dict, {}))
+        poly = _exact_contract_from_runtime_payload(as_json(row.get("polymarket_contract"), dict, {}))
+        kalshi = _exact_contract_from_runtime_payload(as_json(row.get("kalshi_contract"), dict, {}))
+        # Persisted payload IDs are authoritative and independent of current catalog IDs.
+        if poly.market_id != poly_market.id:
+            poly = replace(poly, market_id=poly_market.id)
+        if kalshi.market_id != kalshi_market.id:
+            kalshi = replace(kalshi, market_id=kalshi_market.id)
+        pair = (poly, kalshi)
+        if group == "sports":
+            sports_pairs.append(pair)
+        elif group == "macro":
+            macro_pairs.append(pair)
+        elif group == "weather":
+            weather_pairs.append(pair)
+        else:
+            generic_pairs.append(pair)
+
+    finance_inventory: List[FinanceInventoryMarket] = []
+    if market_group in {"all", "macro"}:
+        for row in inventory_rows:
+            item_group = str(row.get("market_group") or "")
+            if market_group == "macro" and item_group != "macro":
+                continue
+            market = register_market(as_json(row.get("market_payload"), dict, {}))
+            finance_inventory.append(
+                FinanceInventoryMarket(
+                    id=str(row.get("id") or ""),
+                    venue=str(row.get("venue") or ""),
+                    market_group=item_group,
+                    family=str(row.get("family") or "unknown"),
+                    event_title=market.event_title,
+                    contract_title=market.market_title,
+                    database_market_id=market.id,
+                    external_market_id=str(row.get("external_market_id") or ""),
+                    external_event_id=str(row.get("external_event_id") or ""),
+                    yes_key=str(row.get("yes_key") or ""),
+                    no_key=str(row.get("no_key") or ""),
+                    close_time=row.get("close_time"),
+                    resolution_time=row.get("resolution_time"),
+                    liquidity=as_float(row.get("liquidity")),
+                    volume_24h=as_float(row.get("volume_24h")),
+                    total_volume=as_float(row.get("total_volume")),
+                    open_interest=as_float(row.get("open_interest")),
+                    rank_score=float(row.get("rank_score") or 0.0),
+                    subject_key=str(row.get("subject_key") or ""),
+                )
+            )
+
+    diagnostics = as_json(generation.get("diagnostics"), dict, {})
+    diagnostics["persistentRuntimeLoaded"] = True
+    diagnostics["persistentRuntimeMarker"] = marker
+    venue_counts = as_json(diagnostics.get("persistedVenueCounts"), dict, {})
+
+    return ExactPairContext(
+        events=events,
+        markets=markets,
+        markets_by_event=markets_by_event,
+        venue_counts={str(k): int(v) for k, v in venue_counts.items()},
+        sports_pairs=sports_pairs,
+        macro_pairs=macro_pairs,
+        macro_synthetic_candidates=[],
+        weather_pairs=weather_pairs,
+        generic_pairs=generic_pairs,
+        finance_inventory=finance_inventory,
+        diagnostics=diagnostics,
+        snapshot_marker=marker,
+    )
+
+
+def rebuild_and_publish_persisted_runtime(
+    *,
+    catalog_ingest_run_id: Optional[int] = None,
+    semantic_change_count: int = 0,
+) -> str:
+    """Maintenance-process entry point: full correctness oracle, then atomic publish."""
+    context = build_exact_pair_context("all")
+    return persist_runtime_context(
+        context,
+        catalog_ingest_run_id=catalog_ingest_run_id,
+        semantic_change_count=semantic_change_count,
+    )
 
 
 def chunks(values: Sequence[str], size: int) -> Iterable[Sequence[str]]:
@@ -9811,6 +10466,39 @@ def price_pair(
         "liveComplete": ready_route_count == 2,
     }
 
+def _load_persisted_settlement_cache() -> Dict[str, Dict[str, Any]]:
+    """Load reusable verified decisions once; never perform per-pair database lookups."""
+    try:
+        with get_db_connection_dict() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        pair_uid,
+                        settlement_status,
+                        settlement_stream_eligible,
+                        settlement_verified,
+                        settlement_signature,
+                        settlement_reasons,
+                        polymarket_semantic_fingerprint,
+                        kalshi_semantic_fingerprint
+                    FROM public.prediction_market_exact_pairs
+                    WHERE active IS TRUE
+                      AND matcher_version = %s
+                      AND settlement_version = %s
+                    """,
+                    (MATCH_CACHE_VERSION, SETTLEMENT_VERSION),
+                )
+                return {
+                    str(row["pair_uid"]): dict(row)
+                    for row in cur.fetchall()
+                }
+    except Exception:
+        # Bootstrap/full-regression environments may not have the persistent
+        # schema yet. Falling back to normal verification preserves correctness.
+        return {}
+
+
 def settlement_gate_pairs(
     pairs: Sequence[Tuple[ExactContract, ExactContract]],
     markets: Dict[int, Market],
@@ -9837,8 +10525,71 @@ def settlement_gate_pairs(
     rejected_samples: List[Dict[str, Any]] = []
     manual_terms_counts = Counter()
     pricing_only_count = 0
+    cached_reused_count = 0
+    persisted_cache = _load_persisted_settlement_cache()
 
     for poly_contract, kalshi_contract in pairs:
+        poly_market = markets[poly_contract.market_id]
+        kalshi_market = markets[kalshi_contract.market_id]
+        pair_uid = stable_runtime_pair_uid(
+            poly_contract.market_group,
+            poly_market.external_market_id,
+            kalshi_market.external_market_id,
+            poly_contract.contract_identity,
+            poly_contract.pair_relationship,
+        )
+        cached = persisted_cache.get(pair_uid)
+        if cached is not None:
+            poly_fingerprint = _semantic_fingerprint_for_runtime_market(poly_market)
+            kalshi_fingerprint = _semantic_fingerprint_for_runtime_market(kalshi_market)
+            if (
+                str(cached.get("polymarket_semantic_fingerprint") or "") == poly_fingerprint
+                and str(cached.get("kalshi_semantic_fingerprint") or "") == kalshi_fingerprint
+            ):
+                status = str(cached.get("settlement_status") or "unverified")
+                reasons = tuple(as_json(cached.get("settlement_reasons"), list, []))
+                signature = as_json(cached.get("settlement_signature"), dict, {})
+                pricing_eligible = bool(cached.get("settlement_stream_eligible"))
+                verified = bool(cached.get("settlement_verified"))
+                status_counts[status] += 1
+                decision_reason_counts.update(reasons)
+                if status == "rejected":
+                    rejected_reason_counts.update(reasons)
+                annotated_poly = replace(
+                    poly_contract,
+                    settlement_status=status,
+                    settlement_stream_eligible=pricing_eligible,
+                    settlement_verified=verified,
+                    settlement_signature=signature,
+                    settlement_reasons=reasons,
+                )
+                annotated_kalshi = replace(
+                    kalshi_contract,
+                    settlement_status=status,
+                    settlement_stream_eligible=pricing_eligible,
+                    settlement_verified=verified,
+                    settlement_signature=signature,
+                    settlement_reasons=reasons,
+                )
+                cached_reused_count += 1
+                if pricing_eligible:
+                    admitted.append((annotated_poly, annotated_kalshi))
+                    if not verified:
+                        pricing_only_count += 1
+                elif len(rejected_samples) < 20:
+                    rejected_samples.append(
+                        {
+                            "eventTitle": poly_contract.event_title,
+                            "contractTitle": poly_contract.contract_title,
+                            "status": status,
+                            "reasons": list(reasons),
+                            "polymarketMarketId": poly_market.external_market_id,
+                            "kalshiMarketId": kalshi_market.external_market_id,
+                            "cachedDecision": True,
+                        }
+                    )
+                continue
+
         decision = verify_exact_pair(
             poly_contract,
             kalshi_contract,
@@ -9944,6 +10695,8 @@ def settlement_gate_pairs(
             len(pairs) - len(admitted)
         ),
         f"{market_group}SettlementPricingOnlyPairs": pricing_only_count,
+        f"{market_group}SettlementCachedReusedPairs": cached_reused_count,
+        f"{market_group}SettlementFreshlyVerifiedPairs": len(pairs) - cached_reused_count,
         f"{market_group}SettlementStatuses": dict(sorted(status_counts.items())),
         f"{market_group}SettlementDecisionReasons": dict(
             sorted(decision_reason_counts.items())

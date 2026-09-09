@@ -1,10 +1,21 @@
+import { useNavigate } from "react-router-dom";
 import "./Legal.css";
 
 export default function Terms() {
+  const navigate = useNavigate();
+
   return (
     <div className="legal-page">
       <div className="legal-card">
-        <h1>Terms of Service</h1>
+  <button
+    type="button"
+    className="legal-back-button"
+    onClick={() => navigate(-1)}
+  >
+    ← Back
+  </button>
+
+  <h1>Terms of Service</h1>
         <p className="legal-meta">Effective Date: August 8, 2026</p>
         <p className="legal-meta">Last Updated: August 8, 2026</p>
 

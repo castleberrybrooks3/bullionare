@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import InfoTooltip from "./InfoTooltip";
 import { indicatorHelp } from "./indicatorHelp";
 
@@ -31,24 +31,43 @@ showDrawControls,
 setShowDrawControls,
 tipsEnabled = true,
 onHideAllTips,
+isMobile = false,
 }) {
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isMobile) setMobileToolsOpen(false);
+  }, [isMobile]);
+
   return (
     <div
       style={{
         display: "flex",
         justifyContent: "space-between",
         alignItems: "center",
-        gap: "12px",
-        marginBottom: "16px",
+        gap: isMobile ? "7px" : "12px",
+        marginBottom: isMobile ? "8px" : "16px",
         flexWrap: "wrap",
       }}
     >
-      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: isMobile ? "4px" : "8px",
+          flexWrap: isMobile ? "nowrap" : "wrap",
+          width: isMobile ? "100%" : "auto",
+          overflowX: isMobile ? "auto" : "visible",
+          overscrollBehaviorX: isMobile ? "contain" : undefined,
+          WebkitOverflowScrolling: isMobile ? "touch" : undefined,
+          paddingBottom: isMobile ? "2px" : 0,
+        }}
+      >
         {ranges.map((range) => {
   const isSelected = chartRange === range;
 
   const showPopup =
   selectedRangePopup?.range === range &&
+  !isMobile &&
   !showTechnicalPanel &&
   !showTechnicalSummary &&
   !showMomentumPanel &&
@@ -71,6 +90,7 @@ onHideAllTips,
         display: "inline-flex",
         flexDirection: "column",
         alignItems: "center",
+        flex: "0 0 auto",
       }}
     >
       <button
@@ -78,8 +98,8 @@ onHideAllTips,
   setChartRange(range);
 }}
         style={{
-  padding: "7px 11px",
-  borderRadius: "999px",
+  padding: isMobile ? "6px 9px" : "7px 11px",
+  borderRadius: isMobile ? "7px" : "999px",
   border: selectedIsNegative
     ? "1px solid #dc2626"
     : selectedIsPositive
@@ -97,7 +117,7 @@ onHideAllTips,
     : "white",
   cursor: "pointer",
   fontWeight: isSelected ? "700" : "500",
-  fontSize: "13px",
+  fontSize: isMobile ? "12px" : "13px",
 }}
       >
         {range}
@@ -111,7 +131,7 @@ onHideAllTips,
             left: "50%",
             transform: "translateX(-50%)",
             padding: "5px 9px",
-            borderRadius: "999px",
+            borderRadius: isMobile ? "7px" : "999px",
             background: selectedRangePopup.isUp
               ? "rgba(25,195,125,0.18)"
               : "rgba(220,38,38,0.18)",
@@ -135,6 +155,29 @@ onHideAllTips,
   );
 })}
 
+{isMobile && (
+  <button
+    type="button"
+    onClick={() => setMobileToolsOpen((prev) => !prev)}
+    style={{
+      flex: "0 0 auto",
+      padding: "6px 9px",
+      borderRadius: "7px",
+      border: mobileToolsOpen ? "1px solid #19C37D" : "1px solid #374151",
+      background: mobileToolsOpen ? "rgba(25,195,125,0.16)" : "#111827",
+      color: mobileToolsOpen ? "#86efac" : "#e5e7eb",
+      cursor: "pointer",
+      fontWeight: 800,
+      fontSize: "12px",
+      whiteSpace: "nowrap",
+    }}
+  >
+    Tools {mobileToolsOpen ? "▴" : "▾"}
+  </button>
+)}
+
+{(!isMobile || mobileToolsOpen) && (
+  <>
 <button
   type="button"
   onClick={() => {
@@ -151,14 +194,14 @@ onHideAllTips,
   });
 }}
   style={{
-    padding: "7px 11px",
-    borderRadius: "999px",
+    padding: isMobile ? "6px 9px" : "7px 11px",
+    borderRadius: isMobile ? "7px" : "999px",
     border: showTechnicalPanel ? "1px solid #19C37D" : "1px solid #374151",
     background: showTechnicalPanel ? "rgba(25,195,125,0.16)" : "#1f2937",
     color: showTechnicalPanel ? "#86efac" : "white",
     cursor: "pointer",
     fontWeight: showTechnicalPanel ? "700" : "500",
-    fontSize: "13px",
+    fontSize: isMobile ? "12px" : "13px",
   }}
 >
   Technicals
@@ -179,14 +222,14 @@ onHideAllTips,
   });
 }}
   style={{
-    padding: "7px 11px",
-    borderRadius: "999px",
+    padding: isMobile ? "6px 9px" : "7px 11px",
+    borderRadius: isMobile ? "7px" : "999px",
     border: showTechnicalSummary ? "1px solid #19C37D" : "1px solid #374151",
     background: showTechnicalSummary ? "rgba(25,195,125,0.16)" : "#1f2937",
     color: showTechnicalSummary ? "#86efac" : "white",
     cursor: "pointer",
     fontWeight: showTechnicalSummary ? "700" : "500",
-    fontSize: "13px",
+    fontSize: isMobile ? "12px" : "13px",
   }}
 >
   Summary
@@ -207,14 +250,14 @@ onHideAllTips,
   });
 }}
   style={{
-    padding: "7px 11px",
-    borderRadius: "999px",
+    padding: isMobile ? "6px 9px" : "7px 11px",
+    borderRadius: isMobile ? "7px" : "999px",
     border: showMomentumPanel ? "1px solid #19C37D" : "1px solid #374151",
     background: showMomentumPanel ? "rgba(25,195,125,0.16)" : "#1f2937",
     color: showMomentumPanel ? "#86efac" : "white",
     cursor: "pointer",
     fontWeight: showMomentumPanel ? "700" : "500",
-    fontSize: "13px",
+    fontSize: isMobile ? "12px" : "13px",
   }}
 >
   Momentum
@@ -235,14 +278,14 @@ onHideAllTips,
   });
 }}
   style={{
-    padding: "7px 11px",
-    borderRadius: "999px",
+    padding: isMobile ? "6px 9px" : "7px 11px",
+    borderRadius: isMobile ? "7px" : "999px",
     border: showCompareControls ? "1px solid #19C37D" : "1px solid #374151",
     background: showCompareControls ? "rgba(25,195,125,0.16)" : "#1f2937",
     color: showCompareControls ? "#86efac" : "white",
     cursor: "pointer",
     fontWeight: showCompareControls ? "700" : "500",
-    fontSize: "13px",
+    fontSize: isMobile ? "12px" : "13px",
   }}
 >
   Compare
@@ -266,8 +309,8 @@ onHideAllTips,
   });
 }}
   style={{
-    padding: "7px 11px",
-    borderRadius: "999px",
+    padding: isMobile ? "6px 9px" : "7px 11px",
+    borderRadius: isMobile ? "7px" : "999px",
     border:
       showDrawControls || drawingMode
         ? "1px solid #19C37D"
@@ -279,14 +322,23 @@ onHideAllTips,
     color: showDrawControls || drawingMode ? "#86efac" : "white",
     cursor: "pointer",
     fontWeight: showDrawControls || drawingMode ? "700" : "500",
-    fontSize: "13px",
+    fontSize: isMobile ? "12px" : "13px",
   }}
 >
   Draw
 </button>
+  </>
+)}
 </div>
 
-      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: isMobile ? "4px" : "8px",
+          flexWrap: "wrap",
+          width: isMobile ? "100%" : "auto",
+        }}
+      >
         {chartTypes.map((type) => {
           const isSelected = chartType === type;
 
@@ -295,14 +347,14 @@ onHideAllTips,
               key={type}
               onClick={() => setChartType(type)}
               style={{
-  padding: "7px 11px",
-  borderRadius: "999px",
+  padding: isMobile ? "6px 9px" : "7px 11px",
+  borderRadius: isMobile ? "7px" : "999px",
   border: isSelected ? "1px solid #19C37D" : "1px solid #374151",
   background: isSelected ? "rgba(25,195,125,0.16)" : "#1f2937",
   color: isSelected ? "#86efac" : "white",
   cursor: "pointer",
   fontWeight: isSelected ? "700" : "500",
-  fontSize: "13px",
+  fontSize: isMobile ? "12px" : "13px",
   textTransform: "capitalize",
 }}
             >
@@ -334,14 +386,14 @@ onHideAllTips,
           type="button"
           onClick={() => setCompareSymbol(isSelected ? null : symbol)}
           style={{
-            padding: "7px 11px",
-            borderRadius: "999px",
+            padding: isMobile ? "6px 9px" : "7px 11px",
+            borderRadius: isMobile ? "7px" : "999px",
             border: isSelected ? "1px solid #19C37D" : "1px solid #374151",
             background: isSelected ? "rgba(25,195,125,0.16)" : "#1f2937",
             color: isSelected ? "#86efac" : "white",
             cursor: "pointer",
             fontWeight: isSelected ? "800" : "600",
-            fontSize: "13px",
+            fontSize: isMobile ? "12px" : "13px",
           }}
         >
           <span style={{ display: "inline-flex", alignItems: "center" }}>
@@ -360,14 +412,14 @@ onHideAllTips,
       type="button"
       onClick={() => setCompareSymbol(null)}
       style={{
-        padding: "7px 11px",
-        borderRadius: "999px",
+        padding: isMobile ? "6px 9px" : "7px 11px",
+        borderRadius: isMobile ? "7px" : "999px",
         border: "1px solid #374151",
         background: "#111827",
         color: "#cbd5e1",
         cursor: "pointer",
         fontWeight: "700",
-        fontSize: "13px",
+        fontSize: isMobile ? "12px" : "13px",
       }}
     >
       Clear
@@ -425,7 +477,7 @@ onHideAllTips,
         style={{
           width: "22px",
           height: "22px",
-          borderRadius: "999px",
+          borderRadius: isMobile ? "7px" : "999px",
           border: isSelected ? "2px solid white" : "1px solid #475569",
           background: color.value,
           cursor: "pointer",
@@ -441,8 +493,8 @@ onHideAllTips,
         setDrawingMode((prev) => (prev === "trendline" ? null : "trendline"));
       }}
       style={{
-        padding: "7px 11px",
-        borderRadius: "999px",
+        padding: isMobile ? "6px 9px" : "7px 11px",
+        borderRadius: isMobile ? "7px" : "999px",
         border:
           drawingMode === "trendline"
             ? "1px solid #19C37D"
@@ -454,7 +506,7 @@ onHideAllTips,
         color: drawingMode === "trendline" ? "#86efac" : "white",
         cursor: "pointer",
         fontWeight: drawingMode === "trendline" ? "800" : "600",
-        fontSize: "13px",
+        fontSize: isMobile ? "12px" : "13px",
       }}
     >
       Trendline
@@ -466,8 +518,8 @@ onHideAllTips,
     setDrawingMode((prev) => (prev === "pencil" ? null : "pencil"));
   }}
   style={{
-    padding: "7px 11px",
-    borderRadius: "999px",
+    padding: isMobile ? "6px 9px" : "7px 11px",
+    borderRadius: isMobile ? "7px" : "999px",
     border:
       drawingMode === "pencil"
         ? "1px solid #19C37D"
@@ -479,7 +531,7 @@ onHideAllTips,
     color: drawingMode === "pencil" ? "#86efac" : "white",
     cursor: "pointer",
     fontWeight: drawingMode === "pencil" ? "800" : "600",
-    fontSize: "13px",
+    fontSize: isMobile ? "12px" : "13px",
   }}
 >
   ✎ Pencil
@@ -491,8 +543,8 @@ onHideAllTips,
         setDrawingMode((prev) => (prev === "horizontal" ? null : "horizontal"));
       }}
       style={{
-        padding: "7px 11px",
-        borderRadius: "999px",
+        padding: isMobile ? "6px 9px" : "7px 11px",
+        borderRadius: isMobile ? "7px" : "999px",
         border:
           drawingMode === "horizontal"
             ? "1px solid #19C37D"
@@ -504,7 +556,7 @@ onHideAllTips,
         color: drawingMode === "horizontal" ? "#86efac" : "white",
         cursor: "pointer",
         fontWeight: drawingMode === "horizontal" ? "800" : "600",
-        fontSize: "13px",
+        fontSize: isMobile ? "12px" : "13px",
       }}
     >
       Horizontal Level
@@ -517,14 +569,14 @@ onHideAllTips,
         setDrawingMode(null);
       }}
       style={{
-        padding: "7px 11px",
-        borderRadius: "999px",
+        padding: isMobile ? "6px 9px" : "7px 11px",
+        borderRadius: isMobile ? "7px" : "999px",
         border: "1px solid #374151",
         background: "#111827",
         color: "#cbd5e1",
         cursor: "pointer",
         fontWeight: "700",
-        fontSize: "13px",
+        fontSize: isMobile ? "12px" : "13px",
       }}
     >
       Clear

@@ -21,7 +21,7 @@ import requests
 from db import get_db_connection_dict
 
 
-SERVICE_VERSION = "incremental-catalog-v5.0.1-bootstrap-timeout-safe"
+SERVICE_VERSION = "incremental-catalog-v5.0.2-stable-semantic-fingerprint"
 
 POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -2331,10 +2331,36 @@ def _entity_semantic_fingerprint(row: Dict[str, Any]) -> str:
     })
 
 
+def _semantic_outcome_identity(outcomes: Any) -> List[Dict[str, Any]]:
+    """Return only stable outcome identity fields for semantic hashing.
+
+    Live bid/ask/last-price/size telemetry is intentionally excluded so ordinary
+    price movement can never make an unchanged contract look semantically new.
+    Polymarket token IDs remain included because they are stable contract identity.
+    """
+    if not isinstance(outcomes, list):
+        return []
+
+    stable: List[Dict[str, Any]] = []
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        stable.append(
+            {
+                "key": outcome.get("key"),
+                "label": outcome.get("label"),
+                "index": outcome.get("index"),
+                "token_id": outcome.get("token_id"),
+            }
+        )
+    return stable
+
+
 def _market_semantic_fingerprint(row: Dict[str, Any]) -> str:
-    # Activity/price telemetry is deliberately excluded. Contract identity,
-    # settlement terms and lifecycle fields are deliberately included.
-    return _semantic_hash({
+    # Contract identity, settlement terms and lifecycle fields are included.
+    # Live price/activity telemetry is excluded, including the dynamic fields
+    # carried inside normalized outcomes.
+    payload = {
         key: row.get(key)
         for key in (
             "venue", "external_market_id", "external_event_id", "external_series_id",
@@ -2343,9 +2369,11 @@ def _market_semantic_fingerprint(row: Dict[str, Any]) -> str:
             "close_time", "settlement_time", "accepting_orders", "rules_url",
             "rules_primary", "rules_secondary", "native_condition_id", "native_game_id",
             "primary_participant_key", "line_value", "floor_strike", "cap_strike",
-            "functional_strike", "custom_strike", "contract_semantics", "outcomes",
+            "functional_strike", "custom_strike", "contract_semantics",
         )
-    })
+    }
+    payload["outcomes"] = _semantic_outcome_identity(row.get("outcomes"))
+    return _semantic_hash(payload)
 
 
 def _existing_catalog_state(cur) -> Dict[str, Any]:

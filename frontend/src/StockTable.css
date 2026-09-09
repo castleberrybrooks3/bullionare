@@ -687,6 +687,22 @@
     font-size: 12px;
   }
 
+  /*
+   * Let the page keep normal vertical swiping while StockTable.js turns a
+   * clearly-horizontal finger drag anywhere over the rows into grid scrolling.
+   */
+  .ag-theme-alpine .ag-body-viewport {
+    touch-action: pan-y !important;
+    overscroll-behavior-x: contain;
+  }
+
+  .ag-theme-alpine .ag-body-horizontal-scroll-viewport,
+  .top-scrollbar {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    touch-action: pan-x;
+  }
+
   .ag-theme-alpine .ag-header {
     font-size: 12px;
   }

@@ -57,6 +57,12 @@ export default function StockChartModal({
   const [showMomentumPanel, setShowMomentumPanel] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [tipsEnabled, setTipsEnabled] = useState(true);
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== "undefined"
+      ? window.matchMedia("(max-width: 768px)").matches
+      : false
+  );
+
 
   const [enabledOverlays, setEnabledOverlays] = useState({
   smartLevels: false,
@@ -68,6 +74,18 @@ export default function StockChartModal({
   volume: true,
   vwap: false,
 });
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 768px)");
+    const syncMobile = () => setIsMobile(media.matches);
+
+    syncMobile();
+    media.addEventListener?.("change", syncMobile);
+
+    return () => {
+      media.removeEventListener?.("change", syncMobile);
+    };
+  }, []);
 
   const chartPerformance = getChartPerformance(chartData);
   const baseTechnicalSummary = buildTechnicalSummary(chartData);
@@ -191,6 +209,12 @@ setShowDrawControls(false);
 setDrawingMode(null);
 }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    // Mobile starts clean: the chart gets the screen, and help bubbles stay out of the way.
+    setTipsEnabled(!isMobile);
+  }, [isOpen, isMobile]);
+
   if (!isOpen) return null;
 
   return (
@@ -201,25 +225,26 @@ setDrawingMode(null);
         backgroundColor: "rgba(0, 0, 0, 0.65)",
         display: "flex",
         justifyContent: "center",
-        alignItems: "center",
+        alignItems: isMobile ? "stretch" : "center",
         zIndex: 2000,
-        padding: "20px",
+        padding: isMobile ? "0px" : "20px",
       }}
       onClick={onClose}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-  width: isMaximized ? "100vw" : "90%",
-  maxWidth: isMaximized ? "100vw" : "1100px",
-  height: isMaximized ? "100vh" : "75vh",
+  width: isMobile ? "100vw" : isMaximized ? "100vw" : "90%",
+  maxWidth: isMobile ? "100vw" : isMaximized ? "100vw" : "1100px",
+  height: isMobile ? "100dvh" : isMaximized ? "100vh" : "75vh",
   background: "#111827",
-  borderRadius: isMaximized ? "0px" : "14px",
-  padding: isMaximized ? "18px" : "20px",
+  borderRadius: isMobile || isMaximized ? "0px" : "14px",
+  padding: isMobile ? "10px" : isMaximized ? "18px" : "20px",
   boxSizing: "border-box",
   color: "white",
   display: "flex",
   flexDirection: "column",
+  overflowY: isMobile ? "auto" : "hidden",
 }}
       >
         <div
@@ -227,34 +252,53 @@ setDrawingMode(null);
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            marginBottom: "16px",
+            marginBottom: isMobile ? "8px" : "16px",
+            gap: "10px",
           }}
         >
           <div>
-            <h2 style={{ margin: 0 }}>{ticker} Chart</h2>
-            <ChartPerformanceBadge chartPerformance={chartPerformance} />
+            <h2 style={{ margin: 0, fontSize: isMobile ? "18px" : undefined }}>{ticker} Chart</h2>
+            {isMobile ? (
+              chartPerformance ? (
+                <div
+                  style={{
+                    marginTop: "2px",
+                    fontSize: "12px",
+                    fontWeight: 800,
+                    color: chartPerformance.pct >= 0 ? "#86efac" : "#fca5a5",
+                  }}
+                >
+                  {chartPerformance.pct >= 0 ? "+" : ""}
+                  {chartPerformance.pct.toFixed(2)}%
+                </div>
+              ) : null
+            ) : (
+              <ChartPerformanceBadge chartPerformance={chartPerformance} />
+            )}
           </div>
 
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-  <button
-    onClick={() => setIsMaximized((prev) => !prev)}
-    style={{
-      padding: "8px 12px",
-      borderRadius: "6px",
-      border: "none",
-      background: "#1f2937",
-      color: "white",
-      cursor: "pointer",
-      fontWeight: "bold",
-    }}
-  >
-    {isMaximized ? "Minimize" : "Maximize"}
-  </button>
+  {!isMobile && (
+    <button
+      onClick={() => setIsMaximized((prev) => !prev)}
+      style={{
+        padding: "8px 12px",
+        borderRadius: "6px",
+        border: "none",
+        background: "#1f2937",
+        color: "white",
+        cursor: "pointer",
+        fontWeight: "bold",
+      }}
+    >
+      {isMaximized ? "Minimize" : "Maximize"}
+    </button>
+  )}
 
   <button
     onClick={onClose}
     style={{
-      padding: "8px 12px",
+      padding: isMobile ? "7px 10px" : "8px 12px",
       borderRadius: "6px",
       border: "none",
       background: "#1f2937",
@@ -297,6 +341,7 @@ setDrawingColor={setDrawingColor}
 setShowDrawControls={setShowDrawControls}
 tipsEnabled={tipsEnabled}
 onHideAllTips={() => setTipsEnabled(false)}
+isMobile={isMobile}
 />
 {showTechnicalPanel && (
   <TechnicalOverlayControls
@@ -324,12 +369,13 @@ onHideAllTips={() => setTipsEnabled(false)}
 
         <div
           style={{
-            flex: 1,
+            flex: isMobile ? "0 0 auto" : 1,
+            height: isMobile ? "min(52dvh, 430px)" : undefined,
+            minHeight: isMobile ? "330px" : 0,
             border: "1px solid #1f2937",
-            borderRadius: "12px",
+            borderRadius: isMobile ? "8px" : "12px",
             overflow: "hidden",
             background: "#0b1120",
-            minHeight: 0,
             position: "relative",
           }}
         >
@@ -360,9 +406,10 @@ onHideAllTips={() => setTipsEnabled(false)}
                 compareSymbol={compareSymbol}
                 showCompareControls={showCompareControls}
                 API_BASE={API_BASE}
+                isMobile={isMobile}
               />
 
-              {chartLoading && chartData.length > 0 && (
+              {chartLoading && chartData.length > 0 && !isMobile && (
                 <div
                   style={{
                     position: "absolute",
@@ -382,7 +429,7 @@ onHideAllTips={() => setTipsEnabled(false)}
                 </div>
               )}
 
-              {!tipsEnabled && (
+              {!tipsEnabled && !isMobile && (
                 <button
                   type="button"
                   onClick={() => setTipsEnabled(true)}

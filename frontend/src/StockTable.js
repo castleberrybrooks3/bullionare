@@ -136,112 +136,59 @@ const typeTooltips = {
 const StockTable = ({
   view,
   selectedSector,
-  setSelectedSector,
   showControls = true,
   showTable = true,
 }) => {
   const [stocks, setStocks] = useState([]);
   const [processedStocks, setProcessedStocks] = useState([]);
 
-  const STOCK_FILTER_STORAGE_KEY = "bullionaire_stocks_dashboard_filters_v1";
+  const [typedQuery, setTypedQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
 
-  const STOCK_SCROLL_STORAGE_KEY = "bullionaire_stocks_dashboard_scroll_v1";
+  const [selectedType, setSelectedType] = useState("");
+  const [securityTypes, setSecurityTypes] = useState([]);
 
-const loadSavedStockScroll = () => {
-  try {
-    const saved = sessionStorage.getItem(STOCK_SCROLL_STORAGE_KEY);
-    return saved ? JSON.parse(saved) : null;
-  } catch {
-    return null;
-  }
-};
+  const [displayedCount, setDisplayedCount] = useState(0);
+  const [starModalOpen, setStarModalOpen] = useState(false);
+  const [modalTicker, setModalTicker] = useState(null);
+  const [modalSelectedLists, setModalSelectedLists] = useState([]);
+  const [notification, setNotification] = useState(null);
+  const [loading, setLoading] = useState(true);
 
-const clearSavedStockScroll = () => {
-  try {
-    sessionStorage.removeItem(STOCK_SCROLL_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors
-  }
-};
-
-const loadSavedStockFilters = () => {
-  try {
-    const saved = sessionStorage.getItem(STOCK_FILTER_STORAGE_KEY);
-    return saved ? JSON.parse(saved) : null;
-  } catch {
-    return null;
-  }
-};
-
-const saveStockFilters = (filters) => {
-  try {
-    sessionStorage.setItem(
-      STOCK_FILTER_STORAGE_KEY,
-      JSON.stringify(filters)
-    );
-  } catch {
-    // Ignore storage errors
-  }
-};
-
-const clearSavedStockFilters = () => {
-  try {
-    sessionStorage.removeItem(STOCK_FILTER_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors
-  }
-};
-
-const savedStockFilters =
-  view === "Watchlist" ? null : loadSavedStockFilters();
-
-const [typedQuery, setTypedQuery] = useState(
-  savedStockFilters?.typedQuery || ""
-);
-
-const [searchQuery, setSearchQuery] = useState(
-  savedStockFilters?.searchQuery || ""
-);
-
-const [selectedType, setSelectedType] = useState(
-  savedStockFilters?.selectedType || ""
-);
-
-const [securityTypes, setSecurityTypes] = useState([]);
-
-const [displayedCount, setDisplayedCount] = useState(0);
-const [starModalOpen, setStarModalOpen] = useState(false);
-const [modalTicker, setModalTicker] = useState(null);
-const [modalSelectedLists, setModalSelectedLists] = useState([]);
-const [notification, setNotification] = useState(null);
-const [loading, setLoading] = useState(true);
-
-const [pageSize] = useState(50);
-
-const [currentPage, setCurrentPage] = useState(
-  savedStockFilters?.currentPage || 1
-);
-
-const currentPageRef = useRef(
-  savedStockFilters?.currentPage || 1
-);
-
+  const [pageSize] = useState(50);
+const [currentPage, setCurrentPage] = useState(1);
+const currentPageRef = useRef(1);
 const [totalPages, setTotalPages] = useState(1);
-
-const [backendFilterModel, setBackendFilterModel] = useState(
-  savedStockFilters?.backendFilterModel || {}
-);
-
-const [gridFilterModel, setGridFilterModel] = useState(
-  savedStockFilters?.gridFilterModel || {}
-);
-
+const [backendFilterModel, setBackendFilterModel] = useState({});
+const [gridFilterModel, setGridFilterModel] = useState({});
 const [isBackgroundLoading, setIsBackgroundLoading] = useState(false);
 const [pageCache, setPageCache] = useState({});
 const activeRequestRef = useRef(0);
 const stocksAbortRef = useRef(null);
 const isRestoringFilterModelRef = useRef(false);
 const [viewMode, setViewMode] = useState("all data");
+const [isMobileTableViewport, setIsMobileTableViewport] = useState(() =>
+  typeof window !== "undefined"
+    ? window.matchMedia("(max-width: 768px)").matches
+    : false
+);
+
+useEffect(() => {
+  if (typeof window === "undefined") return undefined;
+
+  const mediaQuery = window.matchMedia("(max-width: 768px)");
+
+  const syncMobileViewport = (event) => {
+    setIsMobileTableViewport(event.matches);
+  };
+
+  setIsMobileTableViewport(mediaQuery.matches);
+  mediaQuery.addEventListener("change", syncMobileViewport);
+
+  return () => {
+    mediaQuery.removeEventListener("change", syncMobileViewport);
+  };
+}, []);
 const [initialSparklineCache] = useState(() => loadPersistentSparklineCache());
 const sparklineCacheRef = useRef(initialSparklineCache);
 const sparklineInFlightRef = useRef(new Set());
@@ -252,15 +199,6 @@ const loadingWatchlistsRef = useRef(false);
 const livePriceCacheRef = useRef({});
 const LIVE_PRICE_CACHE_MS = 2 * 60 * 1000;
 const PRELOADED_DASHBOARD_CACHE_MS = 2 * 60 * 1000;
-const latestStockFiltersRef = useRef({
-  typedQuery,
-  searchQuery,
-  selectedType,
-  selectedSector,
-  currentPage,
-  backendFilterModel,
-  gridFilterModel,
-});
 
 const [chartModalOpen, setChartModalOpen] = useState(false);
 const [chartTicker, setChartTicker] = useState(null);
@@ -272,39 +210,8 @@ const [watchlistAllocations, setWatchlistAllocations] = useState({});
 const [activeList, setActiveList] = useState("Default");
 
   const gridRef = useRef(null);
-
-const [isMobileStockGrid, setIsMobileStockGrid] = useState(() =>
-  typeof window !== "undefined" ? window.innerWidth < 768 : false
-);
-
-useEffect(() => {
-  if (typeof window === "undefined") return undefined;
-
-  const updateMobileStockGrid = () => {
-    setIsMobileStockGrid(window.innerWidth < 768);
-  };
-
-  updateMobileStockGrid();
-  window.addEventListener("resize", updateMobileStockGrid);
-
-  return () => {
-    window.removeEventListener("resize", updateMobileStockGrid);
-  };
-}, []);
-
-const [initialSavedStockScroll] = useState(() =>
-  view === "Watchlist" ? null : loadSavedStockScroll()
-);
-
-const savedHorizontalScrollRef = useRef(
-  Number(initialSavedStockScroll?.horizontalScrollLeft || 0)
-);
-
-const savedTopScrollRef = useRef(
-  Number(initialSavedStockScroll?.topScrollLeft || 0)
-);
-
-const pendingReturnScrollRef = useRef(initialSavedStockScroll);
+const savedHorizontalScrollRef = useRef(0);
+const savedTopScrollRef = useRef(0);
 
 const [allocationFloatingStyle, setAllocationFloatingStyle] = useState({
   left: 0,
@@ -344,47 +251,6 @@ const [allocationFloatingStyle, setAllocationFloatingStyle] = useState({
 
   fetchSecurityTypes();
 }, [API_BASE]);
-
-useEffect(() => {
-  if (view === "Watchlist") return;
-
-  const currentFilters = {
-    typedQuery,
-    searchQuery,
-    selectedType,
-    selectedSector: selectedSector || null,
-    currentPage,
-    backendFilterModel,
-    gridFilterModel,
-  };
-
-  latestStockFiltersRef.current = currentFilters;
-
-  const hasSavedState =
-    typedQuery.trim() !== "" ||
-    searchQuery.trim() !== "" ||
-    selectedType !== "" ||
-    Boolean(selectedSector) ||
-    currentPage !== 1 ||
-    Object.keys(backendFilterModel || {}).length > 0 ||
-    Object.keys(gridFilterModel || {}).length > 0;
-
-  if (!hasSavedState) {
-    clearSavedStockFilters();
-    return;
-  }
-
-  saveStockFilters(currentFilters);
-}, [
-  view,
-  typedQuery,
-  searchQuery,
-  selectedType,
-  selectedSector,
-  currentPage,
-  backendFilterModel,
-  gridFilterModel,
-]);
 
   const parseLargeNumber = (val) => {
   if (val == null || val === "") return null;
@@ -1006,90 +872,30 @@ const getPreloadedDashboardRows = () => {
   }
 };
 
-const saveStockScrollPositionForReturn = () => {
-  const topScroll = document.querySelector(".top-scrollbar");
-  const gridViewport = document.querySelector(
-    ".ag-body-horizontal-scroll-viewport"
-  );
-
-  const scrollPosition = {
-    topScrollLeft: topScroll ? topScroll.scrollLeft : 0,
-    horizontalScrollLeft: gridViewport ? gridViewport.scrollLeft : 0,
-  };
-
-  savedTopScrollRef.current = scrollPosition.topScrollLeft;
-  savedHorizontalScrollRef.current = scrollPosition.horizontalScrollLeft;
-
-  try {
-    sessionStorage.setItem(
-      STOCK_SCROLL_STORAGE_KEY,
-      JSON.stringify(scrollPosition)
-    );
-  } catch {
-    // Ignore storage errors
-  }
-};
-
 const saveScrollPosition = () => {
-  // When returning from an individual stock, do not let an initial
-  // dashboard fetch overwrite the saved return position with zero.
-  if (pendingReturnScrollRef.current) return;
-
   const topScroll = document.querySelector(".top-scrollbar");
-  const gridViewport = document.querySelector(
-    ".ag-body-horizontal-scroll-viewport"
-  );
+  const gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
 
   savedTopScrollRef.current = topScroll ? topScroll.scrollLeft : 0;
-  savedHorizontalScrollRef.current = gridViewport
-    ? gridViewport.scrollLeft
-    : 0;
+  savedHorizontalScrollRef.current = gridViewport ? gridViewport.scrollLeft : 0;
 };
 const restoreScrollPosition = () => {
-  const returnPosition = pendingReturnScrollRef.current;
-
-  const targetHorizontal = returnPosition
-    ? Number(returnPosition.horizontalScrollLeft || 0)
-    : savedHorizontalScrollRef.current;
-
-  const targetTop = returnPosition
-    ? Number(returnPosition.topScrollLeft || 0)
-    : savedTopScrollRef.current;
-
-  const applyScrollPosition = () => {
-    const topScroll = document.querySelector(".top-scrollbar");
-    const gridViewport = document.querySelector(
-      ".ag-body-horizontal-scroll-viewport"
-    );
-
-    if (gridViewport) {
-      gridViewport.scrollLeft = targetHorizontal;
-    }
-
-    if (topScroll) {
-      topScroll.scrollLeft = targetTop;
-    }
-  };
-
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      applyScrollPosition();
+      const topScroll = document.querySelector(".top-scrollbar");
+      const gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
 
-      if (returnPosition) {
-        // Apply once more after AG Grid finishes its layout.
-        setTimeout(() => {
-          applyScrollPosition();
+      if (gridViewport) {
+        gridViewport.scrollLeft = savedHorizontalScrollRef.current;
+      }
 
-          savedHorizontalScrollRef.current = targetHorizontal;
-          savedTopScrollRef.current = targetTop;
-
-          pendingReturnScrollRef.current = null;
-          clearSavedStockScroll();
-        }, 100);
+      if (topScroll) {
+        topScroll.scrollLeft = savedTopScrollRef.current;
       }
     });
   });
 };
+
 const setCurrentPageTracked = (page) => {
   currentPageRef.current = page;
   setCurrentPage(page);
@@ -1396,8 +1202,24 @@ useEffect(() => {
   useEffect(() => {
     let topScroll = null;
     let gridViewport = null;
+    let gridBodyViewport = null;
     let syncTop = null;
     let syncBottom = null;
+    let momentumFrame = null;
+    let removeMobileDragListeners = null;
+
+    const clampGridScrollLeft = (value) => {
+      if (!gridViewport) return 0;
+      const maxGrid = Math.max(0, gridViewport.scrollWidth - gridViewport.clientWidth);
+      return Math.max(0, Math.min(maxGrid, value));
+    };
+
+    const cancelMomentum = () => {
+      if (momentumFrame) {
+        cancelAnimationFrame(momentumFrame);
+        momentumFrame = null;
+      }
+    };
 
     const setupScrollSync = () => {
       topScroll = document.querySelector(".top-scrollbar");
@@ -1425,12 +1247,191 @@ useEffect(() => {
 
       topScroll.addEventListener("scroll", syncTop);
       gridViewport.addEventListener("scroll", syncBottom);
+
+      /*
+       * Mobile table swipe:
+       * AG Grid's horizontal scrollbar works well with a mouse, but on a phone the
+       * table body itself is a much better drag target.  We keep vertical gestures
+       * native to the page and only take over once the gesture is clearly horizontal.
+       */
+      if (window.matchMedia("(max-width: 768px)").matches) {
+        gridBodyViewport = document.querySelector(
+          ".stock-table-container .ag-body-viewport"
+        );
+
+        if (gridBodyViewport) {
+          const previousTouchAction = gridBodyViewport.style.touchAction;
+          gridBodyViewport.style.touchAction = "pan-y";
+
+          let pointerId = null;
+          let startX = 0;
+          let startY = 0;
+          let startScrollLeft = 0;
+          let lastX = 0;
+          let lastTime = 0;
+          let velocityX = 0;
+          let axis = null;
+          let didDrag = false;
+          let suppressClickUntil = 0;
+
+          const resetPointer = () => {
+            pointerId = null;
+            axis = null;
+            didDrag = false;
+            velocityX = 0;
+          };
+
+          const startMomentum = () => {
+            cancelMomentum();
+
+            // velocityX is finger velocity; scroll movement is the opposite direction.
+            let scrollVelocity = -velocityX * 16;
+
+            const tick = () => {
+              if (!gridViewport || Math.abs(scrollVelocity) < 0.15) {
+                momentumFrame = null;
+                return;
+              }
+
+              const before = gridViewport.scrollLeft;
+              const next = clampGridScrollLeft(before + scrollVelocity);
+              gridViewport.scrollLeft = next;
+
+              // Stop if we hit either edge.
+              if (next === before && Math.abs(scrollVelocity) > 0.5) {
+                momentumFrame = null;
+                return;
+              }
+
+              scrollVelocity *= 0.92;
+              momentumFrame = requestAnimationFrame(tick);
+            };
+
+            if (Math.abs(scrollVelocity) >= 0.6) {
+              momentumFrame = requestAnimationFrame(tick);
+            }
+          };
+
+          const onPointerDown = (event) => {
+            if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+
+            const interactiveTarget = event.target.closest(
+              "button, input, select, textarea, a, [role='button']"
+            );
+            if (interactiveTarget) return;
+
+            cancelMomentum();
+
+            pointerId = event.pointerId;
+            startX = event.clientX;
+            startY = event.clientY;
+            lastX = event.clientX;
+            lastTime = performance.now();
+            startScrollLeft = gridViewport.scrollLeft;
+            velocityX = 0;
+            axis = null;
+            didDrag = false;
+          };
+
+          const onPointerMove = (event) => {
+            if (event.pointerId !== pointerId) return;
+
+            const dx = event.clientX - startX;
+            const dy = event.clientY - startY;
+
+            if (!axis && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
+              axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+
+              if (
+                axis === "x" &&
+                typeof gridBodyViewport.setPointerCapture === "function"
+              ) {
+                try {
+                  gridBodyViewport.setPointerCapture(event.pointerId);
+                } catch {
+                  // Pointer capture is only an enhancement; the drag still works without it.
+                }
+              }
+            }
+
+            if (axis !== "x") return;
+
+            event.preventDefault();
+
+            const now = performance.now();
+            const elapsed = Math.max(1, now - lastTime);
+            const fingerStep = event.clientX - lastX;
+
+            velocityX = fingerStep / elapsed;
+            lastX = event.clientX;
+            lastTime = now;
+            didDrag = true;
+
+            gridViewport.scrollLeft = clampGridScrollLeft(startScrollLeft - dx);
+          };
+
+          const finishPointer = (event, allowMomentum) => {
+            if (event.pointerId !== pointerId) return;
+
+            if (axis === "x" && didDrag) {
+              suppressClickUntil = Date.now() + 300;
+              if (allowMomentum) startMomentum();
+            }
+
+            if (
+              typeof gridBodyViewport.releasePointerCapture === "function" &&
+              gridBodyViewport.hasPointerCapture?.(event.pointerId)
+            ) {
+              try {
+                gridBodyViewport.releasePointerCapture(event.pointerId);
+              } catch {
+                // Safe to ignore if the browser already released capture.
+              }
+            }
+
+            resetPointer();
+          };
+
+          const onPointerUp = (event) => finishPointer(event, true);
+          const onPointerCancel = (event) => finishPointer(event, false);
+
+          const onClickCapture = (event) => {
+            if (Date.now() < suppressClickUntil) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          };
+
+          gridBodyViewport.addEventListener("pointerdown", onPointerDown);
+          gridBodyViewport.addEventListener("pointermove", onPointerMove, {
+            passive: false,
+          });
+          gridBodyViewport.addEventListener("pointerup", onPointerUp);
+          gridBodyViewport.addEventListener("pointercancel", onPointerCancel);
+          gridBodyViewport.addEventListener("click", onClickCapture, true);
+
+          removeMobileDragListeners = () => {
+            cancelMomentum();
+            gridBodyViewport.removeEventListener("pointerdown", onPointerDown);
+            gridBodyViewport.removeEventListener("pointermove", onPointerMove);
+            gridBodyViewport.removeEventListener("pointerup", onPointerUp);
+            gridBodyViewport.removeEventListener("pointercancel", onPointerCancel);
+            gridBodyViewport.removeEventListener("click", onClickCapture, true);
+            gridBodyViewport.style.touchAction = previousTouchAction;
+          };
+        }
+      }
     };
 
     const timer = setTimeout(setupScrollSync, 200);
 
     return () => {
       clearTimeout(timer);
+      cancelMomentum();
+
+      if (removeMobileDragListeners) {
+        removeMobileDragListeners();
+      }
       if (topScroll && syncTop) {
         topScroll.removeEventListener("scroll", syncTop);
       }
@@ -1504,10 +1505,6 @@ useEffect(() => {
   if (gridRef.current?.api) {
     gridRef.current.api.setFilterModel(null);
     gridRef.current.api.onFilterChanged();
-
-    if (view === "Watchlist") {
-      gridRef.current.api.setGridOption("quickFilterText", "");
-    }
   }
 
   setTypedQuery("");
@@ -1515,20 +1512,6 @@ useEffect(() => {
   setBackendFilterModel({});
   setGridFilterModel({});
   setSelectedType("");
-  setSelectedSector?.(null);
-  setCurrentPageTracked(1);
-
-  latestStockFiltersRef.current = {
-    typedQuery: "",
-    searchQuery: "",
-    selectedType: "",
-    selectedSector: null,
-    currentPage: 1,
-    backendFilterModel: {},
-    gridFilterModel: {},
-  };
-
-  clearSavedStockFilters();
 };
 
 const fundamentalsColumns = [
@@ -1573,7 +1556,7 @@ const technicalsColumns = [
         colId: "star",
         field: "star",
         width: 60,
-        pinned: isMobileStockGrid ? null : "left",
+        pinned: isMobileTableViewport ? null : "left",
         sortable: false,
         filter: false,
         cellStyle: { textAlign: "center", fontSize: "18px" },
@@ -1646,17 +1629,10 @@ const technicalsColumns = [
         type="button"
         className="ticker-link-button"
         onClick={(e) => {
-  e.preventDefault();
-  e.stopPropagation();
-
-  saveStockScrollPositionForReturn();
-
-  saveStockFilters(latestStockFiltersRef.current);
-
-  navigate(`/stocks/${String(ticker).toUpperCase()}`, {
-    state: { stock: params?.data || null }
-  });
-}}
+          e.preventDefault();
+          e.stopPropagation();
+          navigate(`/stocks/${String(ticker).toUpperCase()}`, { state: { stock: params?.data || null } });
+        }}
       >
         {ticker}
       </button>
@@ -1670,7 +1646,7 @@ const technicalsColumns = [
   field: "Today",
   headerName: "Today",
   width: 140,
-  pinned: isMobileStockGrid ? null : "left",
+  pinned: isMobileTableViewport ? null : "left",
   sortable: false,
   filter: false,
   suppressMenu: true,
@@ -1724,7 +1700,7 @@ setChartModalOpen(true);
 colId: "Allocation %",
 field: "Allocation %",
 width: 135,
-pinned: isMobileStockGrid ? null : "left",
+pinned: isMobileTableViewport ? null : "left",
 sortable: true,
 filter: false,
 suppressMenu: true,
@@ -2072,10 +2048,10 @@ cellClass: "column-border numeric",
   activeList,
   view,
   viewMode,
+  isMobileTableViewport,
   watchlistAllocations,
   getAllocationForTicker,
   saveAllocationForTicker,
-  isMobileStockGrid,
 ]);
 
 useEffect(() => {
@@ -2277,9 +2253,7 @@ if (!user) return;
     </button>
   </div>
 ) : (
-  <h2 className={view === "Watchlist" ? "watchlist-page-title" : undefined}>
-    {view === "Watchlist" ? "Your Watchlist" : "Market Analytics"}
-  </h2>
+  <h2>{view === "Watchlist" ? "Your Watchlist" : "Market Analytics"}</h2>
 )}
 
           {view === "Watchlist" && (
@@ -2426,26 +2400,9 @@ setActiveList("Default");
       placeholder="Search company or ticker..."
       value={typedQuery}
       onChange={(e) => {
-  cancelStockRequest();
-
-  const nextQuery = e.target.value;
-  const hasSearch = nextQuery.trim().length > 0;
-
-  if (hasSearch) {
-  setSelectedType("");
-  setSelectedSector?.(null);
-  setBackendFilterModel({});
-  setGridFilterModel({});
-  setCurrentPageTracked(1);
-
-  if (gridRef.current?.api) {
-    gridRef.current.api.setFilterModel(null);
-    gridRef.current.api.onFilterChanged();
-  }
-}
-
-  setTypedQuery(nextQuery);
-}}
+        cancelStockRequest();
+        setTypedQuery(e.target.value);
+      }}
       className="search-input"
     />
 
@@ -2668,7 +2625,6 @@ onDisplayedColumnsChanged={updateAllocationFloatingPosition}
 
     {view === "Watchlist" && (displayedCount > 0 || rowData.length > 0) && (
       <div
-        className="watchlist-allocation-summary"
         style={{
           marginTop: "8px",
           marginLeft: `${allocationFloatingStyle.left}px`,
@@ -2761,7 +2717,6 @@ onDisplayedColumnsChanged={updateAllocationFloatingPosition}
 
     {starModalOpen && (
       <div
-        className="watchlist-star-modal-overlay"
         style={{
           position: "fixed",
           top: 0,
@@ -2775,7 +2730,7 @@ onDisplayedColumnsChanged={updateAllocationFloatingPosition}
           zIndex: 1000,
         }}
       >
-        <div className="watchlist-star-modal-card" style={{ backgroundColor: "#fff", padding: "20px", borderRadius: "8px", width: "300px" }}>
+        <div style={{ backgroundColor: "#fff", padding: "20px", borderRadius: "8px", width: "300px" }}>
           <h3 style={{ color: "#000" }}>Select Watchlists for {modalTicker}</h3>
 
           <div style={{ display: "flex", flexDirection: "column", gap: "5px", marginTop: "10px" }}>

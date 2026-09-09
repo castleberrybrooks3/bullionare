@@ -82,6 +82,7 @@ drawingColor = "#38bdf8",
 compareSymbol = null,
   showCompareControls = false,
   API_BASE = "",
+  isMobile = false,
 }) {
   const [chartHover, setChartHover] = useState(null);
   const [drawings, setDrawings] = useState([]);
@@ -92,6 +93,7 @@ compareSymbol = null,
   const [comparePoints, setComparePoints] = useState([]);
   const chartWrapRef = useRef(null);
   const svgRef = useRef(null);
+  const scrubPointerRef = useRef(null);
 
   const technicalPoints = useMemo(
     () => enrichChartPointsWithTechnicals(points),
@@ -156,12 +158,12 @@ compareSymbol = null,
 
   const hasChartData = points.length > 0;
 
-  const width = 950;
-  const height = 420;
-  const leftPad = 18;
+  const width = isMobile ? 430 : 950;
+  const height = isMobile ? 390 : 420;
+  const leftPad = isMobile ? 10 : 18;
   const rightPad = 76;
-  const topPad = 58;
-const bottomPad = 42;
+  const topPad = isMobile ? 46 : 58;
+const bottomPad = isMobile ? 38 : 42;
 
   const chartWidth = width - leftPad - rightPad;
   const chartHeight = height - topPad - bottomPad;
@@ -263,12 +265,15 @@ const bottomPad = 42;
     Z
   `;
 
-  const priceTicks = Array.from({ length: 6 }, (_, i) => {
-    const value = min + ((5 - i) / 5) * range;
+  const priceTickCount = isMobile ? 5 : 6;
+  const priceTicks = Array.from({ length: priceTickCount }, (_, i) => {
+    const denominator = Math.max(priceTickCount - 1, 1);
+    const value = min + ((denominator - i) / denominator) * range;
     return Number(value.toFixed(2));
   });
 
-  const bottomTickIndexes = [0, 0.25, 0.5, 0.75, 1].map((pct) =>
+  const bottomTickPercents = isMobile ? [0, 1 / 3, 2 / 3, 1] : [0, 0.25, 0.5, 0.75, 1];
+  const bottomTickIndexes = bottomTickPercents.map((pct) =>
     Math.min(points.length - 1, Math.round((points.length - 1) * pct))
   );
 
@@ -438,6 +443,35 @@ const rangeBadgeX = rangeBadgeCenterX - rangeBadgeWidth / 2;
   };
 };
 
+const setHoverFromPointerEvent = (event) => {
+  if (!points.length) return;
+
+  const svgPoint = getSvgPointFromMouse(event);
+  if (!svgPoint) return;
+
+  const pct = Math.max(
+    0,
+    Math.min(1, (svgPoint.x - leftPad) / Math.max(chartWidth, 1))
+  );
+  const index = Math.max(
+    0,
+    Math.min(points.length - 1, Math.round(pct * (points.length - 1)))
+  );
+  const point = points[index];
+
+  setChartHover({
+    label: formatChartTimeLabel(point.time, chartRange),
+    time: point.time,
+    open: point.open,
+    high: point.high,
+    low: point.low,
+    close: point.close,
+    volume: point.volume,
+    x: getX(index),
+    y: getY(point.close),
+  });
+};
+
 const buildFreehandSvgPath = (freehandPoints = []) => {
   return freehandPoints
     .map((point, index) => {
@@ -579,6 +613,82 @@ const handlePencilMouseMove = (event) => {
   setPendingDrawingPoint(null);
 };
 
+  const handleChartPointerDown = (event) => {
+    if (drawingMode === "pencil") {
+      if (typeof event.currentTarget.setPointerCapture === "function") {
+        try {
+          event.currentTarget.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer capture is optional.
+        }
+      }
+      handlePencilMouseDown(event);
+      return;
+    }
+
+    if (drawingMode) {
+      setHoverFromPointerEvent(event);
+      return;
+    }
+
+    scrubPointerRef.current = event.pointerId;
+    setHoverFromPointerEvent(event);
+  };
+
+  const handleChartPointerMove = (event) => {
+    if (drawingMode === "pencil") {
+      handlePencilMouseMove(event);
+      return;
+    }
+
+    if (drawingMode) {
+      // Keep the desktop hover readout while positioning a drawing.
+      if (event.pointerType === "mouse") setHoverFromPointerEvent(event);
+      return;
+    }
+
+    if (
+      event.pointerType === "mouse" ||
+      scrubPointerRef.current === event.pointerId
+    ) {
+      setHoverFromPointerEvent(event);
+    }
+  };
+
+  const finishChartPointer = (event) => {
+    if (drawingMode === "pencil") {
+      finishFreehandPath();
+    }
+
+    if (scrubPointerRef.current === event.pointerId) {
+      scrubPointerRef.current = null;
+    }
+
+    if (
+      typeof event.currentTarget.releasePointerCapture === "function" &&
+      event.currentTarget.hasPointerCapture?.(event.pointerId)
+    ) {
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      } catch {
+        // Browser may have already released it.
+      }
+    }
+  };
+
+  const handleChartPointerLeave = (event) => {
+    if (drawingMode === "pencil") {
+      finishFreehandPath();
+      return;
+    }
+
+    // Mouse hover should disappear when the cursor leaves. Touch keeps the last
+    // inspected value visible after the finger lifts, which feels much better on mobile.
+    if (event.pointerType === "mouse" && scrubPointerRef.current == null) {
+      setChartHover(null);
+    }
+  };
+
   const hoverChange =
     chartHover?.open && chartHover.open !== 0
       ? ((chartHover.close - chartHover.open) / chartHover.open) * 100
@@ -597,45 +707,65 @@ return (
     <div
       ref={chartWrapRef}
       style={{ position: "relative", width: "100%", height: "100%" }}
-      onMouseLeave={() => {
-        setChartHover(null);
-      }}
+      onPointerLeave={handleChartPointerLeave}
     >
       {chartHover && (
         <div
           style={{
-  position: "absolute",
-  top: "34px",
-  left: "30px",
-  width: "fit-content",
-  maxWidth: "calc(100% - 60px)",
-  color: "white",
-  zIndex: 20,
-  fontSize: "12px",
-  display: "flex",
-  alignItems: "center",
-  gap: "13px",
-  flexWrap: "wrap",
-  pointerEvents: "none",
-  textShadow: "0 1px 3px rgba(0,0,0,0.85)",
-}}
+            position: "absolute",
+            top: isMobile ? "6px" : "34px",
+            left: isMobile ? "8px" : "30px",
+            right: isMobile ? "8px" : "auto",
+            width: isMobile ? "auto" : "fit-content",
+            maxWidth: isMobile ? "none" : "calc(100% - 60px)",
+            color: "white",
+            zIndex: 20,
+            fontSize: isMobile ? "11px" : "12px",
+            display: "flex",
+            alignItems: "center",
+            gap: isMobile ? "8px" : "13px",
+            flexWrap: isMobile ? "nowrap" : "wrap",
+            overflow: "hidden",
+            pointerEvents: "none",
+            textShadow: "0 1px 3px rgba(0,0,0,0.85)",
+            background: isMobile ? "rgba(15,23,42,0.78)" : "transparent",
+            border: isMobile ? "1px solid rgba(148,163,184,0.18)" : "none",
+            borderRadius: isMobile ? "8px" : 0,
+            padding: isMobile ? "5px 7px" : 0,
+          }}
         >
-          <strong style={{ color: "#e5e7eb" }}>
+          <strong
+            style={{
+              color: "#e5e7eb",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
             {ticker ? `${ticker} • ` : ""}
             {chartHover.label}
           </strong>
 
-          <span>O {formatPrice(chartHover.open)}</span>
-<span>H {formatPrice(chartHover.high)}</span>
-<span>L {formatPrice(chartHover.low)}</span>
-<span>C {formatPrice(chartHover.close)}</span>
-<span>Vol {formatVolume(chartHover.volume)}</span>
+          {isMobile ? (
+            <span style={{ whiteSpace: "nowrap", fontWeight: 800 }}>
+              {formatPrice(chartHover.close)}
+            </span>
+          ) : (
+            <>
+              <span>O {formatPrice(chartHover.open)}</span>
+              <span>H {formatPrice(chartHover.high)}</span>
+              <span>L {formatPrice(chartHover.low)}</span>
+              <span>C {formatPrice(chartHover.close)}</span>
+              <span>Vol {formatVolume(chartHover.volume)}</span>
+            </>
+          )}
 
           {hoverChange != null && (
             <span
               style={{
                 color: hoverIsUp ? "#86efac" : "#fca5a5",
                 fontWeight: 900,
+                whiteSpace: "nowrap",
               }}
             >
               {hoverChange >= 0 ? "+" : ""}
@@ -721,10 +851,11 @@ return (
   width="100%"
   height="100%"
   viewBox={`0 0 ${width} ${height}`}
-  onMouseDown={handlePencilMouseDown}
-  onMouseMove={handlePencilMouseMove}
-  onMouseUp={finishFreehandPath}
-  onMouseLeave={finishFreehandPath}
+  onPointerDown={handleChartPointerDown}
+  onPointerMove={handleChartPointerMove}
+  onPointerUp={finishChartPointer}
+  onPointerCancel={finishChartPointer}
+  onPointerLeave={handleChartPointerLeave}
   style={{
   cursor:
     drawingMode === "pencil" && eraserMode
@@ -735,7 +866,9 @@ return (
       ? "crosshair"
       : "default",
   userSelect: "none",
-  touchAction: "none",
+  // Vertical swipes can still scroll the modal/page; horizontal touch stays available
+  // to the chart for continuous scrubbing. Drawing modes intentionally own the gesture.
+  touchAction: drawingMode ? "none" : "pan-y",
 }}
 >
         <defs>
@@ -1250,7 +1383,7 @@ return (
           </g>
         )}
 
-        {points.length > 0 && (
+        {points.length > 0 && (!isMobile || !chartHover) && (
           <g>
             <rect
               x={width - rightPad + 6}
@@ -1273,7 +1406,7 @@ return (
           </g>
         )}
 
-        {selectedRangeChangePct != null && (
+        {selectedRangeChangePct != null && !isMobile && (
   <g>
     <rect
       x={rangeBadgeX}
@@ -1298,7 +1431,7 @@ return (
   </g>
 )}
 
-        {chartHover && (
+        {chartHover && !isMobile && (
           <g>
             <rect
               x={chartHover.x - 50}
@@ -1335,19 +1468,6 @@ return (
               fill="transparent"
               style={{ cursor: drawingMode ? "crosshair" : "default" }}
               onClick={() => handleChartClick(index)}
-              onMouseMove={() =>
-                setChartHover({
-                  label: formatChartTimeLabel(point.time, chartRange),
-                  time: point.time,
-                  open: point.open,
-                  high: point.high,
-                  low: point.low,
-                  close: point.close,
-                  volume: point.volume,
-                  x: getX(index),
-                  y: getY(point.close),
-                })
-              }
             />
           );
         })}

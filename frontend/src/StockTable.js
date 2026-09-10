@@ -1205,247 +1205,232 @@ useEffect(() => {
     let gridBodyViewport = null;
     let syncTop = null;
     let syncBottom = null;
-    let momentumFrame = null;
+    let mobileGridScrollListener = null;
     let removeMobileDragListeners = null;
 
     const clampGridScrollLeft = (value) => {
       if (!gridViewport) return 0;
-      const maxGrid = Math.max(0, gridViewport.scrollWidth - gridViewport.clientWidth);
+      const maxGrid = Math.max(
+        0,
+        gridViewport.scrollWidth - gridViewport.clientWidth
+      );
       return Math.max(0, Math.min(maxGrid, value));
-    };
-
-    const cancelMomentum = () => {
-      if (momentumFrame) {
-        cancelAnimationFrame(momentumFrame);
-        momentumFrame = null;
-      }
     };
 
     const setupScrollSync = () => {
       topScroll = document.querySelector(".top-scrollbar");
       const topContent = document.querySelector(".top-scroll-content");
-      gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
+      gridViewport = document.querySelector(
+        ".ag-body-horizontal-scroll-viewport"
+      );
       const gridCenter = document.querySelector(".ag-center-cols-container");
 
       if (!topScroll || !topContent || !gridViewport || !gridCenter) return;
 
       topContent.style.width = gridCenter.scrollWidth + "px";
 
-      syncTop = () => {
-        const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
-        const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
-        const ratio = maxTop > 0 ? topScroll.scrollLeft / maxTop : 0;
-        gridViewport.scrollLeft = ratio * maxGrid;
-      };
-
-      syncBottom = () => {
-        const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
-        const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
-        const ratio = maxGrid > 0 ? gridViewport.scrollLeft / maxGrid : 0;
-        topScroll.scrollLeft = ratio * maxTop;
-      };
-
-      topScroll.addEventListener("scroll", syncTop);
-      gridViewport.addEventListener("scroll", syncBottom);
+      const isMobile = isMobileTableViewport;
 
       /*
-       * Mobile table swipe:
-       * Use native touch events instead of Pointer Events here.  On iOS/Safari and
-       * some mobile Chromium builds AG Grid can keep the pointer stream for its own
-       * gesture handling, which meant the previous pointermove handler never moved
-       * the horizontal viewport.  Touch Events with passive:false are reliable here.
-       *
-       * Vertical swipes are left completely alone.  We only preventDefault after the
-       * gesture is clearly horizontal, then move AG Grid's real horizontal viewport.
+       * DESKTOP ONLY:
+       * Preserve the existing two-way synchronization between Bullionaire's
+       * custom top scrollbar and AG Grid's horizontal scrollbar exactly as-is.
        */
-      if (window.matchMedia("(max-width: 768px)").matches) {
-        gridBodyViewport = document.querySelector(
-          ".stock-table-container .ag-body-viewport"
-        );
+      if (!isMobile) {
+        syncTop = () => {
+          const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
+          const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
+          const ratio = maxTop > 0 ? topScroll.scrollLeft / maxTop : 0;
+          gridViewport.scrollLeft = ratio * maxGrid;
+        };
 
-        if (gridBodyViewport) {
-          const previousTouchAction = gridBodyViewport.style.touchAction;
-          gridBodyViewport.style.touchAction = "pan-y";
+        syncBottom = () => {
+          const maxTop = topScroll.scrollWidth - topScroll.clientWidth;
+          const maxGrid = gridViewport.scrollWidth - gridViewport.clientWidth;
+          const ratio = maxGrid > 0 ? gridViewport.scrollLeft / maxGrid : 0;
+          topScroll.scrollLeft = ratio * maxTop;
+        };
 
-          let touchActive = false;
-          let startX = 0;
-          let startY = 0;
-          let startScrollLeft = 0;
-          let lastX = 0;
-          let lastTime = 0;
-          let velocityX = 0;
-          let axis = null;
-          let didDrag = false;
-          let suppressClickUntil = 0;
-
-          const resetTouch = () => {
-            touchActive = false;
-            axis = null;
-            didDrag = false;
-            velocityX = 0;
-          };
-
-          const startMomentum = () => {
-            cancelMomentum();
-
-            // velocityX is finger velocity; scroll movement is the opposite direction.
-            let scrollVelocity = -velocityX * 16;
-
-            const tick = () => {
-              if (!gridViewport || Math.abs(scrollVelocity) < 0.15) {
-                momentumFrame = null;
-                return;
-              }
-
-              const before = gridViewport.scrollLeft;
-              const next = clampGridScrollLeft(before + scrollVelocity);
-              gridViewport.scrollLeft = next;
-
-              if (next === before && Math.abs(scrollVelocity) > 0.5) {
-                momentumFrame = null;
-                return;
-              }
-
-              scrollVelocity *= 0.92;
-              momentumFrame = requestAnimationFrame(tick);
-            };
-
-            if (Math.abs(scrollVelocity) >= 0.6) {
-              momentumFrame = requestAnimationFrame(tick);
-            }
-          };
-
-          const onTouchStart = (event) => {
-            if (event.touches.length !== 1) return;
-
-            const target = event.target;
-            const interactiveTarget =
-              target && typeof target.closest === "function"
-                ? target.closest(
-                    "button, input, select, textarea, a, [role='button']"
-                  )
-                : null;
-
-            if (interactiveTarget) return;
-
-            const touch = event.touches[0];
-            cancelMomentum();
-
-            touchActive = true;
-            startX = touch.clientX;
-            startY = touch.clientY;
-            lastX = touch.clientX;
-            lastTime = performance.now();
-            startScrollLeft = gridViewport.scrollLeft;
-            velocityX = 0;
-            axis = null;
-            didDrag = false;
-          };
-
-          const onTouchMove = (event) => {
-            if (!touchActive || event.touches.length !== 1) return;
-
-            const touch = event.touches[0];
-            const dx = touch.clientX - startX;
-            const dy = touch.clientY - startY;
-            const absX = Math.abs(dx);
-            const absY = Math.abs(dy);
-
-            if (!axis && (absX > 4 || absY > 4)) {
-              // Require a small directional advantage so diagonal vertical swipes
-              // continue behaving exactly like normal page scrolling.
-              if (absX > absY * 1.08) {
-                axis = "x";
-              } else if (absY > absX * 1.08) {
-                axis = "y";
-              } else {
-                return;
-              }
-            }
-
-            if (axis !== "x") return;
-
-            if (event.cancelable) {
-              event.preventDefault();
-            }
-
-            const now = performance.now();
-            const elapsed = Math.max(1, now - lastTime);
-            const fingerStep = touch.clientX - lastX;
-
-            velocityX = fingerStep / elapsed;
-            lastX = touch.clientX;
-            lastTime = now;
-            didDrag = true;
-
-            gridViewport.scrollLeft = clampGridScrollLeft(startScrollLeft - dx);
-          };
-
-          const finishTouch = (allowMomentum) => {
-            if (!touchActive) return;
-
-            if (axis === "x" && didDrag) {
-              suppressClickUntil = Date.now() + 300;
-              if (allowMomentum) startMomentum();
-            }
-
-            resetTouch();
-          };
-
-          const onTouchEnd = () => finishTouch(false);
-          const onTouchCancel = () => finishTouch(false);
-
-          const onClickCapture = (event) => {
-            if (Date.now() < suppressClickUntil) {
-              event.preventDefault();
-              event.stopPropagation();
-            }
-          };
-
-          gridBodyViewport.addEventListener("touchstart", onTouchStart, {
-            passive: true,
-          });
-          gridBodyViewport.addEventListener("touchmove", onTouchMove, {
-            passive: false,
-          });
-          gridBodyViewport.addEventListener("touchend", onTouchEnd, {
-            passive: true,
-          });
-          gridBodyViewport.addEventListener("touchcancel", onTouchCancel, {
-            passive: true,
-          });
-          gridBodyViewport.addEventListener("click", onClickCapture, true);
-
-          removeMobileDragListeners = () => {
-            cancelMomentum();
-            gridBodyViewport.removeEventListener("touchstart", onTouchStart);
-            gridBodyViewport.removeEventListener("touchmove", onTouchMove);
-            gridBodyViewport.removeEventListener("touchend", onTouchEnd);
-            gridBodyViewport.removeEventListener("touchcancel", onTouchCancel);
-            gridBodyViewport.removeEventListener("click", onClickCapture, true);
-            gridBodyViewport.style.touchAction = previousTouchAction;
-          };
-        }
+        topScroll.addEventListener("scroll", syncTop);
+        gridViewport.addEventListener("scroll", syncBottom);
+        return;
       }
+
+      /*
+       * MOBILE ONLY:
+       *
+       * Use exactly one horizontal scroll authority: AG Grid's own horizontal
+       * viewport. Do NOT attach the desktop top<->bottom synchronization on
+       * mobile. That synchronization can fire another scroll event after the
+       * user's touch has ended and write a slightly different scrollLeft back
+       * into the grid, producing the visible drift toward the left.
+       *
+       * Also keep the saved scroll position updated on every actual grid scroll
+       * so an async row/live-price refresh cannot restore an older position.
+       */
+      mobileGridScrollListener = () => {
+        savedHorizontalScrollRef.current = gridViewport.scrollLeft;
+        savedTopScrollRef.current = gridViewport.scrollLeft;
+      };
+
+      gridViewport.addEventListener("scroll", mobileGridScrollListener, {
+        passive: true,
+      });
+
+      gridBodyViewport = document.querySelector(
+        ".stock-table-container .ag-body-viewport"
+      );
+
+      if (!gridBodyViewport) return;
+
+      const previousTouchAction = gridBodyViewport.style.touchAction;
+      gridBodyViewport.style.touchAction = "pan-y";
+
+      let touchActive = false;
+      let startX = 0;
+      let startY = 0;
+      let startScrollLeft = 0;
+      let axis = null;
+      let didDrag = false;
+      let suppressClickUntil = 0;
+
+      const resetTouch = () => {
+        touchActive = false;
+        axis = null;
+        didDrag = false;
+      };
+
+      const onTouchStart = (event) => {
+        if (event.touches.length !== 1) return;
+
+        const target = event.target;
+        const interactiveTarget =
+          target && typeof target.closest === "function"
+            ? target.closest(
+                "button, input, select, textarea, a, [role='button']"
+              )
+            : null;
+
+        if (interactiveTarget) return;
+
+        const touch = event.touches[0];
+
+        touchActive = true;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        startScrollLeft = gridViewport.scrollLeft;
+        axis = null;
+        didDrag = false;
+
+        // Keep restoration logic anchored to the position the gesture began at.
+        savedHorizontalScrollRef.current = startScrollLeft;
+      };
+
+      const onTouchMove = (event) => {
+        if (!touchActive || event.touches.length !== 1) return;
+
+        const touch = event.touches[0];
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        const absX = Math.abs(dx);
+        const absY = Math.abs(dy);
+
+        if (!axis && (absX > 4 || absY > 4)) {
+          // Preserve normal vertical page scrolling unless the gesture is
+          // clearly horizontal.
+          if (absX > absY * 1.08) {
+            axis = "x";
+          } else if (absY > absX * 1.08) {
+            axis = "y";
+          } else {
+            return;
+          }
+        }
+
+        if (axis !== "x") return;
+
+        if (event.cancelable) {
+          event.preventDefault();
+        }
+
+        didDrag = true;
+
+        const nextScrollLeft = clampGridScrollLeft(startScrollLeft - dx);
+
+        // This is the only mobile code that changes horizontal position while
+        // the finger is moving. There is intentionally no momentum/inertia
+        // animation after touchend.
+        gridViewport.scrollLeft = nextScrollLeft;
+        savedHorizontalScrollRef.current = nextScrollLeft;
+      };
+
+      const finishTouch = () => {
+        if (!touchActive) return;
+
+        if (axis === "x" && didDrag) {
+          suppressClickUntil = Date.now() + 300;
+          savedHorizontalScrollRef.current = gridViewport.scrollLeft;
+        }
+
+        resetTouch();
+      };
+
+      const onTouchEnd = () => finishTouch();
+      const onTouchCancel = () => finishTouch();
+
+      const onClickCapture = (event) => {
+        if (Date.now() < suppressClickUntil) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      };
+
+      gridBodyViewport.addEventListener("touchstart", onTouchStart, {
+        passive: true,
+      });
+      gridBodyViewport.addEventListener("touchmove", onTouchMove, {
+        passive: false,
+      });
+      gridBodyViewport.addEventListener("touchend", onTouchEnd, {
+        passive: true,
+      });
+      gridBodyViewport.addEventListener("touchcancel", onTouchCancel, {
+        passive: true,
+      });
+      gridBodyViewport.addEventListener("click", onClickCapture, true);
+
+      removeMobileDragListeners = () => {
+        gridBodyViewport.removeEventListener("touchstart", onTouchStart);
+        gridBodyViewport.removeEventListener("touchmove", onTouchMove);
+        gridBodyViewport.removeEventListener("touchend", onTouchEnd);
+        gridBodyViewport.removeEventListener("touchcancel", onTouchCancel);
+        gridBodyViewport.removeEventListener("click", onClickCapture, true);
+        gridBodyViewport.style.touchAction = previousTouchAction;
+      };
     };
 
     const timer = setTimeout(setupScrollSync, 200);
 
     return () => {
       clearTimeout(timer);
-      cancelMomentum();
 
       if (removeMobileDragListeners) {
         removeMobileDragListeners();
       }
+
       if (topScroll && syncTop) {
         topScroll.removeEventListener("scroll", syncTop);
       }
+
       if (gridViewport && syncBottom) {
         gridViewport.removeEventListener("scroll", syncBottom);
       }
+
+      if (gridViewport && mobileGridScrollListener) {
+        gridViewport.removeEventListener("scroll", mobileGridScrollListener);
+      }
     };
-  }, [processedStocks]);
+  }, [processedStocks, isMobileTableViewport]);
 
   useEffect(() => {
   const data = stocks
@@ -2166,11 +2151,19 @@ if (!user) return;
 
     const defaultColDef = useMemo(
     () => ({
-      resizable: true,
+      /*
+       * Desktop keeps its existing behavior.
+       * Mobile headers are fixed: no resizing, no dragging/reordering,
+       * no hiding through the UI, and no pin/unpin changes.
+       */
+      resizable: !isMobileTableViewport,
       sortable: true,
       minWidth: 100,
+      suppressMovable: isMobileTableViewport,
+      lockVisible: isMobileTableViewport,
+      lockPinned: isMobileTableViewport,
     }),
-    []
+    [isMobileTableViewport]
   );
 
   const shouldShowWatchlistEmptyLoading =
@@ -2553,6 +2546,11 @@ setActiveList("Default");
 <AgGridReact
   ref={gridRef}
   suppressFieldDotNotation={true}
+  /*
+   * MOBILE ONLY:
+   * Make the visible column layout completely fixed. Desktop remains movable.
+   */
+  suppressMovableColumns={isMobileTableViewport}
   suppressDragLeaveHidesColumns={isMobileTableViewport}
   headerHeight={70}
   rowData={rowData}

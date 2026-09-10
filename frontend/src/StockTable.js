@@ -1392,7 +1392,7 @@ useEffect(() => {
             resetTouch();
           };
 
-          const onTouchEnd = () => finishTouch(true);
+          const onTouchEnd = () => finishTouch(false);
           const onTouchCancel = () => finishTouch(false);
 
           const onClickCapture = (event) => {
@@ -2553,6 +2553,7 @@ setActiveList("Default");
 <AgGridReact
   ref={gridRef}
   suppressFieldDotNotation={true}
+  suppressDragLeaveHidesColumns={isMobileTableViewport}
   headerHeight={70}
   rowData={rowData}
   columnDefs={columns}

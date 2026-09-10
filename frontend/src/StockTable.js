@@ -1250,9 +1250,13 @@ useEffect(() => {
 
       /*
        * Mobile table swipe:
-       * AG Grid's horizontal scrollbar works well with a mouse, but on a phone the
-       * table body itself is a much better drag target.  We keep vertical gestures
-       * native to the page and only take over once the gesture is clearly horizontal.
+       * Use native touch events instead of Pointer Events here.  On iOS/Safari and
+       * some mobile Chromium builds AG Grid can keep the pointer stream for its own
+       * gesture handling, which meant the previous pointermove handler never moved
+       * the horizontal viewport.  Touch Events with passive:false are reliable here.
+       *
+       * Vertical swipes are left completely alone.  We only preventDefault after the
+       * gesture is clearly horizontal, then move AG Grid's real horizontal viewport.
        */
       if (window.matchMedia("(max-width: 768px)").matches) {
         gridBodyViewport = document.querySelector(
@@ -1263,7 +1267,7 @@ useEffect(() => {
           const previousTouchAction = gridBodyViewport.style.touchAction;
           gridBodyViewport.style.touchAction = "pan-y";
 
-          let pointerId = null;
+          let touchActive = false;
           let startX = 0;
           let startY = 0;
           let startScrollLeft = 0;
@@ -1274,8 +1278,8 @@ useEffect(() => {
           let didDrag = false;
           let suppressClickUntil = 0;
 
-          const resetPointer = () => {
-            pointerId = null;
+          const resetTouch = () => {
+            touchActive = false;
             axis = null;
             didDrag = false;
             velocityX = 0;
@@ -1297,7 +1301,6 @@ useEffect(() => {
               const next = clampGridScrollLeft(before + scrollVelocity);
               gridViewport.scrollLeft = next;
 
-              // Stop if we hit either edge.
               if (next === before && Math.abs(scrollVelocity) > 0.5) {
                 momentumFrame = null;
                 return;
@@ -1312,20 +1315,26 @@ useEffect(() => {
             }
           };
 
-          const onPointerDown = (event) => {
-            if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+          const onTouchStart = (event) => {
+            if (event.touches.length !== 1) return;
 
-            const interactiveTarget = event.target.closest(
-              "button, input, select, textarea, a, [role='button']"
-            );
+            const target = event.target;
+            const interactiveTarget =
+              target && typeof target.closest === "function"
+                ? target.closest(
+                    "button, input, select, textarea, a, [role='button']"
+                  )
+                : null;
+
             if (interactiveTarget) return;
 
+            const touch = event.touches[0];
             cancelMomentum();
 
-            pointerId = event.pointerId;
-            startX = event.clientX;
-            startY = event.clientY;
-            lastX = event.clientX;
+            touchActive = true;
+            startX = touch.clientX;
+            startY = touch.clientY;
+            lastX = touch.clientX;
             lastTime = performance.now();
             startScrollLeft = gridViewport.scrollLeft;
             velocityX = 0;
@@ -1333,67 +1342,58 @@ useEffect(() => {
             didDrag = false;
           };
 
-          const onPointerMove = (event) => {
-            if (event.pointerId !== pointerId) return;
+          const onTouchMove = (event) => {
+            if (!touchActive || event.touches.length !== 1) return;
 
-            const dx = event.clientX - startX;
-            const dy = event.clientY - startY;
+            const touch = event.touches[0];
+            const dx = touch.clientX - startX;
+            const dy = touch.clientY - startY;
+            const absX = Math.abs(dx);
+            const absY = Math.abs(dy);
 
-            if (!axis && (Math.abs(dx) > 5 || Math.abs(dy) > 5)) {
-              axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
-
-              if (
-                axis === "x" &&
-                typeof gridBodyViewport.setPointerCapture === "function"
-              ) {
-                try {
-                  gridBodyViewport.setPointerCapture(event.pointerId);
-                } catch {
-                  // Pointer capture is only an enhancement; the drag still works without it.
-                }
+            if (!axis && (absX > 4 || absY > 4)) {
+              // Require a small directional advantage so diagonal vertical swipes
+              // continue behaving exactly like normal page scrolling.
+              if (absX > absY * 1.08) {
+                axis = "x";
+              } else if (absY > absX * 1.08) {
+                axis = "y";
+              } else {
+                return;
               }
             }
 
             if (axis !== "x") return;
 
-            event.preventDefault();
+            if (event.cancelable) {
+              event.preventDefault();
+            }
 
             const now = performance.now();
             const elapsed = Math.max(1, now - lastTime);
-            const fingerStep = event.clientX - lastX;
+            const fingerStep = touch.clientX - lastX;
 
             velocityX = fingerStep / elapsed;
-            lastX = event.clientX;
+            lastX = touch.clientX;
             lastTime = now;
             didDrag = true;
 
             gridViewport.scrollLeft = clampGridScrollLeft(startScrollLeft - dx);
           };
 
-          const finishPointer = (event, allowMomentum) => {
-            if (event.pointerId !== pointerId) return;
+          const finishTouch = (allowMomentum) => {
+            if (!touchActive) return;
 
             if (axis === "x" && didDrag) {
               suppressClickUntil = Date.now() + 300;
               if (allowMomentum) startMomentum();
             }
 
-            if (
-              typeof gridBodyViewport.releasePointerCapture === "function" &&
-              gridBodyViewport.hasPointerCapture?.(event.pointerId)
-            ) {
-              try {
-                gridBodyViewport.releasePointerCapture(event.pointerId);
-              } catch {
-                // Safe to ignore if the browser already released capture.
-              }
-            }
-
-            resetPointer();
+            resetTouch();
           };
 
-          const onPointerUp = (event) => finishPointer(event, true);
-          const onPointerCancel = (event) => finishPointer(event, false);
+          const onTouchEnd = () => finishTouch(true);
+          const onTouchCancel = () => finishTouch(false);
 
           const onClickCapture = (event) => {
             if (Date.now() < suppressClickUntil) {
@@ -1402,20 +1402,26 @@ useEffect(() => {
             }
           };
 
-          gridBodyViewport.addEventListener("pointerdown", onPointerDown);
-          gridBodyViewport.addEventListener("pointermove", onPointerMove, {
+          gridBodyViewport.addEventListener("touchstart", onTouchStart, {
+            passive: true,
+          });
+          gridBodyViewport.addEventListener("touchmove", onTouchMove, {
             passive: false,
           });
-          gridBodyViewport.addEventListener("pointerup", onPointerUp);
-          gridBodyViewport.addEventListener("pointercancel", onPointerCancel);
+          gridBodyViewport.addEventListener("touchend", onTouchEnd, {
+            passive: true,
+          });
+          gridBodyViewport.addEventListener("touchcancel", onTouchCancel, {
+            passive: true,
+          });
           gridBodyViewport.addEventListener("click", onClickCapture, true);
 
           removeMobileDragListeners = () => {
             cancelMomentum();
-            gridBodyViewport.removeEventListener("pointerdown", onPointerDown);
-            gridBodyViewport.removeEventListener("pointermove", onPointerMove);
-            gridBodyViewport.removeEventListener("pointerup", onPointerUp);
-            gridBodyViewport.removeEventListener("pointercancel", onPointerCancel);
+            gridBodyViewport.removeEventListener("touchstart", onTouchStart);
+            gridBodyViewport.removeEventListener("touchmove", onTouchMove);
+            gridBodyViewport.removeEventListener("touchend", onTouchEnd);
+            gridBodyViewport.removeEventListener("touchcancel", onTouchCancel);
             gridBodyViewport.removeEventListener("click", onClickCapture, true);
             gridBodyViewport.style.touchAction = previousTouchAction;
           };

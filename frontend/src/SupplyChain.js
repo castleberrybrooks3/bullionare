@@ -10,13 +10,18 @@ import "./SupplyChain.css";
 
 const companies = Object.keys(supplyChainTree);
 
+const NODE_WIDTH = 220;
+const NODE_GAP_X = 140;
+const NODE_GAP_Y = 14;
+
 const nodeBaseStyle = {
   background: "#1a2238",
   color: "white",
   border: "1px solid transparent",
   borderRadius: "12px",
   padding: "10px 14px",
-  minWidth: 170,
+  width: NODE_WIDTH,
+  boxSizing: "border-box",
   textAlign: "center",
   boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
   cursor: "pointer",
@@ -132,23 +137,71 @@ function buildGraphFromNodesEdges(data, onTickerClick) {
     .map(Number)
     .sort((a, b) => a - b);
 
-  const xSpacing = 280;
-  const ySpacing = 130;
+  const xSpacing = NODE_WIDTH + NODE_GAP_X;
 
-  const flowNodes = [];
-  sortedLayers.forEach((layer) => {
-    const nodesInLayer = columns[layer];
-    const totalHeight = (nodesInLayer.length - 1) * ySpacing;
-    const startY = -totalHeight / 2;
+/*
+  Estimate the rendered height of each node.
 
-    nodesInLayer.forEach((node, index) => {
-      const isRoot = node.id === rootId;
-      flowNodes.push({
-        id: node.id,
-        position: {
-          x: (layer - sortedLayers[0]) * xSpacing,
-          y: startY + index * ySpacing,
-        },
+  The boxes all use the same fixed width, so the main reason their
+  heights differ is text wrapping. We intentionally estimate a little
+  conservatively so neighboring nodes always retain a small gap.
+*/
+const estimateNodeHeight = (node) => {
+  const name = String(node?.name || node?.ticker || node?.id || "");
+  const role = String(node?.role || "");
+  const ticker = String(node?.ticker || "");
+
+  // Approximate usable text width inside a 220px box.
+  const charsPerLine = 27;
+
+  const nameLines = Math.max(1, Math.ceil(name.length / charsPerLine));
+  const roleLines = role
+    ? Math.max(1, Math.ceil(role.length / charsPerLine))
+    : 0;
+  const tickerLines = ticker ? 1 : 0;
+
+  const paddingHeight = 20;
+  const nameHeight = nameLines * 18;
+  const roleHeight = roleLines * 16;
+  const tickerHeight = tickerLines * 14;
+
+  const internalMargins =
+    (roleLines ? 4 : 0) +
+    (tickerLines ? 4 : 0);
+
+  return Math.max(
+    76,
+    paddingHeight +
+      nameHeight +
+      roleHeight +
+      tickerHeight +
+      internalMargins
+  );
+};
+
+const flowNodes = [];
+
+sortedLayers.forEach((layer) => {
+  const nodesInLayer = columns[layer];
+
+  const nodeHeights = nodesInLayer.map(estimateNodeHeight);
+
+  const totalHeight =
+    nodeHeights.reduce((sum, height) => sum + height, 0) +
+    Math.max(0, nodesInLayer.length - 1) * NODE_GAP_Y;
+
+  let currentY = -totalHeight / 2;
+
+  nodesInLayer.forEach((node, index) => {
+    const isRoot = node.id === rootId;
+    const estimatedHeight = nodeHeights[index];
+
+    flowNodes.push({
+      id: node.id,
+      position: {
+        x: (layer - sortedLayers[0]) * xSpacing,
+        y: currentY,
+      },
         data: {
   ticker: node.ticker,
   label: (
@@ -168,11 +221,13 @@ function buildGraphFromNodesEdges(data, onTickerClick) {
   ),
 },
         style: isRoot ? rootNodeStyle : nodeBaseStyle,
-        sourcePosition: "right",
-        targetPosition: "left",
-      });
+      sourcePosition: "right",
+      targetPosition: "left",
     });
+
+    currentY += estimatedHeight + NODE_GAP_Y;
   });
+});
 
   const flowEdges = rawEdges.map((edge, index) => ({
     id: edge.id || `${edge.source}-${edge.target}-${index}`,
@@ -512,7 +567,7 @@ export default function SupplyChain({ onBuildStrategy }) {
   nodes={graphData.nodes}
   edges={graphData.edges}
   fitView
-  fitViewOptions={{ padding: 0.05 }}
+  fitViewOptions={{ padding: 0.02 }}
   proOptions={{ hideAttribution: true }}
 
   nodesDraggable={false}

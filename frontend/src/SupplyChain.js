@@ -4,6 +4,7 @@ import ReactFlow, {
   Background,
   Controls,
   MarkerType,
+  Panel,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import "./SupplyChain.css";
@@ -13,6 +14,125 @@ const companies = Object.keys(supplyChainTree);
 const NODE_WIDTH = 220;
 const NODE_GAP_X = 140;
 const NODE_GAP_Y = 14;
+
+const SECURITY_TYPES = {
+  US_PUBLIC: "us-public",
+  ADR: "adr",
+  INTERNATIONAL_US_LISTED: "international-us-listed",
+  OTC_FOREIGN: "otc-foreign",
+  NON_PUBLIC: "non-public",
+};
+
+const SECURITY_META = {
+  [SECURITY_TYPES.US_PUBLIC]: {
+    label: "U.S. public company",
+    color: "#4ADE80",
+    clickable: true,
+  },
+  [SECURITY_TYPES.ADR]: {
+    label: "ADR / ADS",
+    color: "#60A5FA",
+    clickable: true,
+  },
+  [SECURITY_TYPES.INTERNATIONAL_US_LISTED]: {
+    label: "International public — U.S.-listed ordinary shares",
+    color: "#C084FC",
+    clickable: true,
+  },
+  [SECURITY_TYPES.OTC_FOREIGN]: {
+    label: "Foreign OTC public security",
+    color: "#F59E0B",
+    clickable: true,
+  },
+  [SECURITY_TYPES.NON_PUBLIC]: {
+    label: "Private / subsidiary / product / process",
+    color: "#94A3B8",
+    clickable: false,
+  },
+};
+
+// ADR / ADS securities currently used anywhere in supplyChainTree.
+const ADR_TICKERS = new Set([
+  "ADDYY", "ADYEY", "ARM", "ASX", "AZN", "BHP", "BMWYY", "BP",
+  "EADSY", "ERIC", "ERJ", "FUJHY", "FUJIY", "IFNNY", "KOF",
+  "MRAAY", "NOK", "PCRFY", "RIO", "SAP", "SBGSY", "SNY", "SONY",
+  "TSM", "UMC", "VALE",
+]);
+
+// Foreign-incorporated companies whose ordinary shares trade directly in the U.S.
+const INTERNATIONAL_US_LISTED_TICKERS = new Set([
+  "ACN", "ASML", "CB", "CCEP", "ETN", "FLEX", "FN", "GFS", "ICHR",
+  "LIN", "RNW", "SLB", "SPOT", "STX", "TT",
+]);
+
+// Foreign ordinary shares that are OTC-traded rather than ADRs.
+const OTC_FOREIGN_TICKERS = new Set(["FXCOF"]);
+
+// These names use a parent-company ticker in the data, but the node itself is
+// a division, subsidiary, brand, product, or operating unit rather than the
+// separately listed company. They stay visible but are intentionally not clickable.
+const NON_PUBLIC_TICKER_NODE_NAMES = new Set([
+  "Amazon Web Services",
+  "Microsoft Azure",
+  "Google Cloud",
+  "Oracle Cloud Infrastructure",
+  "Comcast Xfinity",
+  "Walmart Pharmacy",
+  "Kroger Pharmacy",
+  "Panasonic Energy",
+]);
+
+// Known ticker/entity mismatches in the current tree. Blocking them here prevents
+// a click from routing to the wrong security until the underlying data is corrected.
+const BLOCKED_TICKER_ENTITY_PAIRS = new Set([
+  "FUJHY|Fujitsu",
+  "FXCOF|Foxconn Technology Group",
+]);
+
+function getSecurityType(node) {
+  if (!node?.ticker) return SECURITY_TYPES.NON_PUBLIC;
+
+  // Optional explicit metadata in supplyChainTree always wins.
+  if (node.securityType && SECURITY_META[node.securityType]) {
+    return node.securityType;
+  }
+  if (node.isPublicCompany === false) {
+    return SECURITY_TYPES.NON_PUBLIC;
+  }
+
+  const ticker = String(node.ticker).trim().toUpperCase();
+  const name = String(node.name || "").trim();
+  const pairKey = `${ticker}|${name}`;
+
+  if (
+    NON_PUBLIC_TICKER_NODE_NAMES.has(name) ||
+    BLOCKED_TICKER_ENTITY_PAIRS.has(pairKey)
+  ) {
+    return SECURITY_TYPES.NON_PUBLIC;
+  }
+
+  if (ADR_TICKERS.has(ticker)) return SECURITY_TYPES.ADR;
+  if (INTERNATIONAL_US_LISTED_TICKERS.has(ticker)) {
+    return SECURITY_TYPES.INTERNATIONAL_US_LISTED;
+  }
+  if (OTC_FOREIGN_TICKERS.has(ticker)) return SECURITY_TYPES.OTC_FOREIGN;
+
+  // Every other ticker-bearing company node in the current 100-company tree
+  // is treated as a U.S. public company.
+  return SECURITY_TYPES.US_PUBLIC;
+}
+
+function getSecurityMeta(node) {
+  return SECURITY_META[getSecurityType(node)] || SECURITY_META[SECURITY_TYPES.NON_PUBLIC];
+}
+
+const LEGEND_ITEMS = [
+  SECURITY_META[SECURITY_TYPES.US_PUBLIC],
+  SECURITY_META[SECURITY_TYPES.ADR],
+  SECURITY_META[SECURITY_TYPES.INTERNATIONAL_US_LISTED],
+  SECURITY_META[SECURITY_TYPES.OTC_FOREIGN],
+  SECURITY_META[SECURITY_TYPES.NON_PUBLIC],
+];
 
 const nodeBaseStyle = {
   background: "#1a2238",
@@ -24,7 +144,7 @@ const nodeBaseStyle = {
   boxSizing: "border-box",
   textAlign: "center",
   boxShadow: "0 4px 14px rgba(0,0,0,0.25)",
-  cursor: "pointer",
+  cursor: "default",
   transition: "all 0.2s ease",
 };
 
@@ -37,7 +157,7 @@ const rootNodeStyle = {
   boxShadow: "0 0 20px rgba(25,195,125,0.25)",
 };
 
-function buildGraphFromNodesEdges(data, onTickerClick) {
+function buildGraphFromNodesEdges(data) {
   const rawNodes = Array.isArray(data?.nodes) ? data.nodes : [];
   const rawEdges = Array.isArray(data?.edges) ? data.edges : [];
   const rootId = data?.root || null;
@@ -195,6 +315,8 @@ sortedLayers.forEach((layer) => {
   nodesInLayer.forEach((node, index) => {
     const isRoot = node.id === rootId;
     const estimatedHeight = nodeHeights[index];
+    const security = getSecurityMeta(node);
+    const isClickable = Boolean(node.ticker && security.clickable);
 
     flowNodes.push({
       id: node.id,
@@ -202,25 +324,43 @@ sortedLayers.forEach((layer) => {
         x: (layer - sortedLayers[0]) * xSpacing,
         y: currentY,
       },
-        data: {
-  ticker: node.ticker,
-  label: (
-    <div>
-      <div style={{ fontWeight: "bold", fontSize: "15px" }}>
-        {node.name || node.ticker || node.id}
-      </div>
-      <div style={{ fontSize: "12px", opacity: 0.8, marginTop: 4 }}>
-        {node.role || ""}
-      </div>
-      {node.ticker && (
-        <div style={{ fontSize: "11px", opacity: 0.6, marginTop: 4 }}>
-          {node.ticker}
-        </div>
-      )}
-    </div>
-  ),
-},
-        style: isRoot ? rootNodeStyle : nodeBaseStyle,
+      data: {
+        ticker: node.ticker,
+        securityType: getSecurityType(node),
+        isClickable,
+        label: (
+          <div>
+            <div style={{ fontWeight: "bold", fontSize: "15px" }}>
+              {node.name || node.ticker || node.id}
+            </div>
+            <div style={{ fontSize: "12px", opacity: 0.8, marginTop: 4 }}>
+              {node.role || ""}
+            </div>
+            {node.ticker && (
+              <div
+                style={{
+                  display: "inline-block",
+                  fontSize: "11px",
+                  fontWeight: "800",
+                  color: security.color,
+                  background: "rgba(2, 6, 23, 0.72)",
+                  border: `1px solid ${security.color}55`,
+                  borderRadius: "999px",
+                  padding: "2px 7px",
+                  marginTop: 6,
+                  opacity: 1,
+                }}
+              >
+                {node.ticker}
+              </div>
+            )}
+          </div>
+        ),
+      },
+      style: {
+        ...(isRoot ? rootNodeStyle : nodeBaseStyle),
+        cursor: isClickable ? "pointer" : "default",
+      },
       sourcePosition: "right",
       targetPosition: "left",
     });
@@ -248,6 +388,8 @@ function convertChainToGraph(data) {
     ticker: node.ticker,
     name: node.name || node.ticker,
     role: node.role,
+    securityType: node.securityType,
+    isPublicCompany: node.isPublicCompany,
   }));
 
   const edges = [];
@@ -281,6 +423,8 @@ function convertUpstreamCenterDownstreamToGraph(data) {
       ticker: node.ticker,
       name: node.name || node.ticker,
       role: node.role,
+      securityType: node.securityType,
+      isPublicCompany: node.isPublicCompany,
     })),
     ...(center
       ? [
@@ -289,6 +433,8 @@ function convertUpstreamCenterDownstreamToGraph(data) {
             ticker: center.ticker,
             name: center.name || center.ticker,
             role: center.role,
+            securityType: center.securityType,
+            isPublicCompany: center.isPublicCompany,
           },
         ]
       : []),
@@ -297,6 +443,8 @@ function convertUpstreamCenterDownstreamToGraph(data) {
       ticker: node.ticker,
       name: node.name || node.ticker,
       role: node.role,
+      securityType: node.securityType,
+      isPublicCompany: node.isPublicCompany,
     })),
   ];
 
@@ -340,6 +488,7 @@ function normalizeToGraph(data) {
 export default function SupplyChain({ onBuildStrategy }) {
   const [selectedCompany, setSelectedCompany] = useState(null);
   const [searchTerm, setSearchTerm] = useState("");
+  const [legendOpen, setLegendOpen] = useState(true);
 
   const handleTickerClick = (ticker) => {
     if (!ticker) return;
@@ -351,6 +500,7 @@ export default function SupplyChain({ onBuildStrategy }) {
 
     const normalized = normalizeToGraph(selectedData);
     const allTickers = (normalized.nodes || [])
+      .filter((node) => getSecurityMeta(node).clickable)
       .map((node) => node.ticker)
       .filter(Boolean)
       .map((ticker) => String(ticker).trim().toUpperCase());
@@ -421,8 +571,18 @@ export default function SupplyChain({ onBuildStrategy }) {
   const graphData = useMemo(() => {
     if (!selectedData) return { nodes: [], edges: [] };
     const normalized = normalizeToGraph(selectedData);
-    return buildGraphFromNodesEdges(normalized, handleTickerClick);
+    return buildGraphFromNodesEdges(normalized);
   }, [selectedData]);
+
+  const selectedRootSecurity = useMemo(() => {
+    if (!selectedData) return SECURITY_META[SECURITY_TYPES.NON_PUBLIC];
+    const normalized = normalizeToGraph(selectedData);
+    const rootNode = (normalized.nodes || []).find(
+      (node) => node.id === normalized.root
+    );
+    return getSecurityMeta(rootNode);
+  }, [selectedData]);
+
 
   return (
     <div className="supply-chain-page" style={{ color: "white", padding: "20px" }}>
@@ -527,7 +687,8 @@ export default function SupplyChain({ onBuildStrategy }) {
             className="supply-chain-selected-ticker"
             style={{
               textAlign: "center",
-              opacity: 0.7,
+              color: selectedRootSecurity.color,
+              fontWeight: "800",
               marginBottom: "20px",
             }}
           >
@@ -584,13 +745,110 @@ export default function SupplyChain({ onBuildStrategy }) {
   maxZoom={1.0}
   preventScrolling={false}
   onNodeClick={(_, node) => {
-    if (node?.data?.ticker) {
+    if (node?.data?.isClickable && node?.data?.ticker) {
       handleTickerClick(node.data.ticker);
     }
   }}
 >
   <Background />
   <Controls showInteractive={false} />
+
+  <Panel position="bottom-right" style={{ margin: 14 }}>
+    <div
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      style={{
+        width: legendOpen ? "310px" : "150px",
+        background: "rgba(10, 15, 30, 0.96)",
+        border: "1px solid #334155",
+        borderRadius: "10px",
+        boxShadow: "0 8px 24px rgba(0,0,0,0.35)",
+        overflow: "hidden",
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setLegendOpen((open) => !open)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          padding: "9px 11px",
+          border: "none",
+          background: "transparent",
+          color: "white",
+          cursor: "pointer",
+          fontWeight: "800",
+          fontSize: "12px",
+          textAlign: "left",
+        }}
+        aria-expanded={legendOpen}
+      >
+        <span>Node Legend</span>
+        <span style={{ opacity: 0.75 }}>{legendOpen ? "−" : "+"}</span>
+      </button>
+
+      {legendOpen && (
+        <div
+          style={{
+            borderTop: "1px solid #263244",
+            padding: "8px 11px 10px",
+          }}
+        >
+          {LEGEND_ITEMS.map((item) => (
+            <div
+              key={item.label}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "9px",
+                margin: "7px 0",
+              }}
+            >
+              <span
+                style={{
+                  width: "12px",
+                  height: "12px",
+                  borderRadius: "3px",
+                  background: item.color,
+                  flex: "0 0 12px",
+                  boxShadow: `0 0 8px ${item.color}55`,
+                }}
+              />
+              <span
+                style={{
+                  color: "#E5E7EB",
+                  fontSize: "11px",
+                  lineHeight: 1.25,
+                }}
+              >
+                {item.label}
+                {!item.clickable && (
+                  <span style={{ color: "#94A3B8" }}> — not clickable</span>
+                )}
+              </span>
+            </div>
+          ))}
+
+          <div
+            style={{
+              marginTop: "8px",
+              paddingTop: "8px",
+              borderTop: "1px solid #263244",
+              color: "#94A3B8",
+              fontSize: "10px",
+              lineHeight: 1.35,
+            }}
+          >
+            Colored ticker pills identify security type. Only publicly traded
+            company nodes can open the stock dashboard.
+          </div>
+        </div>
+      )}
+    </div>
+  </Panel>
 </ReactFlow>
           </div>
         </div>

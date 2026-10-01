@@ -331,6 +331,17 @@ const openStrategyFromIdea = (strategyIdea) => {
               </div>
             )}
 
+<div
+  className={`sidebar-item ${activeMenu === "PredictionMarkets" ? "active" : ""}`}
+  onClick={() => {
+    navigate("/prediction-markets");
+    setActiveMenu("PredictionMarkets");
+    setSectorOpen(false);
+  }}
+>
+  Prediction Markets
+</div>
+
             <div
               className={`sidebar-item ${activeMenu === "MarketOutlook" ? "active" : ""}`}
               onClick={() => {
@@ -406,17 +417,6 @@ const openStrategyFromIdea = (strategyIdea) => {
 }}
 >
   Smart Money
-</div>
-
-<div
-  className={`sidebar-item ${activeMenu === "PredictionMarkets" ? "active" : ""}`}
-  onClick={() => {
-    navigate("/prediction-markets");
-    setActiveMenu("PredictionMarkets");
-    setSectorOpen(false);
-  }}
->
-  Prediction Markets
 </div>
 
 <div

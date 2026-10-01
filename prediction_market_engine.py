@@ -37,12 +37,32 @@ from prediction_market_settlement import (
 )
 
 
-ENGINE_VERSION = "native-exact-v20.19.1-bootstrap-timeout-safe"
+ENGINE_VERSION = "native-exact-v20.27-us-link-resolver"
 
 
-MATCH_CACHE_VERSION = "exact-pair-cache-v1"
+MATCH_CACHE_VERSION = "exact-pair-cache-v3-cfb-contract-bridge"
 
 POLYMARKET_CLOB_URL = "https://clob.polymarket.com"
+POLYMARKET_US_GATEWAY_URL = os.getenv(
+    "POLYMARKET_US_GATEWAY_URL",
+    "https://gateway.polymarket.us",
+).rstrip("/")
+POLYMARKET_US_LINK_CACHE_SECONDS = max(
+    60,
+    int(os.getenv("POLYMARKET_US_LINK_CACHE_SECONDS", "1800")),
+)
+POLYMARKET_US_LINK_FAILURE_RETRY_SECONDS = max(
+    30,
+    int(os.getenv("POLYMARKET_US_LINK_FAILURE_RETRY_SECONDS", "120")),
+)
+POLYMARKET_US_PAGE_SIZE = max(
+    10,
+    min(250, int(os.getenv("POLYMARKET_US_PAGE_SIZE", "100"))),
+)
+POLYMARKET_US_MAX_EVENTS = max(
+    POLYMARKET_US_PAGE_SIZE,
+    int(os.getenv("POLYMARKET_US_MAX_EVENTS", "20000")),
+)
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
 REQUEST_TIMEOUT_SECONDS = 20
 BOOK_BATCH_SIZE = 100
@@ -410,6 +430,9 @@ SPORTS_EVENT_TERMS = (
     "baseball",
     "basketball",
     "football",
+    "ncaaf",
+    "cfb",
+    "fbs",
     "hockey",
     "soccer",
     "cricket",
@@ -455,6 +478,7 @@ SOCCER_ALWAYS_KEEP_PATTERN = re.compile(
 NON_SOCCER_SPORT_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("american-football", re.compile(
         r"(?:\bnfl\b|nflgame|\bncaaf\b|\bcfb\b|college[_ ]?football|"
+        r"ncaa[_ ]?football|division[_ ]?i[_ ]?fbs|\bfbs\b|"
         r"american[_ ]?football|national[_ ]?football[_ ]?league|"
         r"professional[_ ]?football|pro[_ ]?football|\bcfl\b|canadian[_ ]?football|"
         r"\bxfl\b|\busfl\b|arena[_ ]?football)", re.I)),
@@ -1203,6 +1227,15 @@ def canonical_league(value: Any) -> Optional[str]:
         "pro_hockey": "nhl",
         "professional_hockey": "nhl",
         "college_football": "ncaaf",
+        "ncaa_football": "ncaaf",
+        "ncaaf": "ncaaf",
+        "cfb": "ncaaf",
+        "fbs": "ncaaf",
+        "division_i_fbs": "ncaaf",
+        "ncaa_division_i_fbs": "ncaaf",
+        "division_1_fbs": "ncaaf",
+        "football_bowl_subdivision": "ncaaf",
+        "college_football_fbs": "ncaaf",
         "college_basketball_m": "ncaab",
         "college_basketball_w": "ncaawb",
     }
@@ -1264,6 +1297,173 @@ def distinct_event_entities(event: Event) -> List[Entity]:
         if role in {"home", "away", "participant", "subject", "unknown"}:
             entities[entity.id] = entity
     return list(entities.values())
+
+
+COLLEGE_FOOTBALL_EVENT_PATTERN = re.compile(
+    r"(?:\bncaaf\b|\bcfb\b|college[_ ]?football|ncaa[_ ]?football|"
+    r"division[_ ]?i[_ ]?fbs|\bfbs\b|kxncaafgame)",
+    re.I,
+)
+
+# Conservative school-name aliases used ONLY after both events have already
+# been identified as college football. These are canonical school identities,
+# not mascot/nickname fuzzy matches.
+COLLEGE_FOOTBALL_SCHOOL_ALIASES: Dict[str, str] = {
+    "app_state": "appalachian_state",
+    "byu": "brigham_young",
+    "cal": "california",
+    "fau": "florida_atlantic",
+    "fiu": "florida_international",
+    "lsu": "louisiana_state",
+    "miami_fl": "miami_florida",
+    "miami_oh": "miami_ohio",
+    "nc_state": "north_carolina_state",
+    "pitt": "pittsburgh",
+    "smu": "southern_methodist",
+    "tcu": "texas_christian",
+    "uab": "alabama_birmingham",
+    "ucf": "central_florida",
+    "uconn": "connecticut",
+    "umass": "massachusetts",
+    "unc": "north_carolina",
+    "usc": "southern_california",
+    "usf": "south_florida",
+    "utsa": "texas_san_antonio",
+    "utep": "texas_el_paso",
+    "hawai_i": "hawaii",
+}
+
+
+def is_college_football_event(event: Event) -> bool:
+    """Detect NCAA/college-football events without destroying token boundaries.
+
+    Important: exact_text() deliberately turns JSON punctuation into spaces.  Do
+    NOT replace those spaces with underscores before applying the CFB regex.
+    Doing so can turn a value such as ``event_slug: cfb-...`` into
+    ``event_slug_cfb-...``; underscore is a regex word character, so the
+    leading ``\b`` before ``cfb`` no longer matches.  This was the v20.22
+    Polymarket-only false-negative that produced zero CFB title groups.
+    """
+    values = [
+        event.category,
+        event.event_type,
+        event.external_event_id,
+        event.external_series_id,
+        event.native_game_id,
+        event.title,
+        json.dumps(event.details or {}, sort_keys=True, default=str),
+        json.dumps(event.source_ids or {}, sort_keys=True, default=str),
+    ]
+    text = exact_text(" ".join(str(value or "") for value in values))
+    if not text:
+        return False
+
+    # Search the token-preserving representation first.  The regex already
+    # accepts spaces/underscores for phrases such as college football / FBS.
+    if COLLEGE_FOOTBALL_EVENT_PATTERN.search(text):
+        return True
+
+    # Defensive compact-code check for provider-native identifiers whose
+    # punctuation/casing may vary.  These are exact CFB identifiers, not fuzzy
+    # sports-title inference.
+    compact = exact_code(text)
+    return any(
+        marker in compact
+        for marker in (
+            "kxncaafgame",
+            "college_football",
+            "ncaa_football",
+            "division_i_fbs",
+            "ncaa_division_i_fbs",
+        )
+    )
+
+
+def canonical_college_football_school(value: Any) -> Optional[str]:
+    """Canonicalize a school name without mascot-name fuzzy matching."""
+    text = exact_text(value)
+    if not text:
+        return None
+
+    # Strip ranking prefixes such as "#7" / "7" when present in titles.
+    text = re.sub(r"^#?\d+\s+", "", text).strip()
+    tokens = [token.rstrip(".") for token in text.split()]
+    if not tokens:
+        return None
+
+    # "St. Thomas" means Saint Thomas; "Michigan St." means Michigan State.
+    if tokens[0] == "st":
+        tokens[0] = "saint"
+    if len(tokens) > 1 and tokens[-1] == "st":
+        tokens[-1] = "state"
+
+    code = "_".join(tokens)
+    return COLLEGE_FOOTBALL_SCHOOL_ALIASES.get(code, code)
+
+
+def college_football_matchup_key(title: Any) -> Optional[Tuple[str, str]]:
+    """Return an unordered exact school-pair key from a CFB event title."""
+    text = exact_text(title)
+    if not text:
+        return None
+    parts = re.split(r"\s+(?:vs\.?|versus|v\.?|at)\s+", text, maxsplit=1)
+    if len(parts) != 2:
+        return None
+    left = canonical_college_football_school(parts[0])
+    right = canonical_college_football_school(parts[1])
+    if not left or not right or left == right:
+        return None
+    return tuple(sorted((left, right)))
+
+
+def event_group_is_college_football(
+    group: EventGroup,
+    events: Mapping[int, Event],
+) -> bool:
+    return any(
+        event_id in events and is_college_football_event(events[event_id])
+        for event_id in group.event_ids
+    )
+
+
+def event_group_role_entities(
+    group: EventGroup,
+    events: Mapping[int, Event],
+) -> Optional[Dict[str, Entity]]:
+    """Return unambiguous home/away entities for an event group."""
+    by_role: Dict[str, Dict[int, Entity]] = {"home": {}, "away": {}}
+    for event_id in group.event_ids:
+        event = events.get(event_id)
+        if event is None:
+            continue
+        for entity, role in event.entities:
+            if role in by_role:
+                by_role[role][entity.id] = entity
+
+    if len(by_role["home"]) != 1 or len(by_role["away"]) != 1:
+        return None
+    home = next(iter(by_role["home"].values()))
+    away = next(iter(by_role["away"].values()))
+    if home.id == away.id:
+        return None
+    return {"home": home, "away": away}
+
+
+def college_football_role_mapping(
+    poly_group: EventGroup,
+    kalshi_group: EventGroup,
+    events: Mapping[int, Event],
+) -> Optional[Tuple[Tuple[Tuple[int, int], ...], str]]:
+    """Map a title-verified CFB game by exact home/away roles."""
+    poly_roles = event_group_role_entities(poly_group, events)
+    kalshi_roles = event_group_role_entities(kalshi_group, events)
+    if not poly_roles or not kalshi_roles:
+        return None
+    pairs = tuple(sorted((
+        (poly_roles["home"].id, kalshi_roles["home"].id),
+        (poly_roles["away"].id, kalshi_roles["away"].id),
+    )))
+    return pairs, "college_football_title+home_away"
 
 
 def participant_mapping(
@@ -1427,15 +1627,30 @@ def build_sports_event_matches(
 
     kalshi_by_key_and_day: Dict[
         Tuple[Tuple[str, str], int], List[EventGroup]
-    ] = (
-        defaultdict(list)
-    )
+    ] = defaultdict(list)
+    kalshi_cfb_by_title_and_day: Dict[
+        Tuple[Tuple[str, str], int], List[EventGroup]
+    ] = defaultdict(list)
+
+    cfb_kalshi_title_groups = 0
+    cfb_poly_title_groups = 0
+    cfb_title_candidates = 0
+    cfb_role_matches = 0
+    cfb_title_candidates_missing_roles = 0
+
     for kalshi_group in kalshi_groups:
         scheduled = kalshi_group.start_time
-        if scheduled:
-            day = int(scheduled.timestamp() // 86400)
-            for key in participant_index_keys(kalshi_group.entities):
-                kalshi_by_key_and_day[(key, day)].append(kalshi_group)
+        if not scheduled:
+            continue
+        day = int(scheduled.timestamp() // 86400)
+        for key in participant_index_keys(kalshi_group.entities):
+            kalshi_by_key_and_day[(key, day)].append(kalshi_group)
+
+        if event_group_is_college_football(kalshi_group, events):
+            matchup_key = college_football_matchup_key(kalshi_group.title)
+            if matchup_key is not None:
+                kalshi_cfb_by_title_and_day[(matchup_key, day)].append(kalshi_group)
+                cfb_kalshi_title_groups += 1
 
     candidates_by_key: Dict[Tuple[str, str], EventMatch] = {}
     for poly_group in poly_groups:
@@ -1444,10 +1659,27 @@ def build_sports_event_matches(
             continue
         day = int(scheduled.timestamp() // 86400)
         possible_kalshi: Dict[str, EventGroup] = {}
+
+        # Existing exact participant/provider/canonical identity path.
         for key in participant_index_keys(poly_group.entities):
             for nearby_day in (day - 1, day, day + 1):
                 for group in kalshi_by_key_and_day.get((key, nearby_day), []):
                     possible_kalshi[group.key] = group
+
+        # CFB-only fallback: school names live in event titles on both venues,
+        # while Polymarket team-directory entities can be mascot names. Index by
+        # the exact normalized school matchup, never by fuzzy mascot similarity.
+        poly_is_cfb = event_group_is_college_football(poly_group, events)
+        poly_cfb_matchup = None
+        if poly_is_cfb:
+            poly_cfb_matchup = college_football_matchup_key(poly_group.title)
+            if poly_cfb_matchup is not None:
+                cfb_poly_title_groups += 1
+                for nearby_day in (day - 1, day, day + 1):
+                    for group in kalshi_cfb_by_title_and_day.get(
+                        (poly_cfb_matchup, nearby_day), []
+                    ):
+                        possible_kalshi[group.key] = group
 
         for kalshi_group in possible_kalshi.values():
             if not kalshi_group.start_time:
@@ -1457,10 +1689,31 @@ def build_sports_event_matches(
             )
             if difference > MAX_SPORTS_START_DIFFERENCE_SECONDS:
                 continue
+
             mapping = participant_mapping(
                 poly_group.entities,
                 kalshi_group.entities,
             )
+
+            # Exact CFB title + exact home/away roles is a deterministic identity
+            # fallback when entity names differ (e.g. Illinois vs Fighting Illini).
+            if not mapping and poly_cfb_matchup is not None:
+                kalshi_cfb_matchup = college_football_matchup_key(kalshi_group.title)
+                if (
+                    event_group_is_college_football(kalshi_group, events)
+                    and kalshi_cfb_matchup == poly_cfb_matchup
+                ):
+                    cfb_title_candidates += 1
+                    mapping = college_football_role_mapping(
+                        poly_group,
+                        kalshi_group,
+                        events,
+                    )
+                    if mapping:
+                        cfb_role_matches += 1
+                    else:
+                        cfb_title_candidates_missing_roles += 1
+
             if not mapping:
                 continue
             participant_map, method = mapping
@@ -1508,6 +1761,11 @@ def build_sports_event_matches(
         "sportsEventCandidates": len(candidates),
         "sportsEventMatches": len(unique_matches),
         "ambiguousSportsEventCandidates": len(candidates) - len(unique_matches),
+        "collegeFootballKalshiTitleGroups": cfb_kalshi_title_groups,
+        "collegeFootballPolymarketTitleGroups": cfb_poly_title_groups,
+        "collegeFootballTitleCandidates": cfb_title_candidates,
+        "collegeFootballHomeAwayRoleMatches": cfb_role_matches,
+        "collegeFootballTitleCandidatesMissingRoles": cfb_title_candidates_missing_roles,
     }, groups
 
 
@@ -1718,6 +1976,39 @@ def sports_contracts_for_market(market: Market) -> List[Tuple[int, ExactContract
             )
             for outcome in outcomes
         ]
+
+        # Polymarket's college-football team directory often names entities by
+        # mascot ("Fighting Illini", "Spartans") while the two outcome labels
+        # are school names ("Illinois", "Michigan State"). The native
+        # teamAID/teamBID values are stable team identifiers and correspond to
+        # the two native outcome slots, so use them only for this CFB-specific
+        # exact-ID fallback when label resolution failed.
+        if (
+            (not all(resolved) or resolved[0].id == resolved[1].id)
+            and is_college_football_event(market.event)
+            and market.venue == "polymarket"
+        ):
+            team_ids = [
+                market.contract_semantics.get("teamAID"),
+                market.contract_semantics.get("teamBID"),
+            ]
+            native_resolved = [
+                resolve_entity_reference(
+                    market,
+                    entities,
+                    [team_id],
+                    allow_mentions=False,
+                )
+                if team_id not in (None, "")
+                else None
+                for team_id in team_ids
+            ]
+            if (
+                all(native_resolved)
+                and native_resolved[0].id != native_resolved[1].id
+            ):
+                resolved = native_resolved
+
         if not all(resolved) or resolved[0].id == resolved[1].id:
             return []
 
@@ -1850,6 +2141,228 @@ def count_separated_draw_contracts(
     )
 
 
+def college_football_polymarket_contract_bridge(
+    event_match: EventMatch,
+    poly_group: EventGroup,
+    kalshi_group: EventGroup,
+    markets_by_event: Dict[int, List[Market]],
+    existing_rows: Dict[int, List[ExactContract]],
+) -> Tuple[Dict[int, List[ExactContract]], Dict[str, int]]:
+    """
+    Bridge Polymarket CFB school-name outcomes to mascot entities through the
+    already-verified cross-venue participant map.
+
+    Polymarket's CFB moneyline outcome labels are school names (for example
+    "Illinois" / "Michigan State"), while its linked team-directory
+    entities can be mascot names ("Fighting Illini" / "Spartans").
+    Kalshi's matched event entities use the school identities. For an event
+    already matched by exact normalized title + exact home/away roles, resolve
+    each Polymarket outcome against the Kalshi entities and then translate the
+    resolved Kalshi entity ID back to the corresponding Polymarket entity ID.
+
+    This is deliberately CFB-only and exact. It does not use fuzzy text
+    matching and it does not change eligibility for spreads, totals, props,
+    quarters, halves, or any other sports market.
+    """
+    rows: Dict[int, List[ExactContract]] = defaultdict(list)
+    diagnostics = {
+        "marketsConsidered": 0,
+        "marketsBridged": 0,
+        "contractsBridged": 0,
+        "resolutionFailures": 0,
+    }
+
+    if event_match.match_method != "college_football_title+home_away":
+        return rows, diagnostics
+
+    kalshi_to_poly = {
+        kalshi_entity_id: poly_entity_id
+        for poly_entity_id, kalshi_entity_id in event_match.participant_map
+    }
+    poly_entities_by_id = {entity.id: entity for entity in poly_group.entities}
+    # The normal extractor may already have emitted contracts for this market,
+    # but on CFB those rows can be keyed to the wrong Polymarket mascot entity.
+    # Rebuild the native full-game moneyline deterministically through the
+    # already-verified Kalshi-school -> Polymarket-mascot participant map.
+    if len(kalshi_to_poly) != 2 or len(poly_entities_by_id) != 2:
+        return rows, diagnostics
+
+    for event_id in poly_group.event_ids:
+        for market in markets_by_event.get(event_id, []):
+            if market.venue != "polymarket":
+                continue
+            if not is_full_game_winner_market(market):
+                continue
+            # Only bridge a native full-game winner family. Period/quarter/half
+            # moneylines can contain the word "moneyline" in their title but
+            # have types such as first_half_moneyline or q1_moneyline; those are
+            # intentionally excluded here.
+            if not (sports_type_values(market) & SPORTS_WINNER_TYPES):
+                continue
+
+            outcomes = outcome_rows(market)
+            # The CFB Polymarket moneyline is a two-outcome categorical market,
+            # not a Yes/No proposition. Yes/No contracts stay on the existing
+            # subject-resolution path.
+            if yes_no_outcomes(market) is not None or len(outcomes) != 2:
+                continue
+
+            diagnostics["marketsConsidered"] += 1
+            resolved_kalshi = []
+            for outcome in outcomes:
+                resolved = resolve_entity_reference(
+                    market,
+                    kalshi_group.entities,
+                    [outcome["label"]],
+                    allow_mentions=False,
+                )
+                if resolved is None:
+                    target_school = canonical_college_football_school(
+                        outcome["label"]
+                    )
+                    canonical_matches = []
+                    if target_school:
+                        for entity in kalshi_group.entities:
+                            entity_school_keys = {
+                                canonical_college_football_school(name)
+                                for name in entity_names(entity)
+                            }
+                            entity_school_keys.discard(None)
+                            if target_school in entity_school_keys:
+                                canonical_matches.append(entity)
+                    if len(canonical_matches) == 1:
+                        resolved = canonical_matches[0]
+                resolved_kalshi.append(resolved)
+
+            if (
+                not all(resolved_kalshi)
+                or resolved_kalshi[0].id == resolved_kalshi[1].id
+            ):
+                diagnostics["resolutionFailures"] += 1
+                continue
+
+            poly_entity_ids = [
+                kalshi_to_poly.get(entity.id) for entity in resolved_kalshi
+            ]
+            if (
+                not all(poly_entity_ids)
+                or poly_entity_ids[0] == poly_entity_ids[1]
+                or any(entity_id not in poly_entities_by_id for entity_id in poly_entity_ids)
+            ):
+                diagnostics["resolutionFailures"] += 1
+                continue
+
+            scheduled = iso_value(market_time(market))
+            event_identity = f"native-sports-event:{market.event.id}"
+            for index, poly_entity_id in enumerate(poly_entity_ids):
+                entity = poly_entities_by_id[poly_entity_id]
+                yes = outcomes[index]
+                no = outcomes[1 - index]
+                rows[poly_entity_id].append(
+                    ExactContract(
+                        market.id,
+                        market.venue,
+                        event_identity,
+                        f"winner-entity:{poly_entity_id}",
+                        "sports",
+                        market.event.title,
+                        f"{entity.name} to win",
+                        scheduled,
+                        yes["key"],
+                        no["key"],
+                        yes["label"],
+                        no["label"],
+                        "pending_event_pair",
+                    )
+                )
+                diagnostics["contractsBridged"] += 1
+
+            diagnostics["marketsBridged"] += 1
+
+    return rows, diagnostics
+
+
+def college_football_rekey_kalshi_contract_rows(
+    kalshi_group: EventGroup,
+    rows: Dict[int, List[ExactContract]],
+    market_lookup: Mapping[int, Market],
+) -> Tuple[Dict[int, List[ExactContract]], bool]:
+    """
+    Re-key an already-extracted two-contract Kalshi CFB moneyline by exact
+    school identity. This is a defensive final-stage normalization only.
+
+    Kalshi's CFB winner family is represented as one binary Yes/No contract per
+    school. The event group already has exactly two verified school entities.
+    Resolve each contract from native participant metadata and the generated
+    contract title. If and only if the result is one unique contract for each
+    of the two group entities, use the re-keyed rows.
+    """
+    contracts = [
+        contract
+        for entity_contracts in rows.values()
+        for contract in entity_contracts
+    ]
+    if len(contracts) != 2 or len(kalshi_group.entities) != 2:
+        return rows, False
+
+    rekeyed: Dict[int, List[ExactContract]] = defaultdict(list)
+    entity_ids = {entity.id for entity in kalshi_group.entities}
+
+    for contract in contracts:
+        market = market_lookup.get(contract.market_id)
+        if market is None or market.venue != "kalshi":
+            return rows, False
+
+        values = [
+            market.primary_participant_key,
+            market.custom_strike,
+            market.contract_semantics.get("primary_participant_key"),
+            market.contract_semantics.get("custom_strike"),
+            market.contract_semantics.get("yes_sub_title"),
+            market.contract_semantics.get("subtitle"),
+            contract.contract_title,
+            market.market_title,
+        ]
+        subject = resolve_entity_reference(
+            market,
+            kalshi_group.entities,
+            values,
+            allow_mentions=True,
+        )
+
+        if subject is None:
+            # Exact CFB school canonicalization fallback. Do not fuzzy-match.
+            candidate_school_keys = {
+                canonical_college_football_school(text)
+                for value in values
+                for text in nested_strings(value)
+                if text
+            }
+            candidate_school_keys.discard(None)
+            matches = []
+            for entity in kalshi_group.entities:
+                entity_school_keys = {
+                    canonical_college_football_school(name)
+                    for name in entity_names(entity)
+                }
+                entity_school_keys.discard(None)
+                if candidate_school_keys & entity_school_keys:
+                    matches.append(entity)
+            unique = {entity.id: entity for entity in matches}
+            if len(unique) == 1:
+                subject = next(iter(unique.values()))
+
+        if subject is None or subject.id not in entity_ids:
+            return rows, False
+        rekeyed[subject.id].append(contract)
+
+    if set(rekeyed) != entity_ids:
+        return rows, False
+    if any(len(rekeyed[entity_id]) != 1 for entity_id in entity_ids):
+        return rows, False
+    return rekeyed, True
+
+
 def build_sports_contract_pairs(
     event_matches: Sequence[EventMatch],
     groups: Dict[str, EventGroup],
@@ -1870,6 +2383,16 @@ def build_sports_contract_pairs(
     kalshi_primary_fallback_groups = 0
     kalshi_groups_without_primary_metadata = 0
     kalshi_related_event_rows_excluded = 0
+    cfb_matched_events = 0
+    cfb_poly_contracts = 0
+    cfb_kalshi_contracts = 0
+    cfb_contract_pairs = 0
+    cfb_bridge_markets_considered = 0
+    cfb_bridge_markets = 0
+    cfb_bridge_contracts = 0
+    cfb_bridge_resolution_failures = 0
+    cfb_bridge_rows_preferred = 0
+    cfb_kalshi_rows_rekeyed = 0
     ambiguous_samples: List[Dict[str, Any]] = []
 
     for event_match in event_matches:
@@ -1879,7 +2402,64 @@ def build_sports_contract_pairs(
             poly_group.event_ids,
             markets_by_event,
         )
+
+        is_cfb_event_match = (
+            event_match.match_method == "college_football_title+home_away"
+        )
+        if is_cfb_event_match:
+            cfb_matched_events += 1
+            bridged_rows, bridge_diagnostics = (
+                college_football_polymarket_contract_bridge(
+                    event_match,
+                    poly_group,
+                    kalshi_group,
+                    markets_by_event,
+                    poly_rows,
+                )
+            )
+            bridged_total = sum(
+                len(contracts) for contracts in bridged_rows.values()
+            )
+            bridge_is_complete = (
+                bridged_total == 2
+                and len(bridged_rows) == 2
+                and all(len(contracts) == 1 for contracts in bridged_rows.values())
+                and set(bridged_rows) == {
+                    poly_entity_id
+                    for poly_entity_id, _ in event_match.participant_map
+                }
+            )
+            if bridge_is_complete:
+                # Prefer the deterministic title+home/away bridge over any
+                # normal-extractor rows whose entity keys may reflect mascot
+                # aliases rather than the verified participant map.
+                poly_rows = bridged_rows
+                cfb_bridge_rows_preferred += 1
+            else:
+                # Preserve the old conservative behavior if the bridge cannot
+                # prove a complete two-sided mapping.
+                for entity_id, contracts in bridged_rows.items():
+                    existing_market_ids = {
+                        contract.market_id
+                        for contract in poly_rows.get(entity_id, [])
+                    }
+                    poly_rows[entity_id].extend(
+                        contract
+                        for contract in contracts
+                        if contract.market_id not in existing_market_ids
+                    )
+            cfb_bridge_markets_considered += bridge_diagnostics[
+                "marketsConsidered"
+            ]
+            cfb_bridge_markets += bridge_diagnostics["marketsBridged"]
+            cfb_bridge_contracts += bridge_diagnostics["contractsBridged"]
+            cfb_bridge_resolution_failures += bridge_diagnostics[
+                "resolutionFailures"
+            ]
+
         poly_eligible += sum(len(rows) for rows in poly_rows.values())
+        if is_cfb_event_match:
+            cfb_poly_contracts += sum(len(rows) for rows in poly_rows.values())
         polymarket_draws_separated += count_separated_draw_contracts(
             poly_group.event_ids,
             markets_by_event,
@@ -1910,7 +2490,21 @@ def build_sports_contract_pairs(
                 kalshi_primary_fallback_groups += 1
             else:
                 kalshi_groups_without_primary_metadata += 1
+
+        if is_cfb_event_match:
+            kalshi_rows, did_rekey_kalshi = (
+                college_football_rekey_kalshi_contract_rows(
+                    kalshi_group,
+                    kalshi_rows,
+                    market_lookup,
+                )
+            )
+            if did_rekey_kalshi:
+                cfb_kalshi_rows_rekeyed += 1
+
         kalshi_eligible += sum(len(rows) for rows in kalshi_rows.values())
+        if is_cfb_event_match:
+            cfb_kalshi_contracts += sum(len(rows) for rows in kalshi_rows.values())
         kalshi_draws_separated += count_separated_draw_contracts(
             selected_kalshi_event_ids,
             markets_by_event,
@@ -1992,6 +2586,8 @@ def build_sports_contract_pairs(
                     ),
                 )
             )
+            if is_cfb_event_match:
+                cfb_contract_pairs += 1
 
     return pairs, {
         "polymarketSportsContracts": poly_eligible,
@@ -2002,6 +2598,22 @@ def build_sports_contract_pairs(
         "polymarketDrawContractsSeparated": polymarket_draws_separated,
         "kalshiDrawContractsSeparated": kalshi_draws_separated,
         "sportsContractMatches": len(pairs),
+        "collegeFootballMatchedEventsAtContractStage": cfb_matched_events,
+        "collegeFootballPolymarketContracts": cfb_poly_contracts,
+        "collegeFootballKalshiContracts": cfb_kalshi_contracts,
+        "collegeFootballContractPairs": cfb_contract_pairs,
+        "collegeFootballPolymarketBridgeMarketsConsidered": (
+            cfb_bridge_markets_considered
+        ),
+        "collegeFootballPolymarketBridgeMarkets": cfb_bridge_markets,
+        "collegeFootballPolymarketBridgeContracts": cfb_bridge_contracts,
+        "collegeFootballPolymarketBridgeResolutionFailures": (
+            cfb_bridge_resolution_failures
+        ),
+        "collegeFootballPolymarketBridgeRowsPreferred": (
+            cfb_bridge_rows_preferred
+        ),
+        "collegeFootballKalshiRowsRekeyed": cfb_kalshi_rows_rekeyed,
         "ambiguousSportsContractIdentities": ambiguous_contracts,
         "kalshiGroupsUsingPrimaryEvents": kalshi_primary_groups,
         "kalshiPrimaryGroupsFallingBackToRelatedEvents": (
@@ -7824,9 +8436,10 @@ def persist_runtime_context(
                 generation = cur.fetchone()
                 generation_id = int(generation["id"])
 
-                cur.execute(
-                    "UPDATE public.prediction_market_exact_pairs SET active = FALSE WHERE active IS TRUE"
-                )
+                # CURRENT-ONLY + IO-SAFE: do not rewrite every existing pair to
+                # active=FALSE. Current pairs are repointed to this generation by
+                # the upsert below; stale pairs remain on older generations and
+                # are cascade-deleted when those generations are removed.
 
                 pair_rows: List[Tuple[Any, ...]] = []
                 for poly_contract, kalshi_contract in context.exact_pairs:
@@ -7962,6 +8575,15 @@ def persist_runtime_context(
                         """,
                         (generation_id, int(catalog_ingest_run_id)),
                     )
+
+                # CURRENT-ONLY RUNTIME: all current exact pairs were repointed
+                # to generation_id above. Deleting older generations now cascades
+                # away every stale exact-pair row in one targeted operation, without
+                # first rewriting the entire pair table to active=FALSE.
+                cur.execute(
+                    "DELETE FROM public.prediction_market_runtime_generations WHERE id <> %s",
+                    (generation_id,),
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -8350,11 +8972,503 @@ def fetch_kalshi_books(tickers: Sequence[str]) -> Dict[str, Dict[str, Any]]:
     return books
 
 
+_POLYMARKET_US_LINK_CACHE_LOCK = threading.Lock()
+_POLYMARKET_US_LINK_CACHE: Dict[str, Any] = {
+    "loaded_at": 0.0,
+    "last_attempt_at": 0.0,
+    "events": [],
+    "event_slug_index": {},
+    "market_slug_index": {},
+    "title_index": {},
+    "cfb_matchup_index": {},
+    "load_error": None,
+    "pages_loaded": 0,
+}
+_POLYMARKET_US_MARKET_URL_CACHE: Dict[int, Tuple[float, Optional[str]]] = {}
+_POLYMARKET_US_SEARCH_CACHE: Dict[str, Tuple[float, List[Mapping[str, Any]]]] = {}
+
+
+def polymarket_international_url(market: Market) -> str:
+    event_slug = market.event.raw.get("slug")
+    slug = event_slug or market.market_slug
+    if slug:
+        return f"https://polymarket.com/event/{quote(str(slug), safe='-')}"
+    return "https://polymarket.com"
+
+
+def _polymarket_link_text(value: Any) -> str:
+    text = exact_text(value)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return " ".join(text.split())
+
+
+def _polymarket_us_event_start(event: Mapping[str, Any]) -> Optional[datetime]:
+    return parse_datetime(
+        event.get("startTime")
+        or event.get("start_time")
+        or event.get("eventStartTime")
+    )
+
+
+def _polymarket_us_active_markets(
+    event: Mapping[str, Any],
+) -> List[Mapping[str, Any]]:
+    rows = event.get("markets")
+    if not isinstance(rows, list):
+        return []
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("closed") is not True
+        and row.get("active") is not False
+    ]
+
+
+def _build_polymarket_us_indexes(
+    events: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    event_slug_index: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    market_slug_index: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    title_index: Dict[str, List[Mapping[str, Any]]] = defaultdict(list)
+    cfb_matchup_index: Dict[
+        Tuple[str, str], List[Mapping[str, Any]]
+    ] = defaultdict(list)
+
+    for event in events:
+        slug = str(event.get("slug") or "").strip()
+        if slug:
+            event_slug_index[slug].append(event)
+
+        title_key = _polymarket_link_text(event.get("title"))
+        if title_key:
+            title_index[title_key].append(event)
+
+        cfb_key = college_football_matchup_key(event.get("title"))
+        if cfb_key is not None:
+            cfb_matchup_index[cfb_key].append(event)
+
+        for us_market in _polymarket_us_active_markets(event):
+            market_slug = str(us_market.get("slug") or "").strip()
+            if market_slug:
+                market_slug_index[market_slug].append(event)
+
+    return {
+        "event_slug_index": dict(event_slug_index),
+        "market_slug_index": dict(market_slug_index),
+        "title_index": dict(title_index),
+        "cfb_matchup_index": dict(cfb_matchup_index),
+    }
+
+
+def _load_polymarket_us_events() -> List[Mapping[str, Any]]:
+    now = time.time()
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        loaded_at = float(_POLYMARKET_US_LINK_CACHE.get("loaded_at") or 0.0)
+        if (
+            _POLYMARKET_US_LINK_CACHE.get("events")
+            and now - loaded_at < POLYMARKET_US_LINK_CACHE_SECONDS
+        ):
+            return list(_POLYMARKET_US_LINK_CACHE["events"])
+
+        last_attempt_at = float(
+            _POLYMARKET_US_LINK_CACHE.get("last_attempt_at") or 0.0
+        )
+        if (
+            not _POLYMARKET_US_LINK_CACHE.get("events")
+            and now - last_attempt_at < POLYMARKET_US_LINK_FAILURE_RETRY_SECONDS
+        ):
+            return []
+
+        _POLYMARKET_US_LINK_CACHE["last_attempt_at"] = now
+
+    events: List[Mapping[str, Any]] = []
+    offset = 0
+    pages_loaded = 0
+    load_error: Optional[str] = None
+
+    while offset < POLYMARKET_US_MAX_EVENTS:
+        try:
+            response = requests.get(
+                f"{POLYMARKET_US_GATEWAY_URL}/v1/events",
+                params={
+                    "active": "true",
+                    "limit": POLYMARKET_US_PAGE_SIZE,
+                    "offset": offset,
+                },
+                headers={
+                    "Accept": "application/json",
+                    "User-Agent": "BullionaireIQ/PredictionMarkets",
+                },
+                timeout=min(REQUEST_TIMEOUT_SECONDS, 12),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            batch = payload.get("events") if isinstance(payload, dict) else None
+            if not isinstance(batch, list):
+                raise ValueError("Polymarket US /v1/events returned no events list")
+
+            clean_batch = [row for row in batch if isinstance(row, dict)]
+            events.extend(clean_batch)
+            pages_loaded += 1
+            if not batch:
+                break
+            offset += len(batch)
+        except Exception as exc:
+            # A later pagination failure must not erase pages already fetched.
+            # Partial US coverage is still useful because every unresolved row
+            # safely falls back to the International Polymarket URL.
+            load_error = f"{type(exc).__name__}: {exc}"
+            break
+
+    if not events:
+        with _POLYMARKET_US_LINK_CACHE_LOCK:
+            _POLYMARKET_US_LINK_CACHE.update(
+                {
+                    "load_error": load_error or "empty Polymarket US catalog",
+                    "pages_loaded": pages_loaded,
+                }
+            )
+        return []
+
+    indexes = _build_polymarket_us_indexes(events)
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        _POLYMARKET_US_LINK_CACHE.update(
+            {
+                "loaded_at": time.time(),
+                "events": events,
+                "load_error": load_error,
+                "pages_loaded": pages_loaded,
+                **indexes,
+            }
+        )
+    return list(events)
+
+
+def _search_polymarket_us_events(query: Any) -> List[Mapping[str, Any]]:
+    query_text = str(query or "").strip()
+    query_key = _polymarket_link_text(query_text)
+    if not query_key:
+        return []
+
+    now = time.time()
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        cached = _POLYMARKET_US_SEARCH_CACHE.get(query_key)
+        if cached and now - cached[0] < POLYMARKET_US_LINK_CACHE_SECONDS:
+            return list(cached[1])
+
+    rows: List[Mapping[str, Any]] = []
+    try:
+        response = requests.get(
+            f"{POLYMARKET_US_GATEWAY_URL}/v1/search",
+            params={
+                "query": query_text,
+                "limit": 50,
+                "page": 1,
+            },
+            headers={
+                "Accept": "application/json",
+                "User-Agent": "BullionaireIQ/PredictionMarkets",
+            },
+            timeout=min(REQUEST_TIMEOUT_SECONDS, 10),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        raw_rows = payload.get("events") if isinstance(payload, dict) else None
+        if isinstance(raw_rows, list):
+            rows = [
+                row
+                for row in raw_rows
+                if isinstance(row, dict)
+                and row.get("closed") is not True
+                and row.get("active") is not False
+            ]
+    except Exception:
+        rows = []
+
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        _POLYMARKET_US_SEARCH_CACHE[query_key] = (time.time(), rows)
+    return list(rows)
+
+
+def _polymarket_us_candidate_events(
+    market: Market,
+) -> List[Mapping[str, Any]]:
+    catalog_events = _load_polymarket_us_events()
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        market_slug_index = _POLYMARKET_US_LINK_CACHE.get(
+            "market_slug_index", {}
+        )
+        event_slug_index = _POLYMARKET_US_LINK_CACHE.get(
+            "event_slug_index", {}
+        )
+        title_index = _POLYMARKET_US_LINK_CACHE.get("title_index", {})
+        cfb_matchup_index = _POLYMARKET_US_LINK_CACHE.get(
+            "cfb_matchup_index", {}
+        )
+
+        candidates: Dict[str, Mapping[str, Any]] = {}
+
+        market_slug = str(market.market_slug or "").strip()
+        if market_slug:
+            for event in market_slug_index.get(market_slug, []):
+                candidates[str(event.get("id") or event.get("slug"))] = event
+
+        event_slug = str(market.event.raw.get("slug") or "").strip()
+        if event_slug:
+            for event in event_slug_index.get(event_slug, []):
+                candidates[str(event.get("id") or event.get("slug"))] = event
+
+        title_key = _polymarket_link_text(market.event.title)
+        if title_key:
+            for event in title_index.get(title_key, []):
+                candidates[str(event.get("id") or event.get("slug"))] = event
+
+        if is_college_football_event(market.event):
+            cfb_key = college_football_matchup_key(market.event.title)
+            if cfb_key is not None:
+                for event in cfb_matchup_index.get(cfb_key, []):
+                    candidates[str(event.get("id") or event.get("slug"))] = event
+
+    # International and US products intentionally use independent identifiers.
+    # Sports slugs commonly differ between products, so use Polymarket US's
+    # official public search endpoint when the catalog indexes cannot bridge a
+    # sports event. For non-sports, search is reserved for a failed/partial
+    # catalog load to avoid hundreds of unnecessary network calls on markets
+    # that Polymarket US simply does not list. Results are cached by title.
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        catalog_error = _POLYMARKET_US_LINK_CACHE.get("load_error")
+    if not candidates and (is_sports_event(market.event) or catalog_error):
+        for event in _search_polymarket_us_events(market.event.title):
+            candidates[str(event.get("id") or event.get("slug"))] = event
+
+    # If the catalog itself could not be loaded and event-title search did not
+    # find anything, try the specific market title before falling back to the
+    # International link.
+    if not catalog_events and not candidates:
+        for event in _search_polymarket_us_events(market.market_title):
+            candidates[str(event.get("id") or event.get("slug"))] = event
+
+    return list(candidates.values())
+
+
+def _polymarket_us_market_equivalent(
+    market: Market,
+    us_event: Mapping[str, Any],
+) -> bool:
+    us_markets = _polymarket_us_active_markets(us_event)
+    if not us_markets:
+        return False
+
+    international_market_slug = str(market.market_slug or "").strip()
+    if international_market_slug and any(
+        str(row.get("slug") or "").strip() == international_market_slug
+        for row in us_markets
+    ):
+        return True
+
+    international_market_title = _polymarket_link_text(market.market_title)
+    if international_market_title and any(
+        _polymarket_link_text(row.get("title")) == international_market_title
+        for row in us_markets
+    ):
+        return True
+
+    # Sports full-game winner markets can use one categorical two-team market
+    # Internationally while Polymarket US represents the same event as separate
+    # team-outcome markets. Verify both team outcomes before treating the US
+    # event as an equivalent destination.
+    if (
+        is_sports_event(market.event)
+        and is_full_game_winner_market(market)
+    ):
+        labels = [
+            str(row.get("label") or "").strip()
+            for row in market.outcomes
+            if isinstance(row, dict)
+            and str(row.get("label") or "").strip()
+        ]
+        labels = [
+            label for label in labels
+            if exact_text(label) not in {"yes", "no"}
+        ]
+        if len(labels) == 2:
+            us_winner_types = {
+                exact_text(
+                    row.get("sportsMarketType")
+                    or row.get("sports_market_type")
+                    or row.get("marketType")
+                    or row.get("market_type")
+                )
+                for row in us_markets
+            }
+            us_has_full_game_winner = bool(
+                us_winner_types & SPORTS_WINNER_TYPES
+            )
+
+            # On Polymarket US the same sports event can use independent event
+            # and market slugs. Once the exact matchup and kickoff are verified,
+            # a native full-game winner/moneyline market is sufficient proof
+            # that the event page is a valid destination.
+            if is_college_football_event(market.event):
+                international_cfb_key = college_football_matchup_key(
+                    market.event.title
+                )
+                us_cfb_key = college_football_matchup_key(us_event.get("title"))
+                if (
+                    international_cfb_key is not None
+                    and us_cfb_key == international_cfb_key
+                    and us_has_full_game_winner
+                ):
+                    return True
+
+            if is_college_football_event(market.event):
+                wanted = {
+                    canonical_college_football_school(label)
+                    for label in labels
+                }
+                wanted.discard(None)
+                available = set()
+                for row in us_markets:
+                    for value in (row.get("outcome"), row.get("title")):
+                        key = canonical_college_football_school(value)
+                        if key:
+                            available.add(key)
+                if len(wanted) == 2 and wanted <= available:
+                    return True
+            else:
+                international_event_title = _polymarket_link_text(
+                    market.event.title
+                )
+                us_event_title = _polymarket_link_text(us_event.get("title"))
+                if (
+                    international_event_title
+                    and us_event_title == international_event_title
+                    and us_has_full_game_winner
+                ):
+                    return True
+
+                wanted = {_polymarket_link_text(label) for label in labels}
+                wanted.discard("")
+                available = {
+                    _polymarket_link_text(value)
+                    for row in us_markets
+                    for value in (row.get("outcome"), row.get("title"))
+                    if value not in (None, "")
+                }
+                if len(wanted) == 2 and wanted <= available:
+                    return True
+
+    return False
+
+
+def polymarket_us_url(market: Market) -> Optional[str]:
+    if market.venue != "polymarket":
+        return None
+
+    now = time.time()
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        cached = _POLYMARKET_US_MARKET_URL_CACHE.get(market.id)
+        if cached and now - cached[0] < POLYMARKET_US_LINK_CACHE_SECONDS:
+            return cached[1]
+
+    candidates = _polymarket_us_candidate_events(market)
+    verified = [
+        event
+        for event in candidates
+        if _polymarket_us_market_equivalent(market, event)
+    ]
+
+    # If indexed sports candidates existed but none represented the same market,
+    # use official US search once before giving up. This covers independent US
+    # naming/slug schemes while the semantic verifier still prevents bad links.
+    if not verified and is_sports_event(market.event):
+        searched = _search_polymarket_us_events(market.event.title)
+        merged = {
+            str(event.get("id") or event.get("slug")): event
+            for event in candidates
+        }
+        for event in searched:
+            merged[str(event.get("id") or event.get("slug"))] = event
+        verified = [
+            event
+            for event in merged.values()
+            if _polymarket_us_market_equivalent(market, event)
+        ]
+
+    # Sports candidates must also agree on kickoff when both products expose it.
+    if is_sports_event(market.event):
+        market_start = market_time(market)
+        if market_start is not None:
+            timed = []
+            for event in verified:
+                us_start = _polymarket_us_event_start(event)
+                if us_start is None:
+                    timed.append((None, event))
+                    continue
+                difference = abs((market_start - us_start).total_seconds())
+                if difference <= MAX_SPORTS_START_DIFFERENCE_SECONDS:
+                    timed.append((difference, event))
+            if timed:
+                with_time = [row for row in timed if row[0] is not None]
+                if with_time:
+                    nearest = min(row[0] for row in with_time)
+                    nearest_rows = [
+                        event for difference, event in with_time
+                        if difference == nearest
+                    ]
+                    verified = nearest_rows if len(nearest_rows) == 1 else []
+                else:
+                    verified = [event for _, event in timed]
+            else:
+                verified = []
+
+    # Never guess between multiple US events.
+    url = None
+    if len(verified) == 1:
+        slug = str(verified[0].get("slug") or "").strip()
+        if slug:
+            url = f"https://polymarket.us/event/{quote(slug, safe='-')}"
+
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        # A verified match or a completed US-catalog scan can use the normal
+        # cache TTL. If the gateway fetch failed and no catalog is loaded, keep
+        # a negative result only for the short retry window.
+        loaded_at = float(_POLYMARKET_US_LINK_CACHE.get("loaded_at") or 0.0)
+        cache_time = time.time()
+        if url is None and loaded_at <= 0:
+            cache_time -= (
+                POLYMARKET_US_LINK_CACHE_SECONDS
+                - POLYMARKET_US_LINK_FAILURE_RETRY_SECONDS
+            )
+        _POLYMARKET_US_MARKET_URL_CACHE[market.id] = (cache_time, url)
+    return url
+
+
+def polymarket_us_link_diagnostics() -> Dict[str, Any]:
+    events = _load_polymarket_us_events()
+    with _POLYMARKET_US_LINK_CACHE_LOCK:
+        return {
+            "gateway": POLYMARKET_US_GATEWAY_URL,
+            "eventCount": len(events),
+            "pagesLoaded": int(_POLYMARKET_US_LINK_CACHE.get("pages_loaded") or 0),
+            "loadError": _POLYMARKET_US_LINK_CACHE.get("load_error"),
+            "eventSlugKeys": len(_POLYMARKET_US_LINK_CACHE.get("event_slug_index", {})),
+            "marketSlugKeys": len(_POLYMARKET_US_LINK_CACHE.get("market_slug_index", {})),
+            "titleKeys": len(_POLYMARKET_US_LINK_CACHE.get("title_index", {})),
+            "cfbMatchupKeys": len(_POLYMARKET_US_LINK_CACHE.get("cfb_matchup_index", {})),
+            "searchCacheKeys": len(_POLYMARKET_US_SEARCH_CACHE),
+            "marketUrlCacheKeys": len(_POLYMARKET_US_MARKET_URL_CACHE),
+        }
+
+
 def market_url(market: Market) -> str:
     if market.venue == "polymarket":
-        event_slug = market.event.raw.get("slug")
-        slug = event_slug or market.market_slug
-        return f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
+        # Prefer a verified Polymarket US equivalent for US users. If no exact
+        # US event+market match is available (or the US gateway is unavailable),
+        # preserve the International event link so no Bullionaire market
+        # disappears merely because Polymarket US has narrower coverage.
+        return polymarket_us_url(market) or polymarket_international_url(market)
 
     # Kalshi's stable public resolver is ticker-based. The previous
     # /markets/{market_ticker} path is not a valid canonical deep link and can
@@ -10746,11 +11860,50 @@ def _sports_pair_explicit_non_soccer_label(
     pair: Tuple[ExactContract, ExactContract],
     markets: Dict[int, Market],
 ) -> Optional[str]:
+    # v20.26: event_match_method is authoritative for CFB.  These pairs were
+    # already deterministically matched by exact normalized matchup title plus
+    # verified home/away roles, so they must never be reclassified as soccer by
+    # broad text such as "football", "league", or "division".
+    if any(
+        getattr(contract, "event_match_method", None)
+        == "college_football_title+home_away"
+        for contract in pair
+    ):
+        return "american-football"
+
     text = _sports_pair_priority_text(pair, markets)
     for label, pattern in NON_SOCCER_SPORT_PATTERNS:
         if pattern.search(text):
             return label
     return None
+
+
+COLLEGE_FOOTBALL_RUNTIME_PATTERN = re.compile(
+    r"(?:\bncaaf\b|\bcfb\b|college[_ ]?football|ncaa[_ ]?football|"
+    r"division[_ ]?i[_ ]?fbs|\bfbs\b)",
+    re.I,
+)
+
+
+def _sports_pair_is_college_football(
+    pair: Tuple[ExactContract, ExactContract],
+    markets: Dict[int, Market],
+) -> bool:
+    """Identify NCAA/CFB pairs deterministically, with text as fallback."""
+    # v20.26: do not try to rediscover a pair that the event matcher already
+    # proved was CFB.  This also avoids regex word-boundary failures after
+    # _sports_pair_priority_text normalizes spaces to underscores.
+    if any(
+        getattr(contract, "event_match_method", None)
+        == "college_football_title+home_away"
+        for contract in pair
+    ):
+        return True
+    return bool(
+        COLLEGE_FOOTBALL_RUNTIME_PATTERN.search(
+            _sports_pair_priority_text(pair, markets)
+        )
+    )
 
 
 def _sports_pair_is_soccer(
@@ -10921,6 +12074,11 @@ def prioritize_sports_runtime_pairs(
         "soccerDroppedSamples": dropped_samples,
         "nonSoccerSportsPairsPreserved": len(non_soccer_pairs),
         "explicitNonSoccerPairsProtected": dict(sorted(protected_non_soccer.items())),
+        "collegeFootballPairsProtectedFromSoccerCap": sum(
+            1 for pair in non_soccer_pairs
+            if _sports_pair_is_college_football(pair, markets)
+        ),
+        "collegeFootballRuntimeProtectionMethod": "event_match_method",
         "soccerCapTouchesOnlySoccer": True,
     }
 
@@ -11454,12 +12612,20 @@ def build_exact_pair_context(
         )
         diagnostics.update(sports_event_diagnostics)
         diagnostics.update(sports_contract_diagnostics)
+        diagnostics["collegeFootballPairsBeforeSettlement"] = sum(
+            _sports_pair_is_college_football(pair, markets)
+            for pair in sports_pairs
+        )
         sports_pairs, sports_settlement_diagnostics = settlement_gate_pairs(
             sports_pairs,
             markets,
             "sports",
         )
         diagnostics.update(sports_settlement_diagnostics)
+        diagnostics["collegeFootballSettlementEligiblePairs"] = sum(
+            _sports_pair_is_college_football(pair, markets)
+            for pair in sports_pairs
+        )
         if SOCCER_EARLY_PRUNE_ENABLED:
             diagnostics.update({
                 "sportsPairsBeforeFinancePriorityPrune": len(sports_pairs),
@@ -11472,6 +12638,15 @@ def build_exact_pair_context(
                 markets,
             )
             diagnostics.update(sports_priority_diagnostics)
+        diagnostics["collegeFootballRuntimePairs"] = sum(
+            _sports_pair_is_college_football(pair, markets)
+            for pair in sports_pairs
+        )
+        diagnostics["collegeFootballPairsPrunedBySoccerCap"] = max(
+            0,
+            int(diagnostics.get("collegeFootballSettlementEligiblePairs", 0))
+            - int(diagnostics.get("collegeFootballRuntimePairs", 0)),
+        )
         diagnostics["sportsEventMatchMethods"] = dict(
             sorted(
                 Counter(

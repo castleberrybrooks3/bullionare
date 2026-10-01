@@ -20,7 +20,7 @@ const API_BASE = (
 const API_CONTRACT_VERSION =
   "prediction-terminal-api-v2.3-lean-delta";
 const PREDICTION_UI_VERSION =
-  "prediction-ui-v4.3-lean-delta-on-demand-depth";
+  "prediction-ui-v4.4-lean-delta-football-submenu";
 
 const TERMINAL_LIMIT = 5000;
 const WS_RECONNECT_DELAY_MS = 1500;
@@ -107,6 +107,14 @@ const SPORTS_SUBCATEGORIES = [
   "Tennis",
   "MMA",
   "Cricket",
+  "Other",
+];
+
+const FOOTBALL_LEAGUE_PRIORITY = [
+  "NFL",
+  "CFB",
+  "UFL / XFL",
+  "CFL",
   "Other",
 ];
 
@@ -596,11 +604,13 @@ const inferSportsSubcategory = (
     [
       "KXNFLGAME",
       "KXCFLGAME",
+      "KXUFLGAME",
+      "KXXFLGAME",
     ].includes(series) ||
-    /KXNFL|KXNCAAF|KXCFB|NFLGAME|NCAAFGAME|CFLGAME/.test(
+    /KXNFL|KXNCAAF|KXCFB|KXCFL|KXUFL|KXXFL|NFLGAME|NCAAFGAME|CFBGAME|CFLGAME|UFLGAME|XFLGAME/.test(
       identifier
     ) ||
-    /\b(nfl|cfl|canadian football league|college football|ncaaf|cfb|super bowl|pro football)\b/.test(
+    /\b(nfl|cfl|ufl|xfl|canadian football league|united football league|college football|ncaa football|ncaaf|cfb|super bowl|pro football)\b/.test(
       text
     )
   ) {
@@ -689,6 +699,71 @@ const inferSportsSubcategory = (
     )
   ) {
     return "Cricket";
+  }
+
+  return "Other";
+};
+
+const inferFootballLeague = (item) => {
+  const text =
+    getSearchText(item);
+  const identifier =
+    getIdentifierText(item);
+  const series =
+    getKalshiSeries(item);
+
+  if (
+    [
+      "KXNFLGAME",
+    ].includes(series) ||
+    /KXNFL|NFLGAME/.test(
+      identifier
+    ) ||
+    /\b(nfl|national football league|super bowl)\b/.test(
+      text
+    )
+  ) {
+    return "NFL";
+  }
+
+  if (
+    /KXNCAAF|KXCFB|NCAAFGAME|CFBGAME/.test(
+      identifier
+    ) ||
+    /\b(college football|ncaa football|ncaaf|cfb)\b/.test(
+      text
+    )
+  ) {
+    return "CFB";
+  }
+
+  if (
+    [
+      "KXUFLGAME",
+      "KXXFLGAME",
+    ].includes(series) ||
+    /KXUFL|KXXFL|UFLGAME|XFLGAME/.test(
+      identifier
+    ) ||
+    /\b(ufl|xfl|united football league)\b/.test(
+      text
+    )
+  ) {
+    return "UFL / XFL";
+  }
+
+  if (
+    [
+      "KXCFLGAME",
+    ].includes(series) ||
+    /KXCFL|CFLGAME/.test(
+      identifier
+    ) ||
+    /\b(cfl|canadian football league)\b/.test(
+      text
+    )
+  ) {
+    return "CFL";
   }
 
   return "Other";
@@ -5276,6 +5351,11 @@ function PredictionMarkets() {
   ] = useState("all");
 
   const [
+    footballLeague,
+    setFootballLeague,
+  ] = useState("all");
+
+  const [
     viewFilter,
     setViewFilter,
   ] = useState("all");
@@ -6338,6 +6418,45 @@ function PredictionMarkets() {
       subcategory,
     ]);
 
+  const footballLeagueOptions =
+    useMemo(() => {
+      if (
+        primaryCategory !==
+          "sports" ||
+        subcategory !==
+          "Football"
+      ) {
+        return ["all"];
+      }
+
+      return [
+        "all",
+        ...FOOTBALL_LEAGUE_PRIORITY,
+      ];
+    }, [
+      primaryCategory,
+      subcategory,
+    ]);
+
+  const footballLeagueCount =
+    useCallback(
+      (league) => {
+        if (
+          league === "all"
+        ) {
+          return afterSubcategoryRows.length;
+        }
+
+        return afterSubcategoryRows.filter(
+          (item) =>
+            inferFootballLeague(
+              item
+            ) === league
+        ).length;
+      },
+      [afterSubcategoryRows]
+    );
+
   const soccerLeagueOptions =
     useMemo(() => {
       if (
@@ -6437,11 +6556,28 @@ function PredictionMarkets() {
         );
       }
 
+      if (
+        primaryCategory ===
+          "sports" &&
+        subcategory ===
+          "Football" &&
+        footballLeague !== "all"
+      ) {
+        return afterSubcategoryRows.filter(
+          (item) =>
+            inferFootballLeague(
+              item
+            ) ===
+            footballLeague
+        );
+      }
+
       return afterSubcategoryRows;
     }, [
       primaryCategory,
       subcategory,
       soccerLeague,
+      footballLeague,
       afterSubcategoryRows,
     ]);
 
@@ -6553,6 +6689,7 @@ function PredictionMarkets() {
     primaryCategory,
     subcategory,
     soccerLeague,
+    footballLeague,
     viewFilter,
     searchText,
   ]);
@@ -6560,6 +6697,7 @@ function PredictionMarkets() {
   useEffect(() => {
     setSubcategory("all");
     setSoccerLeague("all");
+    setFootballLeague("all");
   }, [primaryCategory]);
 
   useEffect(() => {
@@ -6567,6 +6705,14 @@ function PredictionMarkets() {
       subcategory !== "Soccer"
     ) {
       setSoccerLeague("all");
+    }
+  }, [subcategory]);
+
+  useEffect(() => {
+    if (
+      subcategory !== "Football"
+    ) {
+      setFootballLeague("all");
     }
   }, [subcategory]);
 
@@ -6784,6 +6930,9 @@ function PredictionMarkets() {
       setSoccerLeague(
         "all"
       );
+      setFootballLeague(
+        "all"
+      );
 
       if (
         category ===
@@ -6957,6 +7106,49 @@ function PredictionMarkets() {
                 <small>
                   {subcategoryCount(
                     option
+                  )}
+                </small>
+              </button>
+            )
+          )}
+        </ScrollableNav>
+      ) : null}
+
+      {primaryCategory ===
+        "sports" &&
+      subcategory ===
+        "Football" &&
+      footballLeagueOptions.length >
+        1 ? (
+        <ScrollableNav
+          className="pm-subcategory-nav pm-football-league-nav"
+          ariaLabel="Football leagues"
+        >
+          {footballLeagueOptions.map(
+            (league) => (
+              <button
+                key={league}
+                type="button"
+                className={
+                  footballLeague ===
+                  league
+                    ? "active"
+                    : ""
+                }
+                onClick={() =>
+                  setFootballLeague(
+                    league
+                  )
+                }
+              >
+                {league ===
+                "all"
+                  ? "All Football"
+                  : league}
+
+                <small>
+                  {footballLeagueCount(
+                    league
                   )}
                 </small>
               </button>

@@ -21,7 +21,7 @@ import requests
 from db import get_db_connection_dict
 
 
-SERVICE_VERSION = "incremental-catalog-v5.0.2-stable-semantic-fingerprint"
+SERVICE_VERSION = "current-only-catalog-v5.1.1-io-safe-cfb-direct-prune"
 
 POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
@@ -46,13 +46,25 @@ KALSHI_TARGET_BATCH_SIZE = 200
 CATALOG_REFRESH_LOCK_ID = 51720260722
 
 # The service refuses to replace a healthy snapshot with an obviously empty or
-# incomplete download. These defaults are deliberately low enough for testing
-# but can be raised in production through environment variables.
+# badly incomplete download. Because this service physically prunes markets that
+# disappear from a validated snapshot, conservative production defaults prevent
+# a partial venue API response from causing a huge delete/reinsert cycle (and
+# therefore an avoidable Supabase Disk I/O spike). Override explicitly for tests.
 MIN_POLYMARKET_MARKETS = int(
-    os.getenv("PREDICTION_MIN_POLYMARKET_MARKETS", "1")
+    os.getenv("PREDICTION_MIN_POLYMARKET_MARKETS", "50000")
 )
 MIN_KALSHI_MARKETS = int(
-    os.getenv("PREDICTION_MIN_KALSHI_MARKETS", "1")
+    os.getenv("PREDICTION_MIN_KALSHI_MARKETS", "50000")
+)
+# A current snapshot that suddenly collapses versus the already-published
+# venue universe is treated as a partial API response, not as mass expiry.
+# First population is exempt because the existing catalog count is zero.
+MIN_VENUE_RETAIN_FRACTION = min(
+    1.0,
+    max(
+        0.0,
+        float(os.getenv("PREDICTION_MIN_VENUE_RETAIN_FRACTION", "0.60")),
+    ),
 )
 MIN_POLYMARKET_TEAM_ENTITIES = int(
     os.getenv("PREDICTION_MIN_POLYMARKET_TEAM_ENTITIES", "100")
@@ -204,6 +216,71 @@ def native_text(value: Any) -> Optional[str]:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def compact_mapping(raw: Dict[str, Any], keys: Sequence[str]) -> Dict[str, Any]:
+    """Keep only fields the matcher/fee engine still reads from raw_payload."""
+    return {
+        key: raw.get(key)
+        for key in keys
+        if raw.get(key) not in (None, "", [], {})
+    }
+
+
+def compact_polymarket_event_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+    return compact_mapping(
+        raw,
+        (
+            "id", "slug", "title", "question", "subtitle", "description",
+            "rules", "rules_primary", "rules_secondary", "resolutionSource",
+            "category", "gameId", "seriesSlug", "status", "active", "closed",
+            "archived",
+        ),
+    )
+
+
+def compact_polymarket_market_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+    return compact_mapping(
+        raw,
+        (
+            "id", "slug", "question", "title", "subtitle", "description",
+            "rules", "rules_primary", "rules_secondary", "resolutionSource",
+            "feesEnabled", "feeSchedule", "trading", "conditionId", "gameId",
+            "sportsMarketType", "marketType", "formatType", "teamAID",
+            "teamBID", "homeTeamID", "awayTeamID", "groupItemTitle",
+            "groupItemThreshold", "groupItemRange", "lowerBound", "upperBound",
+            "negRisk", "rfqEnabled",
+        ),
+    )
+
+
+def compact_kalshi_event_raw(
+    event: Dict[str, Any],
+    milestone: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    payload = compact_mapping(
+        event,
+        (
+            "event_ticker", "series_ticker", "title", "sub_title", "subtitle",
+            "category", "strike_date", "product_metadata",
+            "fee_type_override", "fee_multiplier_override",
+        ),
+    )
+    if milestone:
+        payload["milestone"] = milestone
+    return payload
+
+
+def compact_kalshi_market_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+    return compact_mapping(
+        raw,
+        (
+            "ticker", "title", "subtitle", "yes_sub_title", "no_sub_title",
+            "description", "rules", "rules_primary", "rules_secondary",
+            "category", "market_type", "sports_market_type", "custom_strike",
+            "functional_strike", "floor_strike", "cap_strike", "line_value",
+        ),
+    )
 
 
 def chunks(
@@ -637,8 +714,7 @@ def normalise_polymarket_event(
     )
     native_game_id = native_text(native_game_id)
 
-    event_raw = dict(event)
-    event_raw.pop("markets", None)
+    event_raw = compact_polymarket_event_raw(event)
 
     return {
         "venue": "polymarket",
@@ -702,16 +778,16 @@ def normalise_polymarket_event(
 
 def normalise_polymarket_outcomes(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     labels = parse_json_array(raw.get("outcomes"))
-    prices = parse_json_array(raw.get("outcomePrices"))
     token_ids = parse_json_array(raw.get("clobTokenIds"))
 
+    # Snapshot rows retain stable contract identity only. Live prices are read
+    # from the CLOB stream and must never turn catalog refreshes into tick writes.
     outcomes: List[Dict[str, Any]] = []
-    maximum = max(len(labels), len(token_ids), len(prices))
+    maximum = max(len(labels), len(token_ids))
 
     for index in range(maximum):
         label = labels[index] if index < len(labels) else None
         token_id = token_ids[index] if index < len(token_ids) else None
-        price = prices[index] if index < len(prices) else None
 
         if label in (None, "") and token_id in (None, ""):
             continue
@@ -732,7 +808,6 @@ def normalise_polymarket_outcomes(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "label": display_label,
                 "index": index,
                 "token_id": str(token_id) if token_id not in (None, "") else None,
-                "last_price": normalise_price(price),
             }
         )
 
@@ -848,7 +923,7 @@ def normalise_polymarket_market(
             "feeSchedule": raw.get("fee_schedule"),
         },
         "outcomes": normalise_polymarket_outcomes(raw),
-        "raw_payload": raw,
+        "raw_payload": compact_polymarket_market_raw(raw),
         "liquidity": numeric_24_8(
             first_non_empty(raw.get("liquidityNum"), raw.get("liquidity"))
         ),
@@ -1515,6 +1590,53 @@ def extract_target_references(
     return references
 
 
+def extract_team_references(
+    value: Any,
+    *,
+    inherited_role: str = "participant",
+) -> List[Tuple[str, str]]:
+    """Extract only game-team identifiers from arbitrary Kalshi metadata.
+
+    This is intentionally narrower than extract_target_references so player props
+    and other target IDs cannot turn a two-team game into a many-participant event.
+    """
+    references: List[Tuple[str, str]] = []
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            lowered = str(key).lower()
+            role = inherited_role
+            if "home" in lowered:
+                role = "home"
+            elif "away" in lowered:
+                role = "away"
+
+            if (
+                lowered.endswith("_team_id")
+                and isinstance(child, (str, int))
+                and str(child).strip()
+            ):
+                references.append((str(child), role))
+            else:
+                references.extend(
+                    extract_team_references(
+                        child,
+                        inherited_role=role,
+                    )
+                )
+
+    elif isinstance(value, list):
+        for child in value:
+            references.extend(
+                extract_team_references(
+                    child,
+                    inherited_role=inherited_role,
+                )
+            )
+
+    return references
+
+
 def fetch_kalshi_structured_targets(
     target_ids: Sequence[str],
 ) -> Dict[str, Dict[str, Any]]:
@@ -1564,9 +1686,10 @@ def normalise_kalshi_target(raw: Dict[str, Any]) -> Dict[str, Any]:
     details = json_object(raw.get("details"))
     source_ids = json_object(raw.get("source_ids"))
     league = first_non_empty(
-        details.get("league"),
+        raw.get("competition"),
+        raw.get("league"),
         details.get("competition"),
-        details.get("conference"),
+        details.get("league"),
         details.get("tour"),
     )
 
@@ -1578,11 +1701,17 @@ def normalise_kalshi_target(raw: Dict[str, Any]) -> Dict[str, Any]:
         "league": native_text(league),
         "abbreviation": native_text(
             first_non_empty(
+                raw.get("abbreviation"),
                 details.get("abbreviation"),
                 details.get("short_name"),
             )
         ),
-        "alias": native_text(details.get("alias")),
+        "alias": native_text(
+            first_non_empty(
+                raw.get("alias"),
+                details.get("alias"),
+            )
+        ),
         "source_id": (
             str(raw["source_id"])
             if raw.get("source_id") not in (None, "")
@@ -1605,8 +1734,7 @@ def normalise_kalshi_event(
     first_market = markets[0] if markets else {}
     event_ticker = str(event["event_ticker"])
 
-    raw_summary = dict(event)
-    raw_summary.pop("markets", None)
+    raw_summary = compact_kalshi_event_raw(event, milestone)
 
     market_statuses = sorted(
         {
@@ -1662,10 +1790,7 @@ def normalise_kalshi_event(
             "fee_type_override": event.get("fee_type_override"),
             "fee_multiplier_override": event.get("fee_multiplier_override"),
         },
-        "raw_payload": {
-            **raw_summary,
-            "milestone": milestone,
-        },
+        "raw_payload": raw_summary,
     }
 
 
@@ -1677,66 +1802,18 @@ def normalise_kalshi_market(
     milestone = milestone or {}
     ticker = str(raw["ticker"])
 
-    yes_bid = normalise_price(
-        first_non_empty(raw.get("yes_bid_dollars"), raw.get("yes_bid"))
-    )
-    yes_ask = normalise_price(
-        first_non_empty(raw.get("yes_ask_dollars"), raw.get("yes_ask"))
-    )
-    no_bid = normalise_price(
-        first_non_empty(raw.get("no_bid_dollars"), raw.get("no_bid"))
-    )
-    no_ask = normalise_price(
-        first_non_empty(raw.get("no_ask_dollars"), raw.get("no_ask"))
-    )
-
-    yes_bid_size = as_float(
-        first_non_empty(raw.get("yes_bid_size_fp"), raw.get("yes_bid_size"))
-    )
-    yes_ask_size = as_float(
-        first_non_empty(raw.get("yes_ask_size_fp"), raw.get("yes_ask_size"))
-    )
-    no_bid_size = as_float(
-        first_non_empty(
-            raw.get("no_bid_size_fp"),
-            raw.get("no_bid_size"),
-            raw.get("yes_ask_size_fp"),
-            raw.get("yes_ask_size"),
-        )
-    )
-    no_ask_size = as_float(
-        first_non_empty(
-            raw.get("no_ask_size_fp"),
-            raw.get("no_ask_size"),
-            raw.get("yes_bid_size_fp"),
-            raw.get("yes_bid_size"),
-        )
-    )
-
-    last_price = normalise_price(
-        first_non_empty(raw.get("last_price_dollars"), raw.get("last_price"))
-    )
-
+    # Live bid/ask/depth belongs to prediction_market_streams.py, not Postgres.
+    # Persist only stable outcome identity so catalog refreshes stay compact.
     outcomes = [
         {
             "key": "yes",
             "label": "Yes",
             "index": 0,
-            "best_bid": yes_bid,
-            "best_ask": yes_ask,
-            "bid_size": yes_bid_size,
-            "ask_size": yes_ask_size,
-            "last_price": last_price,
         },
         {
             "key": "no",
             "label": "No",
             "index": 1,
-            "best_bid": no_bid,
-            "best_ask": no_ask,
-            "bid_size": no_bid_size,
-            "ask_size": no_ask_size,
-            "last_price": None if last_price is None else 1 - last_price,
         },
     ]
 
@@ -1830,7 +1907,7 @@ def normalise_kalshi_market(
             "fee_multiplier_override": event.get("fee_multiplier_override"),
         },
         "outcomes": outcomes,
-        "raw_payload": raw,
+        "raw_payload": compact_kalshi_market_raw(raw),
         "liquidity": numeric_24_8(
             first_non_empty(raw.get("liquidity_dollars"), raw.get("liquidity"))
         ),
@@ -1904,14 +1981,40 @@ def download_kalshi_snapshot(
             else:
                 events[event_key] = normalised_event
 
+            # Prefer explicit team IDs whenever they are available. Generic
+            # participant/target IDs can point to players in college-football
+            # prop families; mixing those into a game event would give it more
+            # than two participants and make the exact sports matcher reject it.
+            team_references: Set[Tuple[str, str]] = set()
+            generic_references: Set[Tuple[str, str]] = set()
+
             if milestone:
-                for entity_id, role in extract_target_references(
-                    milestone.get("details") or {}
-                ):
-                    links.add(("kalshi", event_ticker, entity_id, role))
-                    target_references.setdefault(entity_id, set()).add(
-                        (event_ticker, role)
+                generic_references.update(
+                    extract_target_references(
+                        milestone.get("details") or {}
                     )
+                )
+                team_references.update(extract_team_references(milestone))
+
+            team_references.update(
+                extract_team_references(event.get("product_metadata") or {})
+            )
+            team_references.update(extract_team_references(event))
+            for raw_market in current_markets:
+                team_references.update(extract_team_references(raw_market))
+
+            distinct_team_ids = {entity_id for entity_id, _role in team_references}
+            event_references = (
+                team_references
+                if len(distinct_team_ids) >= 2
+                else team_references | generic_references
+            )
+
+            for entity_id, role in event_references:
+                links.add(("kalshi", event_ticker, entity_id, role))
+                target_references.setdefault(entity_id, set()).add(
+                    (event_ticker, role)
+                )
 
             for raw_market in current_markets:
                 market_ticker = str(raw_market["ticker"])
@@ -2377,25 +2480,42 @@ def _market_semantic_fingerprint(row: Dict[str, Any]) -> str:
 
 
 def _existing_catalog_state(cur) -> Dict[str, Any]:
+    # IO-SAFE: only active event/market rows can become retired during this
+    # refresh. Historical inactive rows are deliberately excluded so the
+    # refresh does not scan the entire accumulated catalog on every run.
     cur.execute(
-        "SELECT venue, external_event_id, semantic_fingerprint, status FROM public.prediction_market_events"
+        """
+        SELECT id, venue, external_event_id, semantic_fingerprint, status
+        FROM public.prediction_market_events
+        WHERE status = 'active'
+        """
     )
     events = {
-        (row["venue"], str(row["external_event_id"])): (row.get("semantic_fingerprint"), row.get("status"))
+        (row["venue"], str(row["external_event_id"])): (
+            int(row["id"]), row.get("semantic_fingerprint"), row.get("status")
+        )
         for row in cur.fetchall()
     }
     cur.execute(
-        "SELECT venue, external_entity_id, semantic_fingerprint FROM public.prediction_market_entities"
+        "SELECT id, venue, external_entity_id, semantic_fingerprint FROM public.prediction_market_entities"
     )
     entities = {
-        (row["venue"], str(row["external_entity_id"])): row.get("semantic_fingerprint")
+        (row["venue"], str(row["external_entity_id"])): (
+            int(row["id"]), row.get("semantic_fingerprint")
+        )
         for row in cur.fetchall()
     }
     cur.execute(
-        "SELECT venue, external_market_id, semantic_fingerprint, status FROM public.prediction_market_catalog"
+        """
+        SELECT venue, external_market_id, semantic_fingerprint, status
+        FROM public.prediction_market_catalog
+        WHERE status = 'active'
+        """
     )
     markets = {
-        (row["venue"], str(row["external_market_id"])): (row.get("semantic_fingerprint"), row.get("status"))
+        (row["venue"], str(row["external_market_id"])): (
+            row.get("semantic_fingerprint"), row.get("status")
+        )
         for row in cur.fetchall()
     }
     cur.execute(
@@ -2416,7 +2536,7 @@ def _existing_catalog_state(cur) -> Dict[str, Any]:
 def _upsert_entities_incremental(
     cur,
     paths: SnapshotPaths,
-    existing: Dict[Tuple[str, str], Optional[str]],
+    existing: Dict[Tuple[str, str], Tuple[int, Optional[str]]],
     stats: SnapshotApplyStats,
 ) -> Dict[Tuple[str, str], int]:
     entity_ids: Dict[Tuple[str, str], int] = {}
@@ -2426,10 +2546,17 @@ def _upsert_entities_incremental(
             key = (row["venue"], str(row["external_entity_id"]))
             fingerprint = _entity_semantic_fingerprint(row)
             old = existing.get(key)
-            if key not in existing:
+
+            if old is None:
                 stats.new_entities += 1
-            elif old != fingerprint:
+            elif old[1] != fingerprint:
                 stats.changed_entities += 1
+            else:
+                # IO-SAFE: unchanged entity; preserve the stable DB id and do
+                # not rewrite its JSON/raw payload or indexes.
+                entity_ids[key] = old[0]
+                continue
+
             rows.append((
                 row["venue"], row["external_entity_id"], row["name"], row.get("entity_type"),
                 row.get("league"), row.get("abbreviation"), row.get("alias"), row.get("source_id"),
@@ -2437,6 +2564,10 @@ def _upsert_entities_incremental(
                 psycopg2.extras.Json(row.get("details") or {}),
                 psycopg2.extras.Json(row.get("raw_payload") or {}), fingerprint,
             ))
+
+        if not rows:
+            continue
+
         returned = psycopg2.extras.execute_values(
             cur,
             """
@@ -2468,7 +2599,7 @@ def _upsert_entities_incremental(
 def _upsert_events_incremental(
     cur,
     paths: SnapshotPaths,
-    existing: Dict[Tuple[str, str], Tuple[Optional[str], Optional[str]]],
+    existing: Dict[Tuple[str, str], Tuple[int, Optional[str], Optional[str]]],
     stats: SnapshotApplyStats,
 ) -> Tuple[Dict[Tuple[str, str], int], Set[Tuple[str, str]]]:
     event_ids: Dict[Tuple[str, str], int] = {}
@@ -2480,10 +2611,17 @@ def _upsert_events_incremental(
             current_keys.add(key)
             fingerprint = _event_semantic_fingerprint(row)
             old = existing.get(key)
+
             if old is None:
                 stats.new_events += 1
-            elif old[0] != fingerprint or old[1] == "inactive":
+            elif old[1] != fingerprint or old[2] == "inactive":
                 stats.changed_events += 1
+            else:
+                # IO-SAFE: unchanged active event. Reuse its stable DB id and
+                # avoid rewriting a large raw_payload on every refresh.
+                event_ids[key] = old[0]
+                continue
+
             rows.append((
                 row["venue"], row["external_event_id"], row.get("external_series_id"), row["title"],
                 row.get("subtitle"), row.get("category"), row.get("event_type"), "active",
@@ -2492,54 +2630,52 @@ def _upsert_events_incremental(
                 psycopg2.extras.Json(row.get("source_ids") or {}), psycopg2.extras.Json(row.get("details") or {}),
                 psycopg2.extras.Json(row.get("raw_payload") or {}), fingerprint,
             ))
-        returned = psycopg2.extras.execute_values(
-            cur,
-            """
-            INSERT INTO public.prediction_market_events (
-                venue, external_event_id, external_series_id, title, subtitle, category, event_type,
-                status, venue_status, start_time, end_time, close_time, settlement_time,
-                native_game_id, milestone_id, source_id, source_ids, details, raw_payload, semantic_fingerprint
-            ) VALUES %s
-            ON CONFLICT (venue, external_event_id) DO UPDATE SET
-                external_series_id = EXCLUDED.external_series_id,
-                title = EXCLUDED.title,
-                subtitle = EXCLUDED.subtitle,
-                category = EXCLUDED.category,
-                event_type = EXCLUDED.event_type,
-                status = 'active',
-                venue_status = EXCLUDED.venue_status,
-                start_time = EXCLUDED.start_time,
-                end_time = EXCLUDED.end_time,
-                close_time = EXCLUDED.close_time,
-                settlement_time = EXCLUDED.settlement_time,
-                native_game_id = EXCLUDED.native_game_id,
-                milestone_id = EXCLUDED.milestone_id,
-                source_id = EXCLUDED.source_id,
-                source_ids = EXCLUDED.source_ids,
-                details = EXCLUDED.details,
-                raw_payload = EXCLUDED.raw_payload,
-                semantic_fingerprint = EXCLUDED.semantic_fingerprint,
-                updated_at = NOW()
-            RETURNING id, venue, external_event_id
-            """,
-            rows, page_size=DATABASE_BATCH_SIZE, fetch=True,
-        )
-        for returned_row in returned:
-            event_ids[(returned_row["venue"], str(returned_row["external_event_id"]))] = returned_row["id"]
-    retired = {key for key, value in existing.items() if value[1] == "active" and key not in current_keys}
+
+        if rows:
+            returned = psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO public.prediction_market_events (
+                    venue, external_event_id, external_series_id, title, subtitle, category, event_type,
+                    status, venue_status, start_time, end_time, close_time, settlement_time,
+                    native_game_id, milestone_id, source_id, source_ids, details, raw_payload, semantic_fingerprint
+                ) VALUES %s
+                ON CONFLICT (venue, external_event_id) DO UPDATE SET
+                    external_series_id = EXCLUDED.external_series_id,
+                    title = EXCLUDED.title,
+                    subtitle = EXCLUDED.subtitle,
+                    category = EXCLUDED.category,
+                    event_type = EXCLUDED.event_type,
+                    status = 'active',
+                    venue_status = EXCLUDED.venue_status,
+                    start_time = EXCLUDED.start_time,
+                    end_time = EXCLUDED.end_time,
+                    close_time = EXCLUDED.close_time,
+                    settlement_time = EXCLUDED.settlement_time,
+                    native_game_id = EXCLUDED.native_game_id,
+                    milestone_id = EXCLUDED.milestone_id,
+                    source_id = EXCLUDED.source_id,
+                    source_ids = EXCLUDED.source_ids,
+                    details = EXCLUDED.details,
+                    raw_payload = EXCLUDED.raw_payload,
+                    semantic_fingerprint = EXCLUDED.semantic_fingerprint,
+                    updated_at = NOW()
+                RETURNING id, venue, external_event_id
+                """,
+                rows, page_size=DATABASE_BATCH_SIZE, fetch=True,
+            )
+            for returned_row in returned:
+                event_ids[(returned_row["venue"], str(returned_row["external_event_id"]))] = returned_row["id"]
+
+    retired = {
+        key for key, value in existing.items()
+        if value[2] == "active" and key not in current_keys
+    }
     stats.retired_events = len(retired)
-    cur.execute("UPDATE public.prediction_market_events SET status='inactive', updated_at=NOW() WHERE status='active'")
-    if current_keys:
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            UPDATE public.prediction_market_events AS e
-            SET status='active', updated_at=NOW()
-            FROM (VALUES %s) AS seen(venue, external_event_id)
-            WHERE e.venue=seen.venue AND e.external_event_id=seen.external_event_id
-            """,
-            list(current_keys), page_size=DATABASE_BATCH_SIZE,
-        )
+
+    # CURRENT-ONLY: do not first rewrite disappeared events to inactive. The
+    # validated current-key set is passed to the prune phase below, which
+    # physically deletes rows no longer present in the newest snapshot.
     return event_ids, current_keys
 
 
@@ -2558,19 +2694,51 @@ def _replace_event_links_incremental(
                 row["venue"], str(row["external_event_id"]),
                 str(row["external_entity_id"]), str(row.get("role") or "unknown"),
             ))
+
     local_set = set(local_rows)
-    stats.link_changes = len(existing_links.symmetric_difference(local_set))
-    cur.execute("DELETE FROM public.prediction_market_event_entities")
-    inserted = 0
-    mapped_rows: List[Tuple[int, int, str]] = []
-    for venue, external_event_id, external_entity_id, role in local_rows:
+    removed = existing_links - local_set
+    added = local_set - existing_links
+    stats.link_changes = len(removed) + len(added)
+
+    # IO-SAFE: do not DELETE and rebuild the entire relationship table. Remove
+    # only stale relationships and insert only genuinely new relationships.
+    if removed:
+        for index in range(0, len(removed), DATABASE_BATCH_SIZE):
+            chunk = sorted(removed)[index:index + DATABASE_BATCH_SIZE]
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                DELETE FROM public.prediction_market_event_entities AS link
+                USING public.prediction_market_events AS event_row,
+                      public.prediction_market_entities AS entity_row,
+                      (VALUES %s) AS stale(
+                          venue, external_event_id, external_entity_id, role
+                      )
+                WHERE link.event_id = event_row.id
+                  AND link.entity_id = entity_row.id
+                  AND event_row.venue = stale.venue
+                  AND event_row.external_event_id = stale.external_event_id
+                  AND entity_row.venue = stale.venue
+                  AND entity_row.external_entity_id = stale.external_entity_id
+                  AND link.role = stale.role
+                """,
+                chunk,
+                page_size=DATABASE_BATCH_SIZE,
+            )
+
+    mapped_current_count = 0
+    mapped_additions: List[Tuple[int, int, str]] = []
+    for venue, external_event_id, external_entity_id, role in sorted(local_set):
         event_id = event_ids.get((venue, external_event_id))
         entity_id = entity_ids.get((venue, external_entity_id))
         if event_id is None or entity_id is None:
             continue
-        mapped_rows.append((event_id, entity_id, role))
-    for index in range(0, len(mapped_rows), DATABASE_BATCH_SIZE):
-        chunk = mapped_rows[index:index + DATABASE_BATCH_SIZE]
+        mapped_current_count += 1
+        if (venue, external_event_id, external_entity_id, role) in added:
+            mapped_additions.append((event_id, entity_id, role))
+
+    for index in range(0, len(mapped_additions), DATABASE_BATCH_SIZE):
+        chunk = mapped_additions[index:index + DATABASE_BATCH_SIZE]
         psycopg2.extras.execute_values(
             cur,
             """
@@ -2579,8 +2747,10 @@ def _replace_event_links_incremental(
             """,
             chunk, page_size=DATABASE_BATCH_SIZE,
         )
-        inserted += len(chunk)
-    return inserted
+
+    # Preserve the old return contract: this is the number of current mapped
+    # relationships seen in the validated snapshot, not merely the number added.
+    return mapped_current_count
 
 
 def _upsert_markets_incremental(
@@ -2604,10 +2774,18 @@ def _upsert_markets_incremental(
             current_keys.add(key)
             fingerprint = _market_semantic_fingerprint(row)
             old = existing.get(key)
+
             if old is None:
                 stats.new_markets += 1
             elif old[0] != fingerprint or old[1] == "inactive":
                 stats.changed_markets += 1
+            else:
+                # IO-SAFE: live bid/ask/last-price/size telemetry is excluded
+                # from the semantic fingerprint on purpose. Unchanged contract
+                # rows therefore do not need a catalog rewrite; live pricing is
+                # sourced by the engine/streams, not by these snapshot fields.
+                continue
+
             rows.append((
                 row["venue"], event_catalog_id, row["external_market_id"], row.get("external_event_id"),
                 row.get("external_series_id"), row.get("event_title"), row["market_title"], row.get("market_slug"),
@@ -2621,83 +2799,200 @@ def _upsert_markets_incremental(
                 psycopg2.extras.Json(row.get("outcomes") or []), psycopg2.extras.Json(row.get("raw_payload") or {}),
                 row.get("liquidity"), row.get("volume_24h"), row.get("total_volume"), row.get("open_interest"), fingerprint,
             ))
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            INSERT INTO public.prediction_market_catalog (
-                venue, event_catalog_id, external_market_id, external_event_id, external_series_id,
-                event_title, market_title, market_slug, category, market_type, sports_market_type,
-                status, venue_status, resolution_time, event_start_time, close_time, settlement_time,
-                accepting_orders, rules_url, rules_primary, rules_secondary, native_condition_id,
-                native_game_id, primary_participant_key, line_value, floor_strike, cap_strike,
-                functional_strike, custom_strike, contract_semantics, outcomes, raw_payload,
-                liquidity, volume_24h, total_volume, open_interest, semantic_fingerprint
-            ) VALUES %s
-            ON CONFLICT (venue, external_market_id) DO UPDATE SET
-                event_catalog_id=EXCLUDED.event_catalog_id,
-                external_event_id=EXCLUDED.external_event_id,
-                external_series_id=EXCLUDED.external_series_id,
-                event_title=EXCLUDED.event_title,
-                market_title=EXCLUDED.market_title,
-                market_slug=EXCLUDED.market_slug,
-                category=EXCLUDED.category,
-                market_type=EXCLUDED.market_type,
-                sports_market_type=EXCLUDED.sports_market_type,
-                status='active',
-                venue_status=EXCLUDED.venue_status,
-                resolution_time=EXCLUDED.resolution_time,
-                event_start_time=EXCLUDED.event_start_time,
-                close_time=EXCLUDED.close_time,
-                settlement_time=EXCLUDED.settlement_time,
-                accepting_orders=EXCLUDED.accepting_orders,
-                rules_url=EXCLUDED.rules_url,
-                rules_primary=EXCLUDED.rules_primary,
-                rules_secondary=EXCLUDED.rules_secondary,
-                native_condition_id=EXCLUDED.native_condition_id,
-                native_game_id=EXCLUDED.native_game_id,
-                primary_participant_key=EXCLUDED.primary_participant_key,
-                line_value=EXCLUDED.line_value,
-                floor_strike=EXCLUDED.floor_strike,
-                cap_strike=EXCLUDED.cap_strike,
-                functional_strike=EXCLUDED.functional_strike,
-                custom_strike=EXCLUDED.custom_strike,
-                contract_semantics=EXCLUDED.contract_semantics,
-                outcomes=EXCLUDED.outcomes,
-                raw_payload=EXCLUDED.raw_payload,
-                liquidity=EXCLUDED.liquidity,
-                volume_24h=EXCLUDED.volume_24h,
-                total_volume=EXCLUDED.total_volume,
-                open_interest=EXCLUDED.open_interest,
-                semantic_fingerprint=EXCLUDED.semantic_fingerprint,
-                updated_at=NOW()
-            """,
-            rows, page_size=DATABASE_BATCH_SIZE,
-        )
-        processed += len(rows)
-        if processed % 5000 < len(rows):
-            print(f"Incremental catalog: {processed} current markets upserted...")
-    retired = {key for key, value in existing.items() if value[1] == "active" and key not in current_keys}
+
+        if rows:
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO public.prediction_market_catalog AS existing (
+                    venue, event_catalog_id, external_market_id, external_event_id, external_series_id,
+                    event_title, market_title, market_slug, category, market_type, sports_market_type,
+                    status, venue_status, resolution_time, event_start_time, close_time, settlement_time,
+                    accepting_orders, rules_url, rules_primary, rules_secondary, native_condition_id,
+                    native_game_id, primary_participant_key, line_value, floor_strike, cap_strike,
+                    functional_strike, custom_strike, contract_semantics, outcomes, raw_payload,
+                    liquidity, volume_24h, total_volume, open_interest, semantic_fingerprint
+                ) VALUES %s
+                ON CONFLICT (venue, external_market_id) DO UPDATE SET
+                    event_catalog_id=EXCLUDED.event_catalog_id,
+                    external_event_id=EXCLUDED.external_event_id,
+                    external_series_id=EXCLUDED.external_series_id,
+                    event_title=EXCLUDED.event_title,
+                    market_title=EXCLUDED.market_title,
+                    market_slug=EXCLUDED.market_slug,
+                    category=EXCLUDED.category,
+                    market_type=EXCLUDED.market_type,
+                    sports_market_type=EXCLUDED.sports_market_type,
+                    status='active',
+                    venue_status=EXCLUDED.venue_status,
+                    resolution_time=EXCLUDED.resolution_time,
+                    event_start_time=EXCLUDED.event_start_time,
+                    close_time=EXCLUDED.close_time,
+                    settlement_time=EXCLUDED.settlement_time,
+                    accepting_orders=EXCLUDED.accepting_orders,
+                    rules_url=EXCLUDED.rules_url,
+                    rules_primary=EXCLUDED.rules_primary,
+                    rules_secondary=EXCLUDED.rules_secondary,
+                    native_condition_id=EXCLUDED.native_condition_id,
+                    native_game_id=EXCLUDED.native_game_id,
+                    primary_participant_key=EXCLUDED.primary_participant_key,
+                    line_value=EXCLUDED.line_value,
+                    floor_strike=EXCLUDED.floor_strike,
+                    cap_strike=EXCLUDED.cap_strike,
+                    functional_strike=EXCLUDED.functional_strike,
+                    custom_strike=EXCLUDED.custom_strike,
+                    contract_semantics=EXCLUDED.contract_semantics,
+                    outcomes=EXCLUDED.outcomes,
+                    raw_payload=EXCLUDED.raw_payload,
+                    liquidity=EXCLUDED.liquidity,
+                    volume_24h=EXCLUDED.volume_24h,
+                    total_volume=EXCLUDED.total_volume,
+                    open_interest=EXCLUDED.open_interest,
+                    semantic_fingerprint=EXCLUDED.semantic_fingerprint,
+                    updated_at=NOW()
+                WHERE existing.semantic_fingerprint IS DISTINCT FROM EXCLUDED.semantic_fingerprint
+                   OR existing.status IS DISTINCT FROM 'active'
+                """,
+                rows, page_size=DATABASE_BATCH_SIZE,
+            )
+
+        processed += len(batch)
+        if processed % 5000 < len(batch):
+            print(f"Incremental catalog: {processed} current markets scanned...")
+
+    retired = {
+        key for key, value in existing.items()
+        if value[1] == "active" and key not in current_keys
+    }
     stats.retired_markets = len(retired)
-    cur.execute("UPDATE public.prediction_market_catalog SET status='inactive', updated_at=NOW() WHERE status='active'")
-    if current_keys:
-        psycopg2.extras.execute_values(
-            cur,
-            """
-            UPDATE public.prediction_market_catalog AS m
-            SET status='active', updated_at=NOW()
-            FROM (VALUES %s) AS seen(venue, external_market_id)
-            WHERE m.venue=seen.venue AND m.external_market_id=seen.external_market_id
-            """,
-            list(current_keys), page_size=DATABASE_BATCH_SIZE,
-        )
+
+    # CURRENT-ONLY: stale rows are deleted after the complete validated
+    # snapshot has been upserted. Do not spend I/O marking them inactive first.
     return processed, current_keys
 
+
+def _delete_retired_snapshot_rows(
+    cur,
+    retired_market_keys: Set[Tuple[str, str]],
+    retired_event_keys: Set[Tuple[str, str]],
+    retired_entity_keys: Set[Tuple[str, str]],
+) -> Dict[str, int]:
+    """Delete only rows proven stale by the in-memory snapshot diff.
+
+    The previous implementation wrote every current market/event/entity key into
+    temporary tables and anti-joined the full catalog on every refresh. With a
+    ~390k-market universe that created avoidable database I/O even when only a
+    small number of contracts had actually disappeared.
+
+    This version uses the already-computed Python diff and sends only retired
+    keys to Postgres. No inactive rows are created; stale rows are physically
+    deleted. Markets are deleted before events so event cascades cannot surprise
+    the catalog, and manually/canonically linked entities remain protected.
+    """
+
+    deleted_markets = 0
+    deleted_events = 0
+    deleted_entities = 0
+
+    market_keys = sorted(retired_market_keys)
+    for index in range(0, len(market_keys), DATABASE_BATCH_SIZE):
+        chunk = market_keys[index:index + DATABASE_BATCH_SIZE]
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            DELETE FROM public.prediction_market_catalog AS market_row
+            USING (VALUES %s) AS stale(venue, external_market_id)
+            WHERE market_row.venue = stale.venue
+              AND market_row.external_market_id = stale.external_market_id
+            """,
+            chunk,
+            page_size=DATABASE_BATCH_SIZE,
+        )
+        deleted_markets += max(int(cur.rowcount or 0), 0)
+
+    event_keys = sorted(retired_event_keys)
+    for index in range(0, len(event_keys), DATABASE_BATCH_SIZE):
+        chunk = event_keys[index:index + DATABASE_BATCH_SIZE]
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            DELETE FROM public.prediction_market_events AS event_row
+            USING (VALUES %s) AS stale(venue, external_event_id)
+            WHERE event_row.venue = stale.venue
+              AND event_row.external_event_id = stale.external_event_id
+            """,
+            chunk,
+            page_size=DATABASE_BATCH_SIZE,
+        )
+        deleted_events += max(int(cur.rowcount or 0), 0)
+
+    entity_keys = sorted(retired_entity_keys)
+    for index in range(0, len(entity_keys), DATABASE_BATCH_SIZE):
+        chunk = entity_keys[index:index + DATABASE_BATCH_SIZE]
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            DELETE FROM public.prediction_market_entities AS entity_row
+            USING (VALUES %s) AS stale(venue, external_entity_id)
+            WHERE entity_row.venue = stale.venue
+              AND entity_row.external_entity_id = stale.external_entity_id
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM public.prediction_market_entity_links AS canonical
+                  WHERE canonical.entity_id = entity_row.id
+              )
+            """,
+            chunk,
+            page_size=DATABASE_BATCH_SIZE,
+        )
+        deleted_entities += max(int(cur.rowcount or 0), 0)
+
+    return {
+        "deletedMarkets": deleted_markets,
+        "deletedEvents": deleted_events,
+        "deletedEntities": deleted_entities,
+    }
+
+
+def _validate_snapshot_retention_against_existing(
+    state: Dict[str, Any],
+    summary: SnapshotSummary,
+) -> None:
+    """Abort an implausible venue collapse before any destructive writes.
+
+    Absolute validation floors protect an empty/near-empty API response. This
+    relative guard protects the I/O budget when a venue returns a large-looking
+    but still badly partial response (for example 55k instead of 175k markets).
+    """
+    existing_counts = {"polymarket": 0, "kalshi": 0}
+    for venue, _external_market_id in state["markets"].keys():
+        if venue in existing_counts:
+            existing_counts[venue] += 1
+
+    incoming_counts = {
+        "polymarket": int(summary.polymarket_markets),
+        "kalshi": int(summary.kalshi_markets),
+    }
+
+    for venue in ("polymarket", "kalshi"):
+        previous = existing_counts[venue]
+        incoming = incoming_counts[venue]
+        if previous <= 0 or MIN_VENUE_RETAIN_FRACTION <= 0:
+            continue
+        minimum_allowed = int(previous * MIN_VENUE_RETAIN_FRACTION)
+        if incoming < minimum_allowed:
+            raise RuntimeError(
+                f"{venue} snapshot collapse guard: downloaded {incoming} markets "
+                f"versus {previous} currently published; minimum allowed at "
+                f"retain fraction {MIN_VENUE_RETAIN_FRACTION:.2f} is "
+                f"{minimum_allowed}. Aborting before catalog deletion."
+            )
 
 def _apply_database_snapshot_once(
     paths: SnapshotPaths,
     summary: SnapshotSummary,
 ) -> Tuple[int, SnapshotApplyStats]:
-    """Incrementally upsert the validated snapshot while preserving stable DB IDs."""
+    """Apply one validated current-only snapshot while preserving stable IDs for rows that remain current."""
     conn = get_db_connection_dict()
     stats = SnapshotApplyStats()
     try:
@@ -2710,16 +3005,39 @@ def _apply_database_snapshot_once(
                 raise RuntimeError("Another prediction-market catalog refresh is already running.")
             ensure_snapshot_schema(cur)
             state = _existing_catalog_state(cur)
+            _validate_snapshot_retention_against_existing(state, summary)
             entity_ids = _upsert_entities_incremental(cur, paths, state["entities"], stats)
-            event_ids, _ = _upsert_events_incremental(cur, paths, state["events"], stats)
+            event_ids, current_event_keys = _upsert_events_incremental(
+                cur, paths, state["events"], stats
+            )
             relationships_inserted = _replace_event_links_incremental(
                 cur, paths, event_ids, entity_ids, state["links"], stats
             )
-            markets_processed, _ = _upsert_markets_incremental(cur, paths, event_ids, state["markets"], stats)
+            markets_processed, current_market_keys = _upsert_markets_incremental(
+                cur, paths, event_ids, state["markets"], stats
+            )
             if markets_processed != summary.total_markets:
                 raise RuntimeError(
                     f"Market upsert count mismatch: expected {summary.total_markets}, processed {markets_processed}."
                 )
+
+            retired_market_keys = set(state["markets"]) - current_market_keys
+            retired_event_keys = set(state["events"]) - current_event_keys
+            retired_entity_keys = set(state["entities"]) - set(entity_ids)
+
+            prune_stats = _delete_retired_snapshot_rows(
+                cur,
+                retired_market_keys=retired_market_keys,
+                retired_event_keys=retired_event_keys,
+                retired_entity_keys=retired_entity_keys,
+            )
+            print(
+                "Current-only direct prune: "
+                f"{prune_stats['deletedMarkets']} stale markets deleted, "
+                f"{prune_stats['deletedEvents']} stale events deleted, "
+                f"{prune_stats['deletedEntities']} stale unprotected entities deleted."
+            )
+
             cur.execute(
                 """
                 INSERT INTO public.prediction_market_ingest_runs (

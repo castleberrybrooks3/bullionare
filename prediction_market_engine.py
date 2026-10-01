@@ -37,7 +37,7 @@ from prediction_market_settlement import (
 )
 
 
-ENGINE_VERSION = "native-exact-v20.27-us-link-resolver"
+ENGINE_VERSION = "native-exact-v20.28-us-link-memory-safe"
 
 
 MATCH_CACHE_VERSION = "exact-pair-cache-v3-cfb-contract-bridge"
@@ -62,6 +62,14 @@ POLYMARKET_US_PAGE_SIZE = max(
 POLYMARKET_US_MAX_EVENTS = max(
     POLYMARKET_US_PAGE_SIZE,
     int(os.getenv("POLYMARKET_US_MAX_EVENTS", "20000")),
+)
+POLYMARKET_US_SEARCH_CACHE_MAX_KEYS = max(
+    32,
+    int(os.getenv("POLYMARKET_US_SEARCH_CACHE_MAX_KEYS", "256")),
+)
+POLYMARKET_US_SEARCH_RESULT_LIMIT = max(
+    5,
+    min(25, int(os.getenv("POLYMARKET_US_SEARCH_RESULT_LIMIT", "12"))),
 )
 KALSHI_API_URL = "https://external-api.kalshi.com/trade-api/v2"
 REQUEST_TIMEOUT_SECONDS = 20
@@ -9010,6 +9018,56 @@ def _polymarket_us_event_start(event: Mapping[str, Any]) -> Optional[datetime]:
     )
 
 
+def _slim_polymarket_us_market(row: Mapping[str, Any]) -> Dict[str, Any]:
+    # The US API market objects can contain substantial metadata that the link
+    # resolver never reads. Retain only fields required for equivalence checks
+    # so the URL cache cannot duplicate the full US trading catalog in memory.
+    return {
+        key: row.get(key)
+        for key in (
+            "id",
+            "slug",
+            "title",
+            "outcome",
+            "sportsMarketType",
+            "sports_market_type",
+            "marketType",
+            "market_type",
+            "active",
+            "closed",
+        )
+        if key in row
+    }
+
+
+def _slim_polymarket_us_event(row: Mapping[str, Any]) -> Dict[str, Any]:
+    raw_markets = row.get("markets")
+    markets = []
+    if isinstance(raw_markets, list):
+        markets = [
+            _slim_polymarket_us_market(market)
+            for market in raw_markets
+            if isinstance(market, Mapping)
+        ]
+
+    slim = {
+        key: row.get(key)
+        for key in (
+            "id",
+            "slug",
+            "title",
+            "startTime",
+            "start_time",
+            "eventStartTime",
+            "active",
+            "closed",
+        )
+        if key in row
+    }
+    slim["markets"] = markets
+    return slim
+
+
 def _polymarket_us_active_markets(
     event: Mapping[str, Any],
 ) -> List[Mapping[str, Any]]:
@@ -9108,7 +9166,11 @@ def _load_polymarket_us_events() -> List[Mapping[str, Any]]:
             if not isinstance(batch, list):
                 raise ValueError("Polymarket US /v1/events returned no events list")
 
-            clean_batch = [row for row in batch if isinstance(row, dict)]
+            clean_batch = [
+                _slim_polymarket_us_event(row)
+                for row in batch
+                if isinstance(row, Mapping)
+            ]
             events.extend(clean_batch)
             pages_loaded += 1
             if not batch:
@@ -9163,7 +9225,7 @@ def _search_polymarket_us_events(query: Any) -> List[Mapping[str, Any]]:
             f"{POLYMARKET_US_GATEWAY_URL}/v1/search",
             params={
                 "query": query_text,
-                "limit": 50,
+                "limit": POLYMARKET_US_SEARCH_RESULT_LIMIT,
                 "page": 1,
             },
             headers={
@@ -9177,9 +9239,9 @@ def _search_polymarket_us_events(query: Any) -> List[Mapping[str, Any]]:
         raw_rows = payload.get("events") if isinstance(payload, dict) else None
         if isinstance(raw_rows, list):
             rows = [
-                row
+                _slim_polymarket_us_event(row)
                 for row in raw_rows
-                if isinstance(row, dict)
+                if isinstance(row, Mapping)
                 and row.get("closed") is not True
                 and row.get("active") is not False
             ]
@@ -9188,6 +9250,15 @@ def _search_polymarket_us_events(query: Any) -> List[Mapping[str, Any]]:
 
     with _POLYMARKET_US_LINK_CACHE_LOCK:
         _POLYMARKET_US_SEARCH_CACHE[query_key] = (time.time(), rows)
+        # Keep the cache strictly bounded. Python dicts preserve insertion
+        # order, so evict the oldest search keys first. The per-market URL
+        # cache remains the long-lived compact result.
+        while (
+            len(_POLYMARKET_US_SEARCH_CACHE)
+            > POLYMARKET_US_SEARCH_CACHE_MAX_KEYS
+        ):
+            oldest_key = next(iter(_POLYMARKET_US_SEARCH_CACHE))
+            _POLYMARKET_US_SEARCH_CACHE.pop(oldest_key, None)
     return list(rows)
 
 
@@ -9458,6 +9529,9 @@ def polymarket_us_link_diagnostics() -> Dict[str, Any]:
             "titleKeys": len(_POLYMARKET_US_LINK_CACHE.get("title_index", {})),
             "cfbMatchupKeys": len(_POLYMARKET_US_LINK_CACHE.get("cfb_matchup_index", {})),
             "searchCacheKeys": len(_POLYMARKET_US_SEARCH_CACHE),
+            "searchCacheMaxKeys": POLYMARKET_US_SEARCH_CACHE_MAX_KEYS,
+            "searchResultLimit": POLYMARKET_US_SEARCH_RESULT_LIMIT,
+            "memorySafeSlimCache": True,
             "marketUrlCacheKeys": len(_POLYMARKET_US_MARKET_URL_CACHE),
         }
 

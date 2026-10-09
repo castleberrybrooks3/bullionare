@@ -184,6 +184,17 @@ class BacktestRequest(BaseModel):
     range: str = "1Y"
     positions: List[StrategyPosition]
 
+class Sp500RankBacktestRequest(BaseModel):
+    benchmark: str = "SPY"
+    range: str = "5Y"
+    top_n: int = 5
+    rebalance_months: int = 3
+    include_taxes: bool = False
+    tax_account_type: str = "taxable"
+    tax_filing_status: str = "single"
+    taxable_income: float = 150000.0
+    tax_starting_portfolio: float = 10000.0
+
 def get_client_ip(request):
     forwarded_for = request.headers.get("x-forwarded-for")
     if forwarded_for:
@@ -4097,13 +4108,14 @@ def _safe_ratio(numerator, denominator):
         return None
     return float(numerator) / float(denominator)
 
-
 def calculate_backtest_quant_metrics(
-    strategy_returns,
-    benchmark_returns,
-    max_drawdown,
-    range_key,
+        strategy_returns,
+        benchmark_returns,
+        max_drawdown,
+        range_key,
+        periods_per_year_override=None,
 ):
+
     """
     Calculate standard risk-adjusted portfolio metrics from the same period
     return series used by the Bullionaire strategy backtest.
@@ -4120,7 +4132,11 @@ def calculate_backtest_quant_metrics(
         "1Y": 252,
         "5Y": 52,
     }
-    periods_per_year = float(periods_per_year_map.get(range_key, 252))
+    periods_per_year = float(
+        periods_per_year_override
+        if periods_per_year_override is not None
+        else periods_per_year_map.get(range_key, 252)
+    )
 
     paired = [
         (float(strategy_return), float(benchmark_return))
@@ -6410,6 +6426,2250 @@ def get_stock_sparklines(request: Request, tickers: str = Query(...)):
 
     except Exception as e:
         print(f"[ERROR] /stocks/sparklines -> {type(e).__name__}: {e}")
+        return safe_server_error_message()
+
+RANK_BACKTEST_PRICE_CACHE = {}
+RANK_BACKTEST_PRICE_CACHE_LOCK = threading.Lock()
+RANK_BACKTEST_PRICE_CACHE_TTL_SECONDS = 60 * 15
+
+
+def fetch_daily_close_map(ticker, start_date, end_date):
+    clean_ticker = str(ticker or "").strip().upper()
+
+    if not clean_ticker:
+        return {}
+
+    start_text = start_date.isoformat()
+    end_text = end_date.isoformat()
+
+    cache_key = (
+        clean_ticker,
+        start_text,
+        end_text,
+    )
+
+    now = time.time()
+
+    with RANK_BACKTEST_PRICE_CACHE_LOCK:
+        cached = RANK_BACKTEST_PRICE_CACHE.get(cache_key)
+
+        if (
+            cached
+            and now - cached.get("time", 0)
+            < RANK_BACKTEST_PRICE_CACHE_TTL_SECONDS
+        ):
+            return cached.get("data", {})
+
+    data = get_polygon_json(
+        (
+            f"/v2/aggs/ticker/{clean_ticker}"
+            f"/range/1/day/{start_text}/{end_text}"
+        ),
+        {
+            "adjusted": "true",
+            "sort": "asc",
+            "limit": 50000,
+        },
+        timeout=30,
+    )
+
+    result = {}
+
+    if data and data.get("results"):
+        for bar in data["results"]:
+            timestamp = bar.get("t")
+            close_price = bar.get("c")
+
+            if timestamp is None or close_price is None:
+                continue
+
+            try:
+                day = datetime.utcfromtimestamp(
+                    float(timestamp) / 1000
+                ).date()
+
+                close_value = float(close_price)
+
+                if close_value > 0:
+                    result[day] = close_value
+            except Exception:
+                continue
+
+    with RANK_BACKTEST_PRICE_CACHE_LOCK:
+        RANK_BACKTEST_PRICE_CACHE[cache_key] = {
+            "time": now,
+            "data": result,
+        }
+
+        _prune_timed_cache_locked(
+            RANK_BACKTEST_PRICE_CACHE,
+            now,
+            RANK_BACKTEST_PRICE_CACHE_TTL_SECONDS,
+            500,
+        )
+
+    return result
+
+
+def get_sp500_rank_snapshot_dates():
+    conn = None
+
+    try:
+        conn = get_db_connection_dict()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT DISTINCT snapshot_date
+            FROM sp500_company_rank_history
+            WHERE company_rank IS NOT NULL
+            ORDER BY snapshot_date ASC
+            """
+        )
+
+        rows = cursor.fetchall()
+
+        return [
+            row["snapshot_date"]
+            for row in rows
+            if row.get("snapshot_date") is not None
+        ]
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_sp500_top_companies(snapshot_date, top_n):
+    conn = None
+
+    try:
+        conn = get_db_connection_dict()
+        cursor = conn.cursor()
+
+        cursor.execute(
+            """
+            SELECT
+                snapshot_date,
+                company_rank,
+                cik,
+                company_name,
+                representative_ticker
+            FROM sp500_company_rank_history
+            WHERE snapshot_date = %s
+              AND company_rank IS NOT NULL
+              AND company_rank <= %s
+            ORDER BY company_rank ASC
+            """,
+            (
+                snapshot_date,
+                int(top_n),
+            ),
+        )
+
+        return cursor.fetchall()
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_sp500_top_companies_for_snapshots(snapshot_dates, top_n):
+    if not snapshot_dates:
+        return {}
+
+    conn = None
+
+    try:
+        conn = get_db_connection_dict()
+        cursor = conn.cursor()
+
+        placeholders = ",".join(
+            ["%s"] * len(snapshot_dates)
+        )
+
+        cursor.execute(
+            f"""
+            SELECT
+                snapshot_date,
+                company_rank,
+                cik,
+                company_name,
+                representative_ticker
+            FROM sp500_company_rank_history
+            WHERE snapshot_date IN ({placeholders})
+              AND company_rank IS NOT NULL
+              AND company_rank <= %s
+            ORDER BY snapshot_date ASC, company_rank ASC
+            """,
+            list(snapshot_dates) + [int(top_n)],
+        )
+
+        result = {
+            snapshot_date: []
+            for snapshot_date in snapshot_dates
+        }
+
+        for row in cursor.fetchall():
+            snapshot_date = row["snapshot_date"]
+            result.setdefault(snapshot_date, []).append(row)
+
+        return result
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def get_sp500_company_ticker_history(
+    ciks,
+    start_date,
+    end_date,
+):
+    if not ciks:
+        return {}
+
+    conn = None
+
+    try:
+        conn = get_db_connection_dict()
+        cursor = conn.cursor()
+
+        placeholders = ",".join(["%s"] * len(ciks))
+
+        cursor.execute(
+            f"""
+            SELECT
+                cik,
+                snapshot_date,
+                representative_ticker
+            FROM sp500_company_rank_history
+            WHERE cik IN ({placeholders})
+              AND snapshot_date >= %s
+              AND snapshot_date <= %s
+              AND representative_ticker IS NOT NULL
+              AND representative_ticker <> ''
+            ORDER BY cik, snapshot_date
+            """,
+            list(ciks) + [
+                start_date,
+                end_date,
+            ],
+        )
+
+        rows = cursor.fetchall()
+
+        result = {}
+
+        for row in rows:
+            cik = str(row["cik"])
+            ticker = str(
+                row["representative_ticker"]
+            ).strip().upper()
+
+            if not ticker:
+                continue
+
+            result.setdefault(cik, [])
+
+            if ticker not in result[cik]:
+                result[cik].append(ticker)
+
+        return result
+
+    finally:
+        if conn:
+            conn.close()
+
+
+def choose_company_price(
+    cik,
+    primary_ticker,
+    day,
+    ticker_history,
+    price_maps,
+):
+    candidates = []
+
+    clean_primary = str(
+        primary_ticker or ""
+    ).strip().upper()
+
+    if clean_primary:
+        candidates.append(clean_primary)
+
+    for ticker in ticker_history.get(str(cik), []):
+        clean = str(ticker).strip().upper()
+
+        if clean and clean not in candidates:
+            candidates.append(clean)
+
+    for ticker in candidates:
+        ticker_prices = price_maps.get(ticker, {})
+
+        price = ticker_prices.get(day)
+
+        if price is not None and price > 0:
+            return price, ticker
+
+    return None, None
+
+
+SP500_TAX_RULES_2026 = {
+    "single": {
+        "ordinary": [
+            (12400.0, 0.10),
+            (50400.0, 0.12),
+            (105700.0, 0.22),
+            (201775.0, 0.24),
+            (256225.0, 0.32),
+            (640600.0, 0.35),
+            (float("inf"), 0.37),
+        ],
+        "ltcg_zero_max": 49450.0,
+        "ltcg_fifteen_max": 545500.0,
+        "niit_threshold": 200000.0,
+        "capital_loss_deduction": 3000.0,
+    },
+    "mfj": {
+        "ordinary": [
+            (24800.0, 0.10),
+            (100800.0, 0.12),
+            (211400.0, 0.22),
+            (403550.0, 0.24),
+            (512450.0, 0.32),
+            (768700.0, 0.35),
+            (float("inf"), 0.37),
+        ],
+        "ltcg_zero_max": 98900.0,
+        "ltcg_fifteen_max": 613700.0,
+        "niit_threshold": 250000.0,
+        "capital_loss_deduction": 3000.0,
+    },
+    "mfs": {
+        "ordinary": [
+            (12400.0, 0.10),
+            (50400.0, 0.12),
+            (105700.0, 0.22),
+            (201775.0, 0.24),
+            (256225.0, 0.32),
+            (384350.0, 0.35),
+            (float("inf"), 0.37),
+        ],
+        "ltcg_zero_max": 49450.0,
+        "ltcg_fifteen_max": 306850.0,
+        "niit_threshold": 125000.0,
+        "capital_loss_deduction": 1500.0,
+    },
+    "hoh": {
+        "ordinary": [
+            (17700.0, 0.10),
+            (67450.0, 0.12),
+            (105700.0, 0.22),
+            (201750.0, 0.24),
+            (256200.0, 0.32),
+            (640600.0, 0.35),
+            (float("inf"), 0.37),
+        ],
+        "ltcg_zero_max": 66200.0,
+        "ltcg_fifteen_max": 579600.0,
+        "niit_threshold": 200000.0,
+        "capital_loss_deduction": 3000.0,
+    },
+}
+
+
+def _sp500_tax_rules(status):
+    return SP500_TAX_RULES_2026.get(
+        str(status or "single").lower(),
+        SP500_TAX_RULES_2026["single"],
+    )
+
+
+def _sp500_ordinary_tax_2026(status, taxable_income):
+    income = max(0.0, float(taxable_income or 0.0))
+    rules = _sp500_tax_rules(status)
+    total = 0.0
+    lower = 0.0
+
+    for upper, rate in rules["ordinary"]:
+        if income <= lower:
+            break
+        taxable_slice = min(income, upper) - lower
+        if taxable_slice > 0:
+            total += taxable_slice * rate
+        if income <= upper:
+            break
+        lower = upper
+
+    return max(0.0, total)
+
+
+def _sp500_ltcg_tax_2026(status, ordinary_taxable_income, long_term_gain):
+    gain = max(0.0, float(long_term_gain or 0.0))
+    if gain <= 0:
+        return 0.0
+
+    ordinary_income = max(0.0, float(ordinary_taxable_income or 0.0))
+    rules = _sp500_tax_rules(status)
+    zero_max = rules["ltcg_zero_max"]
+    fifteen_max = rules["ltcg_fifteen_max"]
+
+    zero_room = max(0.0, zero_max - ordinary_income)
+    zero_amount = min(gain, zero_room)
+    remaining = gain - zero_amount
+
+    income_after_zero = ordinary_income + zero_amount
+    fifteen_room = max(0.0, fifteen_max - income_after_zero)
+    fifteen_amount = min(remaining, fifteen_room)
+    remaining -= fifteen_amount
+
+    return fifteen_amount * 0.15 + remaining * 0.20
+
+
+def _sp500_niit_estimate_2026(status, base_income, investment_income):
+    investment = max(0.0, float(investment_income or 0.0))
+    if investment <= 0:
+        return 0.0
+
+    rules = _sp500_tax_rules(status)
+    threshold = rules["niit_threshold"]
+    # The UI asks for taxable income rather than MAGI. Treating taxable income
+    # as a MAGI proxy makes this an estimate, which is disclosed in the response.
+    proxy_magi = max(0.0, float(base_income or 0.0)) + investment
+    excess = max(0.0, proxy_magi - threshold)
+    return 0.038 * min(investment, excess)
+
+
+def _sp500_cross_net_capital(st_amount, lt_amount):
+    st = float(st_amount or 0.0)
+    lt = float(lt_amount or 0.0)
+
+    if st > 0 and lt < 0:
+        offset = min(st, -lt)
+        st -= offset
+        lt += offset
+    elif st < 0 and lt > 0:
+        offset = min(-st, lt)
+        st += offset
+        lt -= offset
+
+    return st, lt
+
+
+def _sp500_calculate_tax_years(
+    realized_by_year,
+    first_year,
+    last_year,
+    filing_status,
+    taxable_income,
+):
+    base_income = max(0.0, float(taxable_income or 0.0))
+    rules = _sp500_tax_rules(filing_status)
+    loss_limit = rules["capital_loss_deduction"]
+
+    st_carry = 0.0
+    lt_carry = 0.0
+    yearly = []
+    total_tax = 0.0
+    total_niit = 0.0
+    total_loss_benefit = 0.0
+
+    for year in range(int(first_year), int(last_year) + 1):
+        raw = realized_by_year.get(year, {})
+        raw_st = float(raw.get("short", 0.0) or 0.0)
+        raw_lt = float(raw.get("long", 0.0) or 0.0)
+
+        st = raw_st + st_carry
+        lt = raw_lt + lt_carry
+        st, lt = _sp500_cross_net_capital(st, lt)
+
+        ordinary_tax = 0.0
+        ltcg_tax = 0.0
+        niit_tax = 0.0
+        loss_tax_benefit = 0.0
+        loss_deduction = 0.0
+
+        if st >= 0 and lt >= 0:
+            taxable_st = st
+            taxable_lt = lt
+            ordinary_tax = (
+                _sp500_ordinary_tax_2026(
+                    filing_status,
+                    base_income + taxable_st,
+                )
+                - _sp500_ordinary_tax_2026(
+                    filing_status,
+                    base_income,
+                )
+            )
+            ltcg_tax = _sp500_ltcg_tax_2026(
+                filing_status,
+                base_income + taxable_st,
+                taxable_lt,
+            )
+            niit_tax = _sp500_niit_estimate_2026(
+                filing_status,
+                base_income,
+                taxable_st + taxable_lt,
+            )
+            st_carry = 0.0
+            lt_carry = 0.0
+        else:
+            total_loss = max(0.0, -(st + lt))
+            loss_deduction = min(total_loss, loss_limit, base_income)
+
+            if loss_deduction > 0:
+                loss_tax_benefit = (
+                    _sp500_ordinary_tax_2026(
+                        filing_status,
+                        base_income,
+                    )
+                    - _sp500_ordinary_tax_2026(
+                        filing_status,
+                        max(0.0, base_income - loss_deduction),
+                    )
+                )
+
+                remaining_deduction = loss_deduction
+                if st < 0 and remaining_deduction > 0:
+                    used = min(-st, remaining_deduction)
+                    st += used
+                    remaining_deduction -= used
+                if lt < 0 and remaining_deduction > 0:
+                    used = min(-lt, remaining_deduction)
+                    lt += used
+                    remaining_deduction -= used
+
+            st_carry = min(0.0, st)
+            lt_carry = min(0.0, lt)
+
+        year_tax = max(0.0, ordinary_tax + ltcg_tax + niit_tax - loss_tax_benefit)
+        total_tax += year_tax
+        total_niit += niit_tax
+        total_loss_benefit += loss_tax_benefit
+
+        yearly.append({
+            "year": year,
+            "shortTermNetRealized": raw_st,
+            "longTermNetRealized": raw_lt,
+            "grossRealizedGains": float(raw.get("gross_gains", 0.0) or 0.0),
+            "realizedLosses": float(raw.get("gross_losses", 0.0) or 0.0),
+            "ordinaryIncomeTax": ordinary_tax,
+            "longTermCapitalGainsTax": ltcg_tax,
+            "niitEstimate": niit_tax,
+            "capitalLossDeduction": loss_deduction,
+            "capitalLossTaxBenefit": loss_tax_benefit,
+            "estimatedFederalTax": year_tax,
+            "shortTermCarryforward": st_carry,
+            "longTermCarryforward": lt_carry,
+        })
+
+    return {
+        "totalTax": total_tax,
+        "totalNiit": total_niit,
+        "totalLossTaxBenefit": total_loss_benefit,
+        "shortTermCarryforward": st_carry,
+        "longTermCarryforward": lt_carry,
+        "yearly": yearly,
+    }
+
+
+def _sp500_price_on_or_before(
+    cik,
+    primary_ticker,
+    day,
+    ticker_history,
+    price_maps,
+):
+    exact_price, exact_ticker = choose_company_price(
+        cik,
+        primary_ticker,
+        day,
+        ticker_history,
+        price_maps,
+    )
+    if exact_price is not None:
+        return exact_price, exact_ticker
+
+    candidates = []
+    primary = str(primary_ticker or "").strip().upper()
+    if primary:
+        candidates.append(primary)
+    for ticker in ticker_history.get(str(cik), []):
+        clean = str(ticker or "").strip().upper()
+        if clean and clean not in candidates:
+            candidates.append(clean)
+
+    best_day = None
+    best_price = None
+    best_ticker = None
+
+    for ticker in candidates:
+        ticker_prices = price_maps.get(ticker, {}) or {}
+        for price_day, price in ticker_prices.items():
+            if price_day > day or price is None or price <= 0:
+                continue
+            if best_day is None or price_day > best_day:
+                best_day = price_day
+                best_price = float(price)
+                best_ticker = ticker
+
+    return best_price, best_ticker
+
+
+def _sp500_sell_fifo(
+    lots,
+    shares_to_sell,
+    sale_price,
+    sale_date,
+    realized_by_year,
+):
+    remaining = max(0.0, float(shares_to_sell or 0.0))
+    proceeds = 0.0
+    tolerance = 1e-12
+
+    while remaining > tolerance and lots:
+        lot = lots[0]
+        lot_shares = max(0.0, float(lot.get("shares", 0.0) or 0.0))
+        if lot_shares <= tolerance:
+            lots.pop(0)
+            continue
+
+        sold = min(lot_shares, remaining)
+        cost = float(lot.get("cost", 0.0) or 0.0)
+        gain = (float(sale_price) - cost) * sold
+        acquired = lot.get("acquired")
+        days_held = (sale_date - acquired).days if acquired else 0
+        bucket = "long" if days_held > 365 else "short"
+
+        year_row = realized_by_year.setdefault(
+            sale_date.year,
+            {
+                "short": 0.0,
+                "long": 0.0,
+                "gross_gains": 0.0,
+                "gross_losses": 0.0,
+                "sale_orders": 0,
+            },
+        )
+        year_row[bucket] += gain
+        if gain >= 0:
+            year_row["gross_gains"] += gain
+        else:
+            year_row["gross_losses"] += -gain
+
+        proceeds += float(sale_price) * sold
+        remaining -= sold
+        lot["shares"] = lot_shares - sold
+
+        if lot["shares"] <= tolerance:
+            lots.pop(0)
+
+    return proceeds
+
+
+def _sp500_build_scaled_after_tax_path(
+    strategy_points,
+    realized_by_year,
+    filing_status,
+    taxable_income,
+    starting_portfolio,
+):
+    """
+    Build a tax-adjusted strategy path entirely in the backend.
+
+    The raw ranking backtest is normalized to 100.  Taxes are estimated from
+    the FIFO realized-gain ledger, paid at the final observation of each tax
+    year, and therefore reduce the capital that compounds in following years.
+    Realized gains/losses for later years are scaled by the capital remaining
+    after prior-year tax payments.  This keeps the displayed path, return,
+    outperformance, and tax breakdown internally consistent.
+    """
+    if not strategy_points:
+        return {
+            "points": [],
+            "yearly": [],
+            "totalTax": 0.0,
+            "totalNiit": 0.0,
+            "totalLossTaxBenefit": 0.0,
+            "shortTermCarryforward": 0.0,
+            "longTermCarryforward": 0.0,
+            "endingValue": float(starting_portfolio or 0.0),
+            "capitalScaleEnd": 1.0,
+        }
+
+    start_value = max(1.0, float(starting_portfolio or 10000.0))
+    base_income = max(0.0, float(taxable_income or 0.0))
+    filing = str(filing_status or "single").strip().lower()
+    rules = _sp500_tax_rules(filing)
+    loss_limit = rules["capital_loss_deduction"]
+
+    def point_year(point):
+        raw = point.get("time")
+        if raw is None:
+            return None
+        try:
+            return datetime.fromtimestamp(float(raw) / 1000.0).year
+        except Exception:
+            return None
+
+    last_index_by_year = {}
+    for index, point in enumerate(strategy_points):
+        year = point_year(point)
+        if year is not None:
+            last_index_by_year[year] = index
+
+    years = sorted(last_index_by_year)
+    if not years:
+        return {
+            "points": list(strategy_points),
+            "yearly": [],
+            "totalTax": 0.0,
+            "totalNiit": 0.0,
+            "totalLossTaxBenefit": 0.0,
+            "shortTermCarryforward": 0.0,
+            "longTermCarryforward": 0.0,
+            "endingValue": start_value * (float(strategy_points[-1]["strategy"]) / 100.0),
+            "capitalScaleEnd": 1.0,
+        }
+
+    st_carry = 0.0
+    lt_carry = 0.0
+    scale_at_start = 1.0
+    total_tax = 0.0
+    total_niit = 0.0
+    total_loss_benefit = 0.0
+    yearly = []
+    year_scales = {}
+
+    for year in years:
+        raw = realized_by_year.get(year, {}) or {}
+
+        # All trades within a tax year inherit the capital scale produced by
+        # taxes paid in prior years.  Because the strategy is equal-weighted,
+        # proportional scaling preserves the same holdings and return path.
+        raw_st = float(raw.get("short", 0.0) or 0.0) * scale_at_start
+        raw_lt = float(raw.get("long", 0.0) or 0.0) * scale_at_start
+        raw_gross_gains = float(raw.get("gross_gains", 0.0) or 0.0) * scale_at_start
+        raw_gross_losses = float(raw.get("gross_losses", 0.0) or 0.0) * scale_at_start
+
+        st = raw_st + st_carry
+        lt = raw_lt + lt_carry
+        st, lt = _sp500_cross_net_capital(st, lt)
+
+        ordinary_tax = 0.0
+        ltcg_tax = 0.0
+        niit_tax = 0.0
+        loss_tax_benefit = 0.0
+        loss_deduction = 0.0
+
+        if st >= 0 and lt >= 0:
+            taxable_st = st
+            taxable_lt = lt
+            ordinary_tax = (
+                _sp500_ordinary_tax_2026(
+                    filing,
+                    base_income + taxable_st,
+                )
+                - _sp500_ordinary_tax_2026(
+                    filing,
+                    base_income,
+                )
+            )
+            ltcg_tax = _sp500_ltcg_tax_2026(
+                filing,
+                base_income + taxable_st,
+                taxable_lt,
+            )
+            niit_tax = _sp500_niit_estimate_2026(
+                filing,
+                base_income,
+                taxable_st + taxable_lt,
+            )
+            st_carry = 0.0
+            lt_carry = 0.0
+        else:
+            total_loss = max(0.0, -(st + lt))
+            loss_deduction = min(total_loss, loss_limit, base_income)
+
+            if loss_deduction > 0:
+                loss_tax_benefit = (
+                    _sp500_ordinary_tax_2026(
+                        filing,
+                        base_income,
+                    )
+                    - _sp500_ordinary_tax_2026(
+                        filing,
+                        max(0.0, base_income - loss_deduction),
+                    )
+                )
+
+                remaining_deduction = loss_deduction
+                if st < 0 and remaining_deduction > 0:
+                    used = min(-st, remaining_deduction)
+                    st += used
+                    remaining_deduction -= used
+                if lt < 0 and remaining_deduction > 0:
+                    used = min(-lt, remaining_deduction)
+                    lt += used
+                    remaining_deduction -= used
+
+            st_carry = min(0.0, st)
+            lt_carry = min(0.0, lt)
+
+        year_tax = max(0.0, ordinary_tax + ltcg_tax + niit_tax - loss_tax_benefit)
+
+        year_end_index = last_index_by_year[year]
+        pre_tax_index = float(strategy_points[year_end_index].get("strategy", 100.0) or 100.0)
+        pre_tax_value = start_value * (pre_tax_index / 100.0)
+        value_before_tax = pre_tax_value * scale_at_start
+        value_after_tax = max(0.0, value_before_tax - year_tax)
+
+        if pre_tax_value > 0:
+            scale_at_end = value_after_tax / pre_tax_value
+        else:
+            scale_at_end = scale_at_start
+
+        year_scales[year] = {
+            "start": scale_at_start,
+            "end": scale_at_end,
+            "lastIndex": year_end_index,
+            "tax": year_tax,
+        }
+
+        yearly.append({
+            "year": year,
+            "shortTermNetRealized": raw_st,
+            "longTermNetRealized": raw_lt,
+            "grossRealizedGains": raw_gross_gains,
+            "realizedLosses": raw_gross_losses,
+            "ordinaryIncomeTax": ordinary_tax,
+            "longTermCapitalGainsTax": ltcg_tax,
+            "niitEstimate": niit_tax,
+            "capitalLossDeduction": loss_deduction,
+            "capitalLossTaxBenefit": loss_tax_benefit,
+            "estimatedFederalTax": year_tax,
+            "shortTermCarryforward": st_carry,
+            "longTermCarryforward": lt_carry,
+            "capitalScaleStart": scale_at_start,
+            "capitalScaleEnd": scale_at_end,
+            "yearEndPreTaxValue": pre_tax_value,
+            "yearEndAfterTaxValue": value_after_tax,
+        })
+
+        total_tax += year_tax
+        total_niit += niit_tax
+        total_loss_benefit += loss_tax_benefit
+        scale_at_start = scale_at_end
+
+    adjusted_points = []
+    for index, point in enumerate(strategy_points):
+        year = point_year(point)
+        scale_row = year_scales.get(year)
+        if scale_row is None:
+            scale = 1.0
+            tax_paid = 0.0
+        else:
+            scale = (
+                scale_row["end"]
+                if index == scale_row["lastIndex"]
+                else scale_row["start"]
+            )
+            tax_paid = scale_row["tax"] if index == scale_row["lastIndex"] else 0.0
+
+        adjusted = dict(point)
+        adjusted["preTaxStrategy"] = float(point.get("strategy", 0.0) or 0.0)
+        adjusted["strategy"] = adjusted["preTaxStrategy"] * scale
+        adjusted["taxPaid"] = tax_paid
+        adjusted_points.append(adjusted)
+
+    ending_value = start_value * (float(adjusted_points[-1]["strategy"]) / 100.0)
+
+    return {
+        "points": adjusted_points,
+        "yearly": yearly,
+        "totalTax": total_tax,
+        "totalNiit": total_niit,
+        "totalLossTaxBenefit": total_loss_benefit,
+        "shortTermCarryforward": st_carry,
+        "longTermCarryforward": lt_carry,
+        "endingValue": ending_value,
+        "capitalScaleEnd": scale_at_start,
+    }
+
+
+def _build_sp500_tax_analysis(
+    prepared_periods,
+    ticker_history,
+    price_maps,
+    benchmark_days,
+    starting_portfolio,
+    filing_status,
+    taxable_income,
+    account_type,
+    pre_tax_return,
+    benchmark_return,
+    strategy_points,
+):
+    """
+    Run the tax-aware S&P 500 ranking simulation in the backend.
+
+    Important implementation detail: this is NOT a post-hoc haircut to the
+    pre-tax return.  The taxable-account path is resimulated from the actual
+    rebalance dates and actual holdings.  Each rebalance sells/buys the real
+    equal-weight basket, realized gains are assigned to FIFO tax lots, and
+    federal tax is withdrawn from the portfolio at each simulated year-end.
+    That withdrawal reduces the capital available for every later period.
+
+    For a partial final calendar year, accrued federal tax through the final
+    backtest date is withdrawn on that final date so the reported return is an
+    after-tax-as-of-today return rather than leaving the current year's tax
+    liability outside the portfolio.
+    """
+    start_value = max(1.0, float(starting_portfolio or 10000.0))
+    official_pre_tax_return = float(pre_tax_return or 0.0)
+    official_benchmark_return = float(benchmark_return or 0.0)
+    official_pre_tax_ending_value = (
+        start_value * (1.0 + official_pre_tax_return / 100.0)
+    )
+    account = str(account_type or "taxable").strip().lower()
+    filing = str(filing_status or "single").strip().lower()
+    base_income = max(0.0, float(taxable_income or 0.0))
+
+    if not prepared_periods or not strategy_points:
+        return None
+
+    # Retirement accounts do not incur current capital-gains tax on trades
+    # inside the account.  Keep the exact pre-tax path and metrics.
+    if account in {"traditional_ira", "roth_ira"}:
+        after_tax_points = [dict(point) for point in strategy_points]
+        return {
+            "enabled": True,
+            "accountType": account,
+            "filingStatus": filing,
+            "taxableIncome": base_income,
+            "startingPortfolio": start_value,
+            "preTaxEndingValue": official_pre_tax_ending_value,
+            "afterTaxEndingValue": official_pre_tax_ending_value,
+            "afterTaxEndingValueIfLiquidated": official_pre_tax_ending_value,
+            "preTaxReturn": official_pre_tax_return,
+            "afterTaxReturn": official_pre_tax_return,
+            "preTaxOutperformance": (
+                official_pre_tax_return - official_benchmark_return
+            ),
+            "afterTaxOutperformance": (
+                official_pre_tax_return - official_benchmark_return
+            ),
+            "benchmarkReturn": official_benchmark_return,
+            "taxDragPercentagePoints": 0.0,
+            "liquidationTaxDragPercentagePoints": 0.0,
+            "estimatedFederalTax": 0.0,
+            "estimatedFederalTaxIfLiquidated": 0.0,
+            "liquidationTax": 0.0,
+            "niitEstimate": 0.0,
+            "capitalLossTaxBenefit": 0.0,
+            "shortTermNetRealized": 0.0,
+            "longTermNetRealized": 0.0,
+            "grossRealizedGains": 0.0,
+            "realizedLosses": 0.0,
+            "estimatedUnrealizedGain": 0.0,
+            "shortTermCarryforward": 0.0,
+            "longTermCarryforward": 0.0,
+            "taxableSaleOrders": 0,
+            "yearly": [],
+            "_afterTaxPoints": after_tax_points,
+            "assumptions": [
+                (
+                    "Traditional IRA trades do not create current capital-gains tax; future withdrawal income tax is not modeled."
+                    if account == "traditional_ira"
+                    else "Roth IRA trades do not create current capital-gains tax; qualified tax-free withdrawal treatment is assumed."
+                )
+            ],
+        }
+
+    def point_day(point):
+        try:
+            return datetime.utcfromtimestamp(
+                float(point["time"]) / 1000.0
+            ).date()
+        except Exception:
+            return None
+
+    point_rows = []
+    for point in strategy_points:
+        day = point_day(point)
+        if day is None:
+            continue
+        point_rows.append((day, point))
+
+    if not point_rows:
+        return None
+
+    first_day = point_rows[0][0]
+    final_day = point_rows[-1][0]
+
+    # The response already has the benchmark normalized on the exact dates we
+    # want.  Reuse it verbatim so tax on/off comparisons differ only because of
+    # the strategy's tax treatment.
+    benchmark_value_by_day = {
+        day: float(point["benchmark"])
+        for day, point in point_rows
+    }
+
+    # Last observed trading date in each calendar year.  For the final partial
+    # year this is the current backtest end date, which is when accrued current-
+    # year tax is applied for an after-tax-as-of-end-date result.
+    last_observation_by_year = {}
+    for day, _ in point_rows:
+        last_observation_by_year[day.year] = day
+
+    prepared_by_effective = {
+        period["effective_date"]: period
+        for period in prepared_periods
+    }
+
+    positions = {}
+    cash = start_value
+    last_prices = {}
+    realized_by_year = {}
+    taxes_withdrawn_by_year = {}
+    year_value_before_tax = {}
+    year_value_after_tax = {}
+    year_is_partial = {}
+    tolerance = 1e-10
+
+    first_period = prepared_periods[0]
+    first_holdings = first_period["holdings"]
+    if not first_holdings:
+        return None
+
+    first_target = start_value / len(first_holdings)
+
+    # Establish the initial basket at its effective-date close.  There is no
+    # fabricated return before this close.
+    for holding in first_holdings:
+        cik = str(holding["cik"])
+        start_row = first_period["start_prices"].get(cik)
+        if not start_row:
+            continue
+        price = float(start_row.get("price") or 0.0)
+        if price <= 0:
+            continue
+
+        shares = first_target / price
+        positions[cik] = {
+            "ticker": holding["ticker"],
+            "company": holding["company"],
+            "lots": [
+                {
+                    "shares": shares,
+                    "cost": price,
+                    "acquired": first_day,
+                }
+            ],
+        }
+        last_prices[cik] = price
+        cash -= shares * price
+
+    # Floating point leftovers only.
+    if abs(cash) < 1e-8:
+        cash = 0.0
+
+    def get_price_for_position(cik, position, day):
+        price, used_ticker = choose_company_price(
+            cik,
+            position.get("ticker"),
+            day,
+            ticker_history,
+            price_maps,
+        )
+        if price is not None and price > 0:
+            last_prices[cik] = float(price)
+            if used_ticker:
+                position["ticker"] = used_ticker
+            return float(price)
+        return last_prices.get(cik)
+
+    def portfolio_value_at(day):
+        total = float(cash)
+        for cik, position in positions.items():
+            price = get_price_for_position(cik, position, day)
+            if price is None or price <= 0:
+                continue
+            shares = sum(
+                max(0.0, float(lot.get("shares", 0.0) or 0.0))
+                for lot in position.get("lots", [])
+            )
+            total += shares * price
+        return max(0.0, total)
+
+    def rebalance_at_close(period, day):
+        nonlocal cash
+
+        holdings = period.get("holdings") or []
+        if not holdings:
+            return
+
+        new_holdings = {
+            str(row["cik"]): row
+            for row in holdings
+        }
+
+        current_prices = {}
+        total_value = float(cash)
+
+        # Price the outgoing/continuing portfolio at this execution close.
+        for cik, position in list(positions.items()):
+            price = get_price_for_position(cik, position, day)
+            if price is None or price <= 0:
+                continue
+            current_prices[cik] = price
+            shares = sum(
+                max(0.0, float(lot.get("shares", 0.0) or 0.0))
+                for lot in position.get("lots", [])
+            )
+            total_value += shares * price
+
+        # New names use the already-resolved execution-close price from the
+        # ranking engine if they are not in the outgoing basket.
+        for cik, holding in new_holdings.items():
+            if cik in current_prices:
+                continue
+            start_row = (period.get("start_prices") or {}).get(cik)
+            if start_row and float(start_row.get("price") or 0.0) > 0:
+                price = float(start_row["price"])
+                current_prices[cik] = price
+                last_prices[cik] = price
+
+        if total_value <= 0:
+            return
+
+        target_value = total_value / len(new_holdings)
+
+        # Sell removals and overweight continuing names.  These are the actual
+        # taxable events. FIFO lots determine ST versus LT gain/loss.
+        for cik in list(positions.keys()):
+            position = positions[cik]
+            price = current_prices.get(cik)
+            if price is None or price <= 0:
+                continue
+
+            total_shares = sum(
+                max(0.0, float(lot.get("shares", 0.0) or 0.0))
+                for lot in position.get("lots", [])
+            )
+            current_value = total_shares * price
+            desired_value = target_value if cik in new_holdings else 0.0
+
+            if current_value > desired_value + tolerance:
+                shares_to_sell = min(
+                    total_shares,
+                    max(0.0, (current_value - desired_value) / price),
+                )
+                if shares_to_sell > tolerance:
+                    proceeds = _sp500_sell_fifo(
+                        position["lots"],
+                        shares_to_sell,
+                        price,
+                        day,
+                        realized_by_year,
+                    )
+                    cash += proceeds
+                    year_row = realized_by_year.setdefault(
+                        day.year,
+                        {
+                            "short": 0.0,
+                            "long": 0.0,
+                            "gross_gains": 0.0,
+                            "gross_losses": 0.0,
+                            "sale_orders": 0,
+                        },
+                    )
+                    year_row["sale_orders"] += 1
+
+            if not position.get("lots"):
+                positions.pop(cik, None)
+                last_prices.pop(cik, None)
+
+        # Buy new names and top up continuing underweights at the same close.
+        for cik, holding in new_holdings.items():
+            price = current_prices.get(cik)
+            if price is None or price <= 0:
+                continue
+
+            position = positions.setdefault(
+                cik,
+                {
+                    "ticker": holding["ticker"],
+                    "company": holding["company"],
+                    "lots": [],
+                },
+            )
+            position["ticker"] = holding["ticker"]
+            position["company"] = holding["company"]
+            last_prices[cik] = price
+
+            total_shares = sum(
+                max(0.0, float(lot.get("shares", 0.0) or 0.0))
+                for lot in position.get("lots", [])
+            )
+            current_value = total_shares * price
+            amount_to_buy = max(0.0, target_value - current_value)
+
+            # Do not create leverage if floating-point drift leaves slightly less
+            # cash than the theoretical target.
+            amount_to_buy = min(amount_to_buy, max(0.0, cash))
+
+            if amount_to_buy > tolerance:
+                shares = amount_to_buy / price
+                position["lots"].append(
+                    {
+                        "shares": shares,
+                        "cost": price,
+                        "acquired": day,
+                    }
+                )
+                cash -= amount_to_buy
+
+        if abs(cash) < 1e-8:
+            cash = 0.0
+
+    def apply_tax_withdrawal(day, value_before):
+        """
+        Withdraw the current year's federal tax from the portfolio.
+
+        The withdrawal itself is treated as an external tax payment rather than
+        another taxable sale.  To make future compounding genuinely after-tax,
+        all remaining lots and cash are scaled down proportionally.  Cost basis
+        per share and original acquisition dates are preserved for the shares
+        that remain.
+        """
+        nonlocal cash
+
+        year = day.year
+        if year in taxes_withdrawn_by_year:
+            return value_before
+
+        first_year = first_day.year
+        tax_result = _sp500_calculate_tax_years(
+            realized_by_year,
+            first_year,
+            year,
+            filing,
+            base_income,
+        )
+
+        current_row = next(
+            (
+                row
+                for row in tax_result.get("yearly", [])
+                if int(row.get("year")) == int(year)
+            ),
+            None,
+        )
+
+        gross_tax = float(
+            (current_row or {}).get("estimatedFederalTax", 0.0) or 0.0
+        )
+        tax_to_withdraw = max(0.0, gross_tax)
+        tax_to_withdraw = min(tax_to_withdraw, max(0.0, value_before))
+
+        value_after = max(0.0, value_before - tax_to_withdraw)
+        scale = (
+            value_after / value_before
+            if value_before > 0
+            else 0.0
+        )
+
+        if scale < 1.0:
+            cash *= scale
+            for position in positions.values():
+                for lot in position.get("lots", []):
+                    lot["shares"] = (
+                        max(0.0, float(lot.get("shares", 0.0) or 0.0))
+                        * scale
+                    )
+
+        taxes_withdrawn_by_year[year] = tax_to_withdraw
+        year_value_before_tax[year] = value_before
+        year_value_after_tax[year] = value_after
+
+        # If the dataset ends before Dec 31, this is an accrued-current-year
+        # estimate rather than a literal year-end payment.
+        year_is_partial[year] = not (
+            day.month == 12 and day.day >= 28
+        )
+
+        return value_after
+
+    after_tax_points = []
+
+    for day, raw_point in point_rows:
+        # Value the positions held from the previous close through this close.
+        value_now = portfolio_value_at(day)
+
+        # At a rebalance close, the outgoing portfolio owns the move into this
+        # close.  Then execute the new basket at this same close for the next
+        # interval.  This is the same boundary convention as the pre-tax engine.
+        period = prepared_by_effective.get(day)
+        if period is not None and day != first_period["effective_date"]:
+            rebalance_at_close(period, day)
+            value_now = portfolio_value_at(day)
+
+        # Federal tax is withdrawn on each calendar year's last observed trading
+        # day.  The final partial year is also accrued and withdrawn on the final
+        # backtest date so the ending return is genuinely after tax.
+        if last_observation_by_year.get(day.year) == day:
+            value_now = apply_tax_withdrawal(day, value_now)
+
+        strategy_index = 100.0 * value_now / start_value
+        after_tax_points.append(
+            {
+                "time": raw_point["time"],
+                "strategy": strategy_index,
+                "benchmark": benchmark_value_by_day[day],
+                "taxPaid": float(
+                    taxes_withdrawn_by_year.get(day.year, 0.0)
+                    if last_observation_by_year.get(day.year) == day
+                    else 0.0
+                ),
+            }
+        )
+
+    if not after_tax_points:
+        return None
+
+    after_tax_value = (
+        start_value * float(after_tax_points[-1]["strategy"]) / 100.0
+    )
+    after_tax_return = (
+        (after_tax_value / start_value) - 1.0
+    ) * 100.0
+    after_tax_outperformance = (
+        after_tax_return - official_benchmark_return
+    )
+
+    # Final tax ledger using the ACTUAL reduced share counts after prior years'
+    # tax withdrawals.  This makes quarterly versus annual rebalancing affect
+    # both the amount of gain realized and whether it is ST or LT.
+    final_tax_result = _sp500_calculate_tax_years(
+        realized_by_year,
+        first_day.year,
+        final_day.year,
+        filing,
+        base_income,
+    )
+
+    yearly = []
+    for row in final_tax_result.get("yearly", []):
+        year = int(row["year"])
+        enriched = dict(row)
+        enriched["taxWithdrawnFromPortfolio"] = float(
+            taxes_withdrawn_by_year.get(year, 0.0)
+        )
+        enriched["yearEndPreTaxValue"] = year_value_before_tax.get(year)
+        enriched["yearEndAfterTaxValue"] = year_value_after_tax.get(year)
+        enriched["isPartialYearAccrual"] = bool(
+            year_is_partial.get(year, False)
+        )
+        yearly.append(enriched)
+
+    total_tax_withdrawn = sum(
+        max(0.0, float(value or 0.0))
+        for value in taxes_withdrawn_by_year.values()
+    )
+
+    realized_short = sum(
+        float(row.get("shortTermNetRealized", 0.0) or 0.0)
+        for row in yearly
+    )
+    realized_long = sum(
+        float(row.get("longTermNetRealized", 0.0) or 0.0)
+        for row in yearly
+    )
+    gross_gains = sum(
+        float(row.get("grossRealizedGains", 0.0) or 0.0)
+        for row in yearly
+    )
+    gross_losses = sum(
+        float(row.get("realizedLosses", 0.0) or 0.0)
+        for row in yearly
+    )
+    total_niit = sum(
+        float(row.get("niitEstimate", 0.0) or 0.0)
+        for row in yearly
+    )
+    total_loss_benefit = sum(
+        float(row.get("capitalLossTaxBenefit", 0.0) or 0.0)
+        for row in yearly
+    )
+    sale_orders = sum(
+        int((realized_by_year.get(int(row["year"]), {}) or {}).get("sale_orders", 0) or 0)
+        for row in yearly
+    )
+
+    # Unrealized gain on the shares still held AFTER all modeled tax withdrawals.
+    unrealized_gain = 0.0
+    for cik, position in positions.items():
+        price = get_price_for_position(cik, position, final_day)
+        if price is None or price <= 0:
+            continue
+        for lot in position.get("lots", []):
+            shares = max(0.0, float(lot.get("shares", 0.0) or 0.0))
+            cost = float(lot.get("cost", 0.0) or 0.0)
+            unrealized_gain += (price - cost) * shares
+
+    return {
+        "enabled": True,
+        "accountType": "taxable",
+        "filingStatus": filing,
+        "taxableIncome": base_income,
+        "startingPortfolio": start_value,
+        "preTaxEndingValue": official_pre_tax_ending_value,
+        "afterTaxEndingValue": after_tax_value,
+        "afterTaxEndingValueIfLiquidated": after_tax_value,
+        "preTaxReturn": official_pre_tax_return,
+        "afterTaxReturn": after_tax_return,
+        "preTaxOutperformance": (
+            official_pre_tax_return - official_benchmark_return
+        ),
+        "afterTaxOutperformance": after_tax_outperformance,
+        "benchmarkReturn": official_benchmark_return,
+        "taxDragPercentagePoints": (
+            official_pre_tax_return - after_tax_return
+        ),
+        "liquidationTaxDragPercentagePoints": 0.0,
+        "estimatedFederalTax": total_tax_withdrawn,
+        "estimatedFederalTaxIfLiquidated": total_tax_withdrawn,
+        "liquidationTax": 0.0,
+        "niitEstimate": total_niit,
+        "capitalLossTaxBenefit": total_loss_benefit,
+        "shortTermNetRealized": realized_short,
+        "longTermNetRealized": realized_long,
+        "grossRealizedGains": gross_gains,
+        "realizedLosses": gross_losses,
+        "estimatedUnrealizedGain": unrealized_gain,
+        "shortTermCarryforward": float(
+            final_tax_result.get("shortTermCarryforward", 0.0) or 0.0
+        ),
+        "longTermCarryforward": float(
+            final_tax_result.get("longTermCarryforward", 0.0) or 0.0
+        ),
+        "taxableSaleOrders": sale_orders,
+        "yearly": yearly,
+        "_afterTaxPoints": after_tax_points,
+        "assumptions": [
+            "Taxable-account returns are resimulated in the backend from the actual S&P 500 ranking rebalances; taxes are not applied as a simple haircut after the backtest.",
+            "FIFO tax lots determine each realized gain or loss and whether it is short-term or long-term based on the actual acquisition and sale dates.",
+            "At each simulated calendar year-end, estimated federal tax is withdrawn from the portfolio and the remaining holdings are proportionally reduced, so later returns compound on the lower after-tax capital base.",
+            "For a partial final year, accrued federal tax through the backtest end date is withdrawn on that final date so the reported ending return is after tax.",
+            "The year-end tax withdrawal is modeled as an external portfolio withdrawal and does not itself create an additional taxable sale.",
+            "Current 2026 federal ordinary-income and long-term capital-gains schedules are used with the selected filing status and taxable-income assumption.",
+            "Capital losses offset gains, unused losses carry forward, and the annual federal capital-loss deduction is estimated.",
+            "A 3.8% NIIT estimate is included when applicable, using selected taxable income as a MAGI proxy.",
+            "The S&P 500 benchmark remains a buy-and-hold pre-tax benchmark, so after-tax outperformance equals the tax-adjusted strategy return minus the benchmark return.",
+            "State taxes, dividends, wash-sale rules, AMT, and special tax categories are not modeled.",
+        ],
+    }
+
+
+@app.post("/backtest-sp500-rank-strategy")
+def backtest_sp500_rank_strategy(
+    request: Request,
+    payload: Sp500RankBacktestRequest,
+):
+    try:
+        if is_route_rate_limited(
+            request,
+            "backtest_sp500_rank_strategy",
+            *BACKTEST_RATE_LIMIT,
+        ):
+            return {
+                "error":
+                    "Too many requests. Please slow down "
+                    "and try again shortly."
+            }
+
+        allowed_ranges = {
+            "1M": 30,
+            "6M": 180,
+            "1Y": 365,
+            "5Y": 365 * 5,
+        }
+
+        range_key = str(
+            payload.range or "5Y"
+        ).upper()
+
+        if range_key not in allowed_ranges:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Ranking backtests support "
+                    "1M, 6M, 1Y, and 5Y."
+                ),
+            )
+
+        top_n = int(payload.top_n)
+
+        if top_n < 1 or top_n > 450:
+            raise HTTPException(
+                status_code=400,
+                detail="Top N must be between 1 and 450.",
+            )
+
+        rebalance_months = int(
+            payload.rebalance_months
+        )
+
+        if rebalance_months not in {
+            1,
+            3,
+            6,
+            12,
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Rebalance frequency must be "
+                    "1, 3, 6, or 12 months."
+                ),
+            )
+
+        benchmark = str(
+            payload.benchmark or "SPY"
+        ).strip().upper()
+
+        include_taxes = bool(payload.include_taxes)
+        tax_account_type = str(
+            payload.tax_account_type or "taxable"
+        ).strip().lower()
+        tax_filing_status = str(
+            payload.tax_filing_status or "single"
+        ).strip().lower()
+        taxable_income = float(payload.taxable_income or 0.0)
+        tax_starting_portfolio = float(
+            payload.tax_starting_portfolio or 10000.0
+        )
+
+        if tax_account_type not in {
+            "taxable",
+            "traditional_ira",
+            "roth_ira",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid tax account type.",
+            )
+
+        if tax_filing_status not in {
+            "single",
+            "mfj",
+            "mfs",
+            "hoh",
+        }:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid tax filing status.",
+            )
+
+        if taxable_income < 0 or taxable_income > 100000000:
+            raise HTTPException(
+                status_code=400,
+                detail="Taxable income must be between $0 and $100,000,000.",
+            )
+
+        if tax_starting_portfolio <= 0 or tax_starting_portfolio > 1000000000:
+            raise HTTPException(
+                status_code=400,
+                detail="Starting portfolio must be greater than $0 and no more than $1,000,000,000.",
+            )
+
+        end_date = datetime.now().date()
+
+        requested_start_date = (
+            end_date
+            - timedelta(
+                days=allowed_ranges[range_key]
+            )
+        )
+
+        snapshot_dates = (
+            get_sp500_rank_snapshot_dates()
+        )
+
+        if not snapshot_dates:
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    "No S&P 500 ranking history "
+                    "is available."
+                ),
+            )
+
+        prior_snapshots = [
+            day
+            for day in snapshot_dates
+            if day <= requested_start_date
+        ]
+
+        if prior_snapshots:
+            anchor_snapshot = prior_snapshots[-1]
+        else:
+            future_snapshots = [
+                day
+                for day in snapshot_dates
+                if day >= requested_start_date
+            ]
+
+            if not future_snapshots:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "The requested period is outside "
+                        "the available ranking history."
+                    ),
+                )
+
+            anchor_snapshot = future_snapshots[0]
+
+        anchor_index = snapshot_dates.index(
+            anchor_snapshot
+        )
+
+        rebalance_snapshots = (
+            snapshot_dates[
+                anchor_index::rebalance_months
+            ]
+        )
+
+        rebalance_snapshots = [
+            day
+            for day in rebalance_snapshots
+            if day <= end_date
+        ]
+
+        if not rebalance_snapshots:
+            raise HTTPException(
+                status_code=400,
+                detail="No usable rebalance dates found.",
+            )
+
+        rebalance_holdings = []
+
+        all_ciks = set()
+        primary_tickers = set()
+
+        rows_by_snapshot = (
+            get_sp500_top_companies_for_snapshots(
+                rebalance_snapshots,
+                top_n,
+            )
+        )
+
+        for snapshot_date in rebalance_snapshots:
+            rows = rows_by_snapshot.get(
+                snapshot_date,
+                [],
+            )
+
+            if len(rows) < top_n:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Only {len(rows)} ranked companies "
+                        f"were available for "
+                        f"{snapshot_date}."
+                    ),
+                )
+
+            holdings = []
+
+            for row in rows:
+                cik = str(row["cik"])
+                ticker = str(
+                    row["representative_ticker"]
+                ).strip().upper()
+
+                holdings.append({
+                    "rank": int(row["company_rank"]),
+                    "cik": cik,
+                    "company": row["company_name"],
+                    "ticker": ticker,
+                })
+
+                all_ciks.add(cik)
+
+                if ticker:
+                    primary_tickers.add(ticker)
+
+            rebalance_holdings.append({
+                "snapshot_date": snapshot_date,
+                "holdings": holdings,
+            })
+
+        ticker_history = (
+            get_sp500_company_ticker_history(
+                sorted(all_ciks),
+                snapshot_dates[0],
+                snapshot_dates[-1],
+            )
+        )
+
+        all_tickers = set(primary_tickers)
+
+        for ticker_list in ticker_history.values():
+            all_tickers.update(ticker_list)
+
+        price_fetch_start = min(
+            requested_start_date,
+            anchor_snapshot,
+        ) - timedelta(days=5)
+
+        price_fetch_end = end_date
+
+        price_maps = {}
+
+        tickers_to_fetch = sorted(
+            all_tickers | {benchmark}
+        )
+
+        with ThreadPoolExecutor(
+            max_workers=min(
+                8,
+                max(1, len(tickers_to_fetch)),
+            )
+        ) as executor:
+            futures = {
+                executor.submit(
+                    fetch_daily_close_map,
+                    ticker,
+                    price_fetch_start,
+                    price_fetch_end,
+                ): ticker
+                for ticker in tickers_to_fetch
+            }
+
+            for future in as_completed(futures):
+                ticker = futures[future]
+
+                try:
+                    price_maps[ticker] = (
+                        future.result()
+                    )
+                except Exception:
+                    price_maps[ticker] = {}
+
+        benchmark_prices = price_maps.get(
+            benchmark,
+            {},
+        )
+
+        if len(benchmark_prices) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Not enough benchmark price "
+                    "history is available."
+                ),
+            )
+
+        benchmark_days = sorted(
+            benchmark_prices.keys()
+        )
+
+        strategy_points = []
+        strategy_values = []
+        strategy_returns = []
+        benchmark_returns = []
+
+        portfolio_base = 100.0
+        benchmark_base_price = None
+
+        previous_strategy_value = None
+        previous_benchmark_value = None
+
+        rebalance_history_output = []
+        prepared_periods = []
+
+        # Resolve the actual execution close for every ranking snapshot first.
+        # A month-end ranking is only actionable after that snapshot, so the new
+        # basket is established at the first later trading-day close where every
+        # holding has a usable price.
+        for period in rebalance_holdings:
+            snapshot_date = period["snapshot_date"]
+            holdings = period["holdings"]
+
+            candidate_start = max(
+                requested_start_date,
+                snapshot_date + timedelta(days=1),
+            )
+
+            candidate_days = [
+                day
+                for day in benchmark_days
+                if (
+                    day >= candidate_start
+                    and day <= end_date
+                )
+            ]
+
+            if not candidate_days:
+                continue
+
+            usable_start_day = None
+            start_prices = {}
+
+            for candidate_day in candidate_days:
+                candidate_prices = {}
+                complete = True
+
+                for holding in holdings:
+                    price, used_ticker = (
+                        choose_company_price(
+                            holding["cik"],
+                            holding["ticker"],
+                            candidate_day,
+                            ticker_history,
+                            price_maps,
+                        )
+                    )
+
+                    if price is None:
+                        complete = False
+                        break
+
+                    candidate_prices[
+                        holding["cik"]
+                    ] = {
+                        "price": price,
+                        "ticker": used_ticker,
+                    }
+
+                if complete:
+                    usable_start_day = candidate_day
+                    start_prices = candidate_prices
+                    break
+
+            if usable_start_day is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Could not establish prices for "
+                        f"all Top {top_n} holdings after "
+                        f"{snapshot_date}."
+                    ),
+                )
+
+            weight = 1.0 / len(holdings)
+
+            prepared_periods.append({
+                "snapshot_date": snapshot_date,
+                "effective_date": usable_start_day,
+                "holdings": holdings,
+                "start_prices": start_prices,
+                "weight": weight,
+            })
+
+            rebalance_history_output.append({
+                "snapshotDate":
+                    snapshot_date.isoformat(),
+                "effectiveDate":
+                    usable_start_day.isoformat(),
+                "holdings": [
+                    {
+                        "rank": holding["rank"],
+                        "ticker": holding["ticker"],
+                        "company": holding["company"],
+                        "cik": holding["cik"],
+                        "weight": weight * 100,
+                    }
+                    for holding in holdings
+                ],
+            })
+
+        if not prepared_periods:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No ranking periods had usable "
+                    "execution prices."
+                ),
+            )
+
+        # Each basket is bought at its effective-date close.  The previous basket
+        # therefore owns the close-to-close move INTO the next effective date.
+        # Including that boundary day in the old period prevents the rebalance-day
+        # return from disappearing.  The new period begins from that same close and
+        # starts contributing returns on the following trading day.
+        for period_index, period in enumerate(
+            prepared_periods
+        ):
+            usable_start_day = period[
+                "effective_date"
+            ]
+            holdings = period["holdings"]
+            start_prices = period["start_prices"]
+            weight = period["weight"]
+
+            next_effective_day = (
+                prepared_periods[
+                    period_index + 1
+                ]["effective_date"]
+                if period_index + 1
+                < len(prepared_periods)
+                else end_date
+            )
+
+            days = [
+                day
+                for day in benchmark_days
+                if (
+                    day >= usable_start_day
+                    and day <= next_effective_day
+                )
+            ]
+
+            # The prior basket already produced the portfolio value at this close.
+            # Do not append the same close again as a zero-return observation.
+            if period_index > 0:
+                days = [
+                    day
+                    for day in days
+                    if day > usable_start_day
+                ]
+
+            if not days:
+                continue
+
+            last_prices = {
+                cik: row["price"]
+                for cik, row in start_prices.items()
+            }
+
+            for day in days:
+                weighted_growth = 0.0
+
+                for holding in holdings:
+                    cik = holding["cik"]
+
+                    current_price, _ = (
+                        choose_company_price(
+                            cik,
+                            holding["ticker"],
+                            day,
+                            ticker_history,
+                            price_maps,
+                        )
+                    )
+
+                    if current_price is not None:
+                        last_prices[cik] = (
+                            current_price
+                        )
+
+                    current_price = (
+                        last_prices.get(cik)
+                    )
+
+                    start_price = (
+                        start_prices[cik]["price"]
+                    )
+
+                    if (
+                        current_price is None
+                        or start_price is None
+                        or start_price <= 0
+                    ):
+                        continue
+
+                    weighted_growth += (
+                        weight
+                        * (
+                            current_price
+                            / start_price
+                        )
+                    )
+
+                strategy_value = (
+                    portfolio_base
+                    * weighted_growth
+                )
+
+                benchmark_price = (
+                    benchmark_prices.get(day)
+                )
+
+                if (
+                    benchmark_price is None
+                    or benchmark_price <= 0
+                ):
+                    continue
+
+                if benchmark_base_price is None:
+                    benchmark_base_price = (
+                        benchmark_price
+                    )
+
+                benchmark_value = (
+                    100.0
+                    * benchmark_price
+                    / benchmark_base_price
+                )
+
+                if (
+                    previous_strategy_value
+                    is not None
+                    and previous_strategy_value != 0
+                    and previous_benchmark_value
+                    is not None
+                    and previous_benchmark_value != 0
+                ):
+                    strategy_returns.append(
+                        (
+                            strategy_value
+                            / previous_strategy_value
+                        )
+                        - 1
+                    )
+
+                    benchmark_returns.append(
+                        (
+                            benchmark_value
+                            / previous_benchmark_value
+                        )
+                        - 1
+                    )
+
+                previous_strategy_value = (
+                    strategy_value
+                )
+
+                previous_benchmark_value = (
+                    benchmark_value
+                )
+
+                strategy_values.append(
+                    strategy_value
+                )
+
+                timestamp = int(
+                    datetime(
+                        day.year,
+                        day.month,
+                        day.day,
+                    ).timestamp()
+                    * 1000
+                )
+
+                strategy_points.append({
+                    "time": timestamp,
+                    "strategy": strategy_value,
+                    "benchmark": benchmark_value,
+                })
+
+            if strategy_points:
+                portfolio_base = (
+                    strategy_points[-1][
+                        "strategy"
+                    ]
+                )
+
+        if len(strategy_points) < 2:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Not enough usable history to "
+                    "complete this ranking backtest."
+                ),
+            )
+
+        strategy_return = (
+            strategy_points[-1]["strategy"]
+            - 100
+        )
+
+        benchmark_return = (
+            strategy_points[-1]["benchmark"]
+            - 100
+        )
+
+        outperformance = (
+            strategy_return
+            - benchmark_return
+        )
+
+        max_drawdown = calculate_max_drawdown(
+            strategy_values
+        )
+
+        volatility = calculate_volatility(
+            strategy_returns
+        )
+
+        quant_metrics = (
+            calculate_backtest_quant_metrics(
+                strategy_returns=
+                strategy_returns,
+                benchmark_returns=
+                benchmark_returns,
+                max_drawdown=max_drawdown,
+                range_key=range_key,
+                periods_per_year_override=252,
+            )
+        )
+
+        final_holdings = (
+            rebalance_history_output[-1][
+                "holdings"
+            ]
+            if rebalance_history_output
+            else []
+        )
+
+        # Preserve the original pre-tax metrics. When taxes are enabled the
+        # primary response metrics and chart path become tax-adjusted so every
+        # number the frontend shows is calculated from the same backend series.
+        pre_tax_strategy_return = strategy_return
+        pre_tax_outperformance = outperformance
+        pre_tax_max_drawdown = max_drawdown
+        pre_tax_volatility = volatility
+        pre_tax_quant_metrics = quant_metrics
+
+        tax_analysis = None
+        response_points = strategy_points
+        tax_applied_to_metrics = False
+
+        if include_taxes:
+            tax_analysis = _build_sp500_tax_analysis(
+                prepared_periods=prepared_periods,
+                ticker_history=ticker_history,
+                price_maps=price_maps,
+                benchmark_days=benchmark_days,
+                starting_portfolio=tax_starting_portfolio,
+                filing_status=tax_filing_status,
+                taxable_income=taxable_income,
+                account_type=tax_account_type,
+                pre_tax_return=pre_tax_strategy_return,
+                benchmark_return=benchmark_return,
+                strategy_points=strategy_points,
+            )
+
+            if tax_analysis:
+                response_points = tax_analysis.pop(
+                    "_afterTaxPoints",
+                    strategy_points,
+                )
+                tax_applied_to_metrics = True
+
+                adjusted_strategy_values = [
+                    float(point["strategy"])
+                    for point in response_points
+                ]
+                adjusted_strategy_returns = []
+                adjusted_benchmark_returns = []
+
+                for index in range(1, len(response_points)):
+                    previous_point = response_points[index - 1]
+                    current_point = response_points[index]
+
+                    previous_strategy = float(previous_point["strategy"])
+                    current_strategy = float(current_point["strategy"])
+                    previous_benchmark = float(previous_point["benchmark"])
+                    current_benchmark = float(current_point["benchmark"])
+
+                    if previous_strategy != 0:
+                        adjusted_strategy_returns.append(
+                            (current_strategy / previous_strategy) - 1.0
+                        )
+                    if previous_benchmark != 0:
+                        adjusted_benchmark_returns.append(
+                            (current_benchmark / previous_benchmark) - 1.0
+                        )
+
+                strategy_return = float(response_points[-1]["strategy"]) - 100.0
+                outperformance = strategy_return - benchmark_return
+                max_drawdown = calculate_max_drawdown(adjusted_strategy_values)
+                volatility = calculate_volatility(adjusted_strategy_returns)
+                quant_metrics = calculate_backtest_quant_metrics(
+                    strategy_returns=adjusted_strategy_returns,
+                    benchmark_returns=adjusted_benchmark_returns,
+                    max_drawdown=max_drawdown,
+                    range_key=range_key,
+                    periods_per_year_override=252,
+                )
+
+                # Make the tax block explicitly agree with the top-level
+                # backend metrics used by the cards and graph.
+                tax_analysis["afterTaxReturn"] = strategy_return
+                tax_analysis["afterTaxOutperformance"] = outperformance
+                tax_analysis["benchmarkReturn"] = benchmark_return
+
+        return {
+            "strategyType":
+                "sp500_market_cap_rank",
+            "benchmark": benchmark,
+            "range": range_key,
+            "topN": top_n,
+            "rebalanceMonths":
+                rebalance_months,
+            "weighting": "equal",
+            "strategyReturn":
+                strategy_return,
+            "benchmarkReturn":
+                benchmark_return,
+            "outperformance":
+                outperformance,
+            "preTaxStrategyReturn":
+                pre_tax_strategy_return,
+            "preTaxOutperformance":
+                pre_tax_outperformance,
+            "preTaxMaxDrawdown":
+                pre_tax_max_drawdown,
+            "preTaxVolatility":
+                pre_tax_volatility,
+            "preTaxQuantMetrics":
+                pre_tax_quant_metrics,
+            "taxAppliedToMetrics":
+                tax_applied_to_metrics,
+            "maxDrawdown":
+                max_drawdown,
+            "volatility":
+                volatility,
+            "quantMetrics":
+                quant_metrics,
+            "points":
+                response_points,
+            "positions": [
+                {
+                    "ticker":
+                        row["ticker"],
+                    "weight":
+                        row["weight"] / 100,
+                }
+                for row in final_holdings
+            ],
+            "holdingAttribution": None,
+            "taxAnalysis": tax_analysis,
+            "rebalanceHistory":
+                (
+                    rebalance_history_output
+                    if top_n < 25
+                    else []
+                ),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        print(
+            "[ERROR] "
+            "/backtest-sp500-rank-strategy -> "
+            f"{type(e).__name__}: {e}"
+        )
+
         return safe_server_error_message()
 
 @app.post("/backtest-strategy")

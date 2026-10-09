@@ -9,6 +9,213 @@ const API_BASE =
 
 const RANGES = ["1D", "5D", "1M", "6M", "1Y", "5Y"];
 
+const TAX_FILING_STATUS_OPTIONS = [
+  { value: "single", label: "Single" },
+  { value: "mfj", label: "Married Filing Jointly" },
+  { value: "mfs", label: "Married Filing Separately" },
+  { value: "hoh", label: "Head of Household" },
+];
+
+const TAX_RULES_2026 = {
+  single: {
+    ordinary: [
+      { max: 12400, rate: 0.10 },
+      { max: 50400, rate: 0.12 },
+      { max: 105700, rate: 0.22 },
+      { max: 201775, rate: 0.24 },
+      { max: 256225, rate: 0.32 },
+      { max: 640600, rate: 0.35 },
+      { max: Infinity, rate: 0.37 },
+    ],
+    capitalGains: { zeroMax: 49450, fifteenMax: 545500 },
+  },
+  mfj: {
+    ordinary: [
+      { max: 24800, rate: 0.10 },
+      { max: 100800, rate: 0.12 },
+      { max: 211400, rate: 0.22 },
+      { max: 403550, rate: 0.24 },
+      { max: 512450, rate: 0.32 },
+      { max: 768700, rate: 0.35 },
+      { max: Infinity, rate: 0.37 },
+    ],
+    capitalGains: { zeroMax: 98900, fifteenMax: 613700 },
+  },
+  mfs: {
+    ordinary: [
+      { max: 12400, rate: 0.10 },
+      { max: 50400, rate: 0.12 },
+      { max: 105700, rate: 0.22 },
+      { max: 201775, rate: 0.24 },
+      { max: 256225, rate: 0.32 },
+      { max: 384350, rate: 0.35 },
+      { max: Infinity, rate: 0.37 },
+    ],
+    capitalGains: { zeroMax: 49450, fifteenMax: 306850 },
+  },
+  hoh: {
+    ordinary: [
+      { max: 17700, rate: 0.10 },
+      { max: 67450, rate: 0.12 },
+      { max: 105700, rate: 0.22 },
+      { max: 201750, rate: 0.24 },
+      { max: 256200, rate: 0.32 },
+      { max: 640600, rate: 0.35 },
+      { max: Infinity, rate: 0.37 },
+    ],
+    capitalGains: { zeroMax: 66200, fifteenMax: 579600 },
+  },
+};
+
+function get2026OrdinaryMarginalRate(status, income) {
+  const rules = TAX_RULES_2026[status] || TAX_RULES_2026.single;
+  const bracket = rules.ordinary.find((row) => income <= row.max);
+  return bracket?.rate ?? 0.37;
+}
+
+function get2026LongTermCapitalGainsRate(status, income) {
+  const rules = TAX_RULES_2026[status] || TAX_RULES_2026.single;
+  if (income <= rules.capitalGains.zeroMax) return 0;
+  if (income <= rules.capitalGains.fifteenMax) return 0.15;
+  return 0.20;
+}
+
+function build2026TaxableIncomeBands(status) {
+  const rules = TAX_RULES_2026[status] || TAX_RULES_2026.single;
+  const boundaries = [
+    ...rules.ordinary.filter((row) => Number.isFinite(row.max)).map((row) => row.max),
+    rules.capitalGains.zeroMax,
+    rules.capitalGains.fifteenMax,
+  ]
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b)
+    .filter((value, index, array) => index === 0 || value !== array[index - 1]);
+
+  const bands = [];
+  let lower = 0;
+
+  boundaries.forEach((upper) => {
+    const sampleIncome = lower === 0 ? Math.max(1, Math.floor(upper / 2)) : Math.floor((lower + upper) / 2);
+    bands.push({
+      lower,
+      upper,
+      sampleIncome,
+      shortRate: get2026OrdinaryMarginalRate(status, sampleIncome),
+      longRate: get2026LongTermCapitalGainsRate(status, sampleIncome),
+    });
+    lower = upper + 1;
+  });
+
+  const lastBoundary = boundaries[boundaries.length - 1] || 0;
+  const topBandSampleIncome = lastBoundary + 1000000;
+  bands.push({
+    lower,
+    upper: Infinity,
+    sampleIncome: topBandSampleIncome,
+    shortRate: get2026OrdinaryMarginalRate(status, topBandSampleIncome),
+    longRate: get2026LongTermCapitalGainsRate(status, topBandSampleIncome),
+  });
+
+  return bands;
+}
+
+function formatTaxIncomeBand(band) {
+  const dollars = (value) => `$${Math.round(value).toLocaleString("en-US")}`;
+  if (!Number.isFinite(band.upper)) return `${dollars(band.lower)}+`;
+  return `${dollars(band.lower)} – ${dollars(band.upper)}`;
+}
+
+function formatTaxDollar(value) {
+  const number = Number(value);
+  const safeValue = Number.isFinite(number) ? number : 0;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(safeValue);
+}
+
+function estimateTaxHoldingPeriodMix(backtestType, backtest, range) {
+  const oneYearMs = 365 * 24 * 60 * 60 * 1000;
+
+  if (backtestType === "sp500_rank" && Array.isArray(backtest?.rebalanceHistory) && backtest.rebalanceHistory.length) {
+    const active = new Map();
+    let shortCount = 0;
+    let longCount = 0;
+
+    backtest.rebalanceHistory.forEach((rebalance, index) => {
+      const effectiveMs = Date.parse(`${rebalance.effectiveDate}T00:00:00Z`);
+      const tickers = new Set((rebalance.holdings || []).map((holding) => holding.ticker));
+
+      if (index === 0) {
+        tickers.forEach((ticker) => active.set(ticker, effectiveMs));
+        return;
+      }
+
+      [...active.entries()].forEach(([ticker, enteredMs]) => {
+        if (!tickers.has(ticker)) {
+          if (effectiveMs - enteredMs > oneYearMs) longCount += 1;
+          else shortCount += 1;
+          active.delete(ticker);
+        }
+      });
+
+      tickers.forEach((ticker) => {
+        if (!active.has(ticker)) active.set(ticker, effectiveMs);
+      });
+    });
+
+    const lastPointTime = backtest?.points?.length
+      ? Number(backtest.points[backtest.points.length - 1].time)
+      : NaN;
+    const fallbackEnd = Date.parse(
+      `${backtest.rebalanceHistory[backtest.rebalanceHistory.length - 1].effectiveDate}T00:00:00Z`
+    );
+    const endMs = Number.isFinite(lastPointTime) ? lastPointTime : fallbackEnd;
+
+    active.forEach((enteredMs) => {
+      if (endMs - enteredMs > oneYearMs) longCount += 1;
+      else shortCount += 1;
+    });
+
+    const total = shortCount + longCount;
+    if (total > 0) {
+      return {
+        shortShare: shortCount / total,
+        longShare: longCount / total,
+        method: "estimated from holding durations across S&P 500 rebalances",
+      };
+    }
+  }
+
+  const pointTimes = (backtest?.points || [])
+    .map((point) => Number(point.time))
+    .filter((value) => Number.isFinite(value));
+
+  if (pointTimes.length >= 2) {
+    const heldLongTerm = pointTimes[pointTimes.length - 1] - pointTimes[0] > oneYearMs;
+    return {
+      shortShare: heldLongTerm ? 0 : 1,
+      longShare: heldLongTerm ? 1 : 0,
+      method: "estimated from the backtest holding period",
+    };
+  }
+
+  const fallbackLongTerm = range === "5Y";
+  return {
+    shortShare: fallbackLongTerm ? 0 : 1,
+    longShare: fallbackLongTerm ? 1 : 0,
+    method: "estimated from the selected backtest range",
+  };
+}
+const RANKING_RANGES = ["1M", "6M", "1Y", "5Y"];
+const RANKING_REBALANCE_OPTIONS = [
+  { label: "Monthly", months: 1 },
+  { label: "Quarterly", months: 3 },
+  { label: "Every 6 Months", months: 6 },
+  { label: "Annual", months: 12 },
+];
+
 const BENCHMARK_CHART_CACHE = {};
 const BENCHMARK_CACHE_TTL_MS = 1000 * 60 * 15;
 
@@ -1276,11 +1483,20 @@ const [customStrategyName, setCustomStrategyName] = useState("");
 const [customStrategyNotes, setCustomStrategyNotes] = useState("");
 const [customStrategyRebalance, setCustomStrategyRebalance] = useState("Never");
 const [builderPositions, setBuilderPositions] = useState([
-  { ticker: "", weight: 0 },
+  { ticker: "", weight: "" },
 ]);
 const [editingStrategyName, setEditingStrategyName] = useState(null);
 const [openStrategyMenu, setOpenStrategyMenu] = useState(null);
   const [mode, setMode] = useState("strategy");
+  const [backtestType, setBacktestType] = useState("custom");
+  const [rankTopN, setRankTopN] = useState("5");
+  const [rankRebalanceMonths, setRankRebalanceMonths] = useState(3);
+  const [includeTaxes, setIncludeTaxes] = useState(false);
+  const [showTaxDetails, setShowTaxDetails] = useState(true);
+  const [taxAccountType, setTaxAccountType] = useState("taxable");
+  const [taxFilingStatus, setTaxFilingStatus] = useState("single");
+  const [taxIncomeBandIndex, setTaxIncomeBandIndex] = useState("4");
+  const [taxStartingPortfolio, setTaxStartingPortfolio] = useState("10000");
   const [backtest, setBacktest] = useState(null);
   const [loading, setLoading] = useState(false);
   const [benchmarkLoading, setBenchmarkLoading] = useState(true);
@@ -1313,6 +1529,7 @@ useEffect(() => {
   setCustomStrategyName(importedStrategy.name || "Imported Strategy");
   setCustomStrategyNotes(importedStrategy.notes || "");
   setMode(importedStrategy.mode || "strategy");
+  setBacktestType("custom");
 
   setBacktest(null);
   setBacktestError("");
@@ -1619,6 +1836,66 @@ const chartLineColor = benchmarkIsPositive ? "#19C37D" : "#ef4444";
   const volatility = backtest?.volatility ?? 0;
   const quantMetrics = backtest?.quantMetrics || null;
 
+  const taxIncomeBands = useMemo(
+    () => build2026TaxableIncomeBands(taxFilingStatus),
+    [taxFilingStatus]
+  );
+  const selectedTaxIncomeBand =
+    taxIncomeBands[Number(taxIncomeBandIndex)] ||
+    taxIncomeBands[Math.min(4, taxIncomeBands.length - 1)];
+  const selectedShortTermRate = selectedTaxIncomeBand?.shortRate ?? 0.24;
+  const selectedLongTermRate = selectedTaxIncomeBand?.longRate ?? 0.15;
+  const selectedTaxableIncome = selectedTaxIncomeBand?.sampleIncome ?? 150000;
+
+  const taxAnalysis =
+    backtestType === "sp500_rank" && backtest?.taxAnalysis
+      ? backtest.taxAnalysis
+      : null;
+  const currentTaxStartingPortfolio = Number(taxStartingPortfolio);
+  const taxAnalysisMatchesSettings = Boolean(
+    taxAnalysis &&
+      taxAnalysis.accountType === taxAccountType &&
+      Number.isFinite(currentTaxStartingPortfolio) &&
+      Math.abs(Number(taxAnalysis.startingPortfolio) - currentTaxStartingPortfolio) < 0.01 &&
+      (taxAccountType !== "taxable" ||
+        (taxAnalysis.filingStatus === taxFilingStatus &&
+          Math.abs(Number(taxAnalysis.taxableIncome) - Number(selectedTaxableIncome)) < 0.01))
+  );
+
+  const preTaxStrategyReturn = Number(
+    backtest?.preTaxStrategyReturn ?? taxAnalysis?.preTaxReturn ?? strategyReturn
+  );
+  const preTaxOutperformance = Number(
+    backtest?.preTaxOutperformance ?? taxAnalysis?.preTaxOutperformance ?? outperformance
+  );
+  const afterTaxReturn = Number(
+    taxAnalysis?.afterTaxReturn ?? strategyReturn
+  );
+  const estimatedTaxDrag = Number(
+    taxAnalysis?.taxDragPercentagePoints ?? 0
+  );
+  const afterTaxOutperformance = Number(
+    taxAnalysis?.afterTaxOutperformance ?? outperformance
+  );
+
+  // The ranking endpoint now returns the tax-adjusted path and all tax-adjusted
+  // headline metrics directly from the backend.  The frontend only renders
+  // those values; it no longer recalculates or subtracts tax locally.
+  const useAfterTaxChart = Boolean(
+    backtestType === "sp500_rank" &&
+      includeTaxes &&
+      taxAnalysis &&
+      taxAnalysisMatchesSettings &&
+      backtest?.taxAppliedToMetrics &&
+      taxAnalysis.accountType === "taxable" &&
+      backtestPoints.length > 0
+  );
+
+  const chartBacktestPoints = backtestPoints;
+  const chartPoints = chartBacktestPoints.length
+    ? chartBacktestPoints
+    : spyIndexedPoints;
+
    const strategyScore = useMemo(() => {
     if (!backtest) {
       return {
@@ -1767,7 +2044,7 @@ const averageUnderperformancePenalty =
     volatility,
   ]);
 
-  const allValues = points
+  const allValues = chartPoints
   .flatMap((p) => [p.strategy, p.benchmark])
   .filter((value) => typeof value === "number" && !Number.isNaN(value));
   const min = allValues.length ? Math.min(...allValues) : 0;
@@ -1775,7 +2052,7 @@ const averageUnderperformancePenalty =
   const chartRange = Math.max(max - min, 1);
 
   const priceTicks = useMemo(() => {
-    if (!points.length) return [];
+    if (!chartPoints.length) return [];
 
     const tickCount = 5;
 
@@ -1785,19 +2062,19 @@ const averageUnderperformancePenalty =
 
       return { value, y };
     });
-  }, [points.length, max, chartRange]);
+  }, [chartPoints.length, max, chartRange]);
 
-  const strategySvgPoints = backtestPoints.length
-  ? backtestPoints
+  const strategySvgPoints = chartBacktestPoints.length
+  ? chartBacktestPoints
       .map((point, index) => {
-        const x = (index / Math.max(backtestPoints.length - 1, 1)) * 100;
+        const x = (index / Math.max(chartBacktestPoints.length - 1, 1)) * 100;
         const y = 100 - ((point.strategy - min) / chartRange) * 100;
         return `${x},${y}`;
       })
       .join(" ")
   : "";
 
-  const benchmarkSvgPoints = points
+  const benchmarkSvgPoints = chartPoints
   .filter(
     (point) =>
       typeof point.benchmark === "number" &&
@@ -1811,13 +2088,13 @@ const averageUnderperformancePenalty =
   .join(" ");
 
   const activePoint =
-    hoverIndex !== null && points[hoverIndex]
-      ? points[hoverIndex]
-      : points[points.length - 1];
+    hoverIndex !== null && chartPoints[hoverIndex]
+      ? chartPoints[hoverIndex]
+      : chartPoints[chartPoints.length - 1];
 
   const activeX =
-    hoverIndex !== null && points.length > 1
-      ? (hoverIndex / Math.max(points.length - 1, 1)) * 100
+    hoverIndex !== null && chartPoints.length > 1
+      ? (hoverIndex / Math.max(chartPoints.length - 1, 1)) * 100
       : 100;
 
   const activeTooltipY =
@@ -2299,7 +2576,7 @@ const explainCurrentStrategy = () => {
         i === index
           ? {
               ...position,
-              [field]: field === "weight" ? Number(value) : value.toUpperCase(),
+              [field]: field === "weight" ? value : value.toUpperCase(),
             }
           : position
       )
@@ -2309,7 +2586,7 @@ const explainCurrentStrategy = () => {
   const addPosition = () => {
   setSelectedStrategyId(null);
   setSelectedStrategyName("Custom / Unsaved Strategy");
-  setPositions((prev) => [...prev, { ticker: "", weight: 0 }]);
+  setPositions((prev) => [...prev, { ticker: "", weight: "" }]);
   setStrategyExplanation(null);
   setHoldingAttribution(null);
 };
@@ -2328,7 +2605,7 @@ const updateBuilderPosition = (index, field, value) => {
       i === index
         ? {
             ...position,
-            [field]: field === "weight" ? Number(value) : value.toUpperCase(),
+            [field]: field === "weight" ? value : value.toUpperCase(),
           }
         : position
     )
@@ -2336,7 +2613,7 @@ const updateBuilderPosition = (index, field, value) => {
 };
 
 const addBuilderPosition = () => {
-  setBuilderPositions((prev) => [...prev, { ticker: "", weight: 0 }]);
+  setBuilderPositions((prev) => [...prev, { ticker: "", weight: "" }]);
 };
 
 const removeBuilderPosition = (index) => {
@@ -2462,7 +2739,7 @@ const deleteStrategyFromBank = async (strategyId) => {
   if (selectedStrategyId === strategyId) {
     setSelectedStrategyId(null);
     setSelectedStrategyName("Custom / Unsaved Strategy");
-    setPositions([{ ticker: "", weight: 0 }]);
+    setPositions([{ ticker: "", weight: "" }]);
     setBacktest(null);
     setHoldingAttribution(null);
     setStrategyExplanation(null);
@@ -2499,7 +2776,7 @@ const deleteStrategyEverywhere = async (strategyId) => {
     } else {
       setSelectedStrategyId(null);
       setSelectedStrategyName("Custom / Unsaved Strategy");
-      setPositions([{ ticker: "", weight: 0 }]);
+      setPositions([{ ticker: "", weight: "" }]);
       setBacktest(null);
       setHoldingAttribution(null);
       setStrategyExplanation(null);
@@ -2640,7 +2917,7 @@ if (editingStrategyName) {
   setCustomStrategyName("");
 setCustomStrategyNotes("");
 setCustomStrategyRebalance("Never");
-setBuilderPositions([{ ticker: "", weight: 0 }]);
+setBuilderPositions([{ ticker: "", weight: "" }]);
 setEditingStrategyName(null);
 setBacktestError("");
 };
@@ -2651,6 +2928,79 @@ setBacktestError("");
       setHoverIndex(null);
       setBacktestError("");
       setHoldingAttribution(null);
+
+      if (backtestType === "sp500_rank") {
+        const rankingRange = RANKING_RANGES.includes(range) ? range : "5Y";
+        const parsedTopN = Number(rankTopN);
+
+        if (
+          rankTopN === "" ||
+          !Number.isInteger(parsedTopN) ||
+          parsedTopN < 1 ||
+          parsedTopN > 450
+        ) {
+          setBacktest(null);
+          setHasRunBacktest(false);
+          setBacktestError("Top N must be a whole number between 1 and 450.");
+          return;
+        }
+
+        const cleanTopN = parsedTopN;
+        const parsedTaxStartingPortfolio = Number(taxStartingPortfolio);
+
+        if (
+          includeTaxes &&
+          (!Number.isFinite(parsedTaxStartingPortfolio) ||
+            parsedTaxStartingPortfolio <= 0)
+        ) {
+          setBacktest(null);
+          setHasRunBacktest(false);
+          setBacktestError("Starting portfolio must be greater than $0.");
+          return;
+        }
+
+        if (rankingRange !== range) {
+          setRange(rankingRange);
+        }
+
+        const res = await fetch(`${API_BASE}/backtest-sp500-rank-strategy`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            benchmark,
+            range: rankingRange,
+            top_n: cleanTopN,
+            rebalance_months: Number(rankRebalanceMonths),
+            include_taxes: includeTaxes,
+            tax_account_type: taxAccountType,
+            tax_filing_status: taxFilingStatus,
+            taxable_income: selectedTaxableIncome,
+            tax_starting_portfolio: includeTaxes
+              ? parsedTaxStartingPortfolio
+              : 10000,
+          }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok || data.error || data.detail) {
+          const message = data.detail || data.error || "Ranking backtest failed.";
+          console.error("Ranking backtest error:", data);
+          setBacktest(null);
+          setBacktestError(message);
+          setHasRunBacktest(false);
+          return;
+        }
+
+        setBacktest(data);
+        setHoldingAttribution(null);
+        setStrategyExplanation(null);
+        setStressResult(null);
+        setHasRunBacktest(true);
+        return;
+      }
 
       const cleanPositions = positions
         .filter((p) => p.ticker.trim() && Number(p.weight) !== 0)
@@ -2729,7 +3079,7 @@ setBacktestError("");
 }, [range]);
 
   const handleMouseMove = (e) => {
-  if (!points.length) return;
+  if (!chartPoints.length) return;
 
   const rect = e.currentTarget.getBoundingClientRect();
   const x = e.clientX - rect.left;
@@ -2738,9 +3088,11 @@ setBacktestError("");
   const usableWidth = rect.width - chartLeftPadding - chartRightPadding;
   const adjustedX = x - chartLeftPadding;
   const ratio = adjustedX / usableWidth;
-  const index = Math.round(Math.max(0, Math.min(1, ratio)) * (points.length - 1));
+  const index = Math.round(
+    Math.max(0, Math.min(1, ratio)) * (chartPoints.length - 1)
+  );
 
-  setHoverIndex(Math.max(0, Math.min(index, points.length - 1)));
+  setHoverIndex(Math.max(0, Math.min(index, chartPoints.length - 1)));
 };
 
 const runStressTest = (stressTest) => {
@@ -2811,6 +3163,48 @@ const benchmarkDisplayedReturn =
       100
     : 0;
 
+const rankingHistory =
+  backtest?.strategyType === "sp500_market_cap_rank" &&
+  Array.isArray(backtest?.rebalanceHistory)
+    ? backtest.rebalanceHistory
+    : [];
+
+const completedRankingTopN = Number(backtest?.topN);
+const completedRankingRebalanceMonths = Number(
+  backtest?.rebalanceMonths || rankRebalanceMonths
+);
+const showRankingHistory =
+  completedRankingTopN > 0 &&
+  completedRankingTopN < 25 &&
+  rankingHistory.length > 0;
+
+const formatRankingPeriodLabel = (entry) => {
+  const rawDate = entry?.effectiveDate || entry?.snapshotDate;
+
+  if (!rawDate) return "Rebalance";
+
+  const date = new Date(`${rawDate}T12:00:00`);
+  const year = date.getFullYear();
+  const month = date.getMonth();
+
+  if (completedRankingRebalanceMonths === 1) {
+    return date.toLocaleDateString("en-US", {
+      month: "short",
+      year: "numeric",
+    });
+  }
+
+  if (completedRankingRebalanceMonths === 3) {
+    return `Q${Math.floor(month / 3) + 1} ${year}`;
+  }
+
+  if (completedRankingRebalanceMonths === 6) {
+    return `${month < 6 ? "H1" : "H2"} ${year}`;
+  }
+
+  return String(year);
+};
+
   return (
     <div className="strategies-page" style={{ color: "white" }}>
       <div className="strategies-page-header" style={{ marginBottom: "24px" }}>
@@ -2818,7 +3212,7 @@ const benchmarkDisplayedReturn =
           Build and Test Your Own Strategies
         </h1>
         <p style={{ color: "#9ca3af", fontSize: "16px" }}>
-          Build custom long and short strategies and compare them to the market
+          Build custom long/short strategies or dynamically rebalance the largest S&P 500 companies.
         </p>
       </div>
 
@@ -2843,9 +3237,305 @@ const benchmarkDisplayedReturn =
           <h2 style={{ marginTop: 0 }}>Strategy Builder</h2>
 
           <div
-            className="strategies-mode-grid"
             style={{
               display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: "8px",
+              marginBottom: "14px",
+            }}
+          >
+            <button
+              onClick={() => {
+                setBacktestType("custom");
+                setBacktest(null);
+                setHasRunBacktest(false);
+                setBacktestError("");
+                setHoldingAttribution(null);
+                setStressResult(null);
+              }}
+              style={{
+                padding: "10px",
+                borderRadius: "12px",
+                cursor: "pointer",
+                fontWeight: 900,
+                border:
+                  backtestType === "custom"
+                    ? "1px solid rgba(25,195,125,0.75)"
+                    : "1px solid rgba(255,255,255,0.12)",
+                background:
+                  backtestType === "custom"
+                    ? "rgba(25,195,125,0.18)"
+                    : "rgba(255,255,255,0.06)",
+                color: backtestType === "custom" ? "#19C37D" : "#e5e7eb",
+              }}
+            >
+              Custom Portfolio
+            </button>
+
+            <button
+              onClick={() => {
+                setBacktestType("sp500_rank");
+                if (!RANKING_RANGES.includes(range)) setRange("5Y");
+                setBacktest(null);
+                setHasRunBacktest(false);
+                setBacktestError("");
+                setHoldingAttribution(null);
+                setStrategyExplanation(null);
+                setStressResult(null);
+              }}
+              style={{
+                padding: "10px",
+                borderRadius: "12px",
+                cursor: "pointer",
+                fontWeight: 900,
+                border:
+                  backtestType === "sp500_rank"
+                    ? "1px solid rgba(96,165,250,0.72)"
+                    : "1px solid rgba(255,255,255,0.12)",
+                background:
+                  backtestType === "sp500_rank"
+                    ? "rgba(96,165,250,0.16)"
+                    : "rgba(255,255,255,0.06)",
+                color: backtestType === "sp500_rank" ? "#93c5fd" : "#e5e7eb",
+              }}
+            >
+              S&P 500 Ranking
+            </button>
+          </div>
+
+          {backtestType === "sp500_rank" && (
+            <div
+              style={{
+                marginBottom: "14px",
+                padding: "12px",
+                borderRadius: "14px",
+                background: "rgba(15,23,42,0.72)",
+                border: "1px solid rgba(255,255,255,0.09)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                }}
+              >
+                <div>
+                  <div style={{ color: "#e5e7eb", fontSize: "13px", fontWeight: 950 }}>
+                    Include Taxes
+                  </div>
+                  <div style={{ color: "#64748b", fontSize: "10px", fontWeight: 700, marginTop: "2px" }}>
+                    Tax-lot-aware 2026 federal estimate
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                  <button
+                    type="button"
+                    onClick={() => setIncludeTaxes((prev) => !prev)}
+                    aria-pressed={includeTaxes}
+                    style={{
+                      minWidth: "58px",
+                      padding: "8px 10px",
+                      borderRadius: "999px",
+                      border: includeTaxes
+                        ? "1px solid rgba(25,195,125,0.55)"
+                        : "1px solid rgba(148,163,184,0.28)",
+                      background: includeTaxes
+                        ? "rgba(25,195,125,0.18)"
+                        : "rgba(255,255,255,0.05)",
+                      color: includeTaxes ? "#86efac" : "#94a3b8",
+                      cursor: "pointer",
+                      fontWeight: 950,
+                      fontSize: "11px",
+                    }}
+                  >
+                    {includeTaxes ? "ON" : "OFF"}
+                  </button>
+
+                  {includeTaxes && (
+                    <button
+                      type="button"
+                      onClick={() => setShowTaxDetails((prev) => !prev)}
+                      aria-expanded={showTaxDetails}
+                      style={{
+                        minWidth: "58px",
+                        padding: "8px 10px",
+                        borderRadius: "999px",
+                        border: "1px solid rgba(96,165,250,0.34)",
+                        background: showTaxDetails
+                          ? "rgba(96,165,250,0.13)"
+                          : "rgba(255,255,255,0.05)",
+                        color: showTaxDetails ? "#bfdbfe" : "#94a3b8",
+                        cursor: "pointer",
+                        fontWeight: 950,
+                        fontSize: "11px",
+                      }}
+                      title={
+                        showTaxDetails
+                          ? "Hide tax settings and the detailed tax breakdown. Taxes remain enabled."
+                          : "Show tax settings and the detailed tax breakdown."
+                      }
+                    >
+                      {showTaxDetails ? "HIDE" : "SHOW"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {includeTaxes && showTaxDetails && (
+                <div style={{ marginTop: "12px", display: "grid", gap: "10px" }}>
+                  <label style={{ display: "grid", gap: "5px" }}>
+                    <span style={{ color: "#94a3b8", fontSize: "11px", fontWeight: 850 }}>
+                      Starting Portfolio
+                    </span>
+                    <div style={{ position: "relative" }}>
+                      <span
+                        style={{
+                          position: "absolute",
+                          left: "10px",
+                          top: "50%",
+                          transform: "translateY(-50%)",
+                          color: "#64748b",
+                          fontWeight: 900,
+                        }}
+                      >
+                        $
+                      </span>
+                      <input
+                        type="number"
+                        min="1"
+                        step="1000"
+                        value={taxStartingPortfolio}
+                        onChange={(e) => setTaxStartingPortfolio(e.target.value)}
+                        placeholder="10000"
+                        style={{
+                          width: "100%",
+                          boxSizing: "border-box",
+                          padding: "9px 10px 9px 24px",
+                          borderRadius: "10px",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background: "rgba(15,23,42,0.95)",
+                          color: "white",
+                          fontWeight: 800,
+                        }}
+                      />
+                    </div>
+                  </label>
+
+                  <label style={{ display: "grid", gap: "5px" }}>
+                    <span style={{ color: "#94a3b8", fontSize: "11px", fontWeight: 850 }}>
+                      Account Type
+                    </span>
+                    <select
+                      value={taxAccountType}
+                      onChange={(e) => setTaxAccountType(e.target.value)}
+                      style={{
+                        width: "100%",
+                        padding: "9px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid rgba(255,255,255,0.12)",
+                        background: "rgba(15,23,42,0.95)",
+                        color: "white",
+                        fontWeight: 800,
+                      }}
+                    >
+                      <option value="taxable">Taxable Brokerage</option>
+                      <option value="traditional_ira">Traditional IRA</option>
+                      <option value="roth_ira">Roth IRA</option>
+                    </select>
+                  </label>
+
+                  {taxAccountType === "taxable" ? (
+                    <>
+                      <label style={{ display: "grid", gap: "5px" }}>
+                        <span style={{ color: "#94a3b8", fontSize: "11px", fontWeight: 850 }}>
+                          Filing Status
+                        </span>
+                        <select
+                          value={taxFilingStatus}
+                          onChange={(e) => {
+                            setTaxFilingStatus(e.target.value);
+                            setTaxIncomeBandIndex("4");
+                          }}
+                          style={{
+                            width: "100%",
+                            padding: "9px 10px",
+                            borderRadius: "10px",
+                            border: "1px solid rgba(255,255,255,0.12)",
+                            background: "rgba(15,23,42,0.95)",
+                            color: "white",
+                            fontWeight: 800,
+                          }}
+                        >
+                          {TAX_FILING_STATUS_OPTIONS.map((option) => (
+                            <option key={option.value} value={option.value}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <label style={{ display: "grid", gap: "5px" }}>
+                        <span style={{ color: "#94a3b8", fontSize: "11px", fontWeight: 850 }}>
+                          Taxable Income Bracket
+                        </span>
+                        <select
+                          value={taxIncomeBandIndex}
+                          onChange={(e) => setTaxIncomeBandIndex(e.target.value)}
+                          style={{
+                            width: "100%",
+                            padding: "9px 10px",
+                            borderRadius: "10px",
+                            border: "1px solid rgba(255,255,255,0.12)",
+                            background: "rgba(15,23,42,0.95)",
+                            color: "white",
+                            fontWeight: 800,
+                          }}
+                        >
+                          {taxIncomeBands.map((band, index) => (
+                            <option key={`${band.lower}-${band.upper}`} value={String(index)}>
+                              {formatTaxIncomeBand(band)} · ST {Math.round(band.shortRate * 100)}% / LT {Math.round(band.longRate * 100)}%
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      <div
+                        style={{
+                          color: "#94a3b8",
+                          fontSize: "10px",
+                          fontWeight: 750,
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        Bullionaire tracks FIFO tax lots through every ranking rebalance, separates actual realized short- and long-term gains, nets capital losses across tax years, estimates loss carryforwards, and applies the 2026 federal schedules. The selected income range uses its midpoint as the income assumption for progressive tax calculations.
+                      </div>
+                    </>
+                  ) : (
+                    <div
+                      style={{
+                        color: "#94a3b8",
+                        fontSize: "10px",
+                        fontWeight: 750,
+                        lineHeight: 1.45,
+                      }}
+                    >
+                      {taxAccountType === "traditional_ira"
+                        ? "Traditional IRA: rebalancing does not create current capital-gains tax inside the account. Future withdrawal income tax is not included."
+                        : "Roth IRA: rebalancing does not create current capital-gains tax inside the account. Qualified tax-free withdrawal treatment is assumed."}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div
+            className="strategies-mode-grid"
+            style={{
+              display: backtestType === "custom" ? "grid" : "none",
               gridTemplateColumns: "1fr 1fr",
               gap: "8px",
               marginBottom: "14px",
@@ -2896,6 +3586,7 @@ const benchmarkDisplayedReturn =
 
           <div
             style={{
+              display: backtestType === "custom" ? "block" : "none",
               marginBottom: "16px",
               padding: "10px 12px",
               borderRadius: "12px",
@@ -2917,7 +3608,7 @@ const benchmarkDisplayedReturn =
             </div>
           </div>
 
-            {riskWarnings.length > 0 && (
+            {backtestType === "custom" && riskWarnings.length > 0 && (
   <div
     style={{
       marginBottom: "16px",
@@ -2962,7 +3653,7 @@ const benchmarkDisplayedReturn =
 <div
   className="strategies-active-pills"
   style={{
-    display: "flex",
+    display: backtestType === "custom" ? "flex" : "none",
     flexWrap: "wrap",
     gap: "8px",
     marginBottom: "14px",
@@ -3069,7 +3760,367 @@ const benchmarkDisplayedReturn =
             }}
           />
 
-          {positions.map((position, index) => (
+          {backtestType === "sp500_rank" && (
+            <div
+              style={{
+                marginBottom: "14px",
+                padding: "14px",
+                borderRadius: "14px",
+                background: "rgba(96,165,250,0.08)",
+                border: "1px solid rgba(96,165,250,0.24)",
+              }}
+            >
+              <div
+                style={{
+                  color: "#93c5fd",
+                  fontSize: "12px",
+                  fontWeight: 950,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.35px",
+                  marginBottom: "10px",
+                }}
+              >
+                Dynamic S&P 500 Ranking
+              </div>
+
+              <label style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 800 }}>
+                Rank By
+              </label>
+              <div
+                style={{
+                  marginTop: "6px",
+                  marginBottom: "12px",
+                  padding: "10px 12px",
+                  borderRadius: "10px",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "rgba(15,23,42,0.88)",
+                  color: "#e5e7eb",
+                  fontWeight: 850,
+                }}
+              >
+                Market Cap
+              </div>
+
+              <label style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 800 }}>
+                Top N Companies
+              </label>
+              <input
+                type="number"
+                min="0"
+                max="450"
+                inputMode="numeric"
+                value={rankTopN}
+                onChange={(e) => {
+                  const nextValue = e.target.value;
+
+                  if (
+                    nextValue === "" ||
+                    /^\d+$/.test(nextValue)
+                  ) {
+                    setRankTopN(nextValue);
+                  }
+                }}
+                style={{
+                  width: "calc(100% - 20px)",
+                  marginTop: "6px",
+                  marginBottom: "12px",
+                  padding: "10px",
+                  borderRadius: "10px",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(15,23,42,0.9)",
+                  color: "white",
+                  fontWeight: 800,
+                }}
+              />
+
+              <label style={{ color: "#94a3b8", fontSize: "12px", fontWeight: 800 }}>
+                Rebalance
+              </label>
+              <select
+                value={rankRebalanceMonths}
+                onChange={(e) => setRankRebalanceMonths(Number(e.target.value))}
+                style={{
+                  width: "100%",
+                  marginTop: "6px",
+                  marginBottom: "12px",
+                  padding: "10px",
+                  borderRadius: "10px",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(15,23,42,0.9)",
+                  color: "white",
+                  fontWeight: 800,
+                }}
+              >
+                {RANKING_REBALANCE_OPTIONS.map((option) => (
+                  <option key={option.months} value={option.months}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+
+              <div
+                style={{
+                  padding: "9px 10px",
+                  borderRadius: "10px",
+                  background: "rgba(15,23,42,0.72)",
+                  color: "#cbd5e1",
+                  fontSize: "12px",
+                  fontWeight: 750,
+                  lineHeight: 1.5,
+                }}
+              >
+                Equal-weight the largest {rankTopN === "" ? "N" : rankTopN} S&P 500 companies by point-in-time
+                market cap and rebalance on the selected schedule.
+              </div>
+
+              {backtest?.strategyType === "sp500_market_cap_rank" &&
+                Array.isArray(backtest.positions) &&
+                backtest.positions.length > 0 && (
+                  <div style={{ marginTop: "12px" }}>
+                    <div
+                      style={{
+                        color: "#94a3b8",
+                        fontSize: "11px",
+                        fontWeight: 900,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.3px",
+                        marginBottom: "7px",
+                      }}
+                    >
+                      Latest Holdings
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                      {backtest.positions.map((position, index) => (
+                        <span
+                          key={`${position.ticker}-${index}`}
+                          style={{
+                            padding: "5px 8px",
+                            borderRadius: "999px",
+                            background: "rgba(25,195,125,0.12)",
+                            border: "1px solid rgba(25,195,125,0.28)",
+                            color: "#86efac",
+                            fontSize: "11px",
+                            fontWeight: 850,
+                          }}
+                        >
+                          {position.ticker} {Math.round(Number(position.weight) * 100)}%
+                        </span>
+                      ))}
+                    </div>
+
+                    {showRankingHistory && (
+                      <div
+                        style={{
+                          marginTop: "16px",
+                          paddingTop: "14px",
+                          borderTop: "1px solid rgba(148,163,184,0.18)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            color: "#94a3b8",
+                            fontSize: "11px",
+                            fontWeight: 900,
+                            textTransform: "uppercase",
+                            letterSpacing: "0.3px",
+                            marginBottom: "9px",
+                          }}
+                        >
+                          Holdings By Rebalance
+                        </div>
+
+                        <div
+                          style={{
+                            display: "grid",
+                            gap: "9px",
+                            maxHeight: "460px",
+                            overflowY: "auto",
+                            paddingRight: "3px",
+                          }}
+                        >
+                          {rankingHistory.map((entry, historyIndex) => {
+                            const previousEntry =
+                              historyIndex > 0
+                                ? rankingHistory[historyIndex - 1]
+                                : null;
+
+                            const previousTickers = new Set(
+                              (previousEntry?.holdings || []).map(
+                                (holding) => holding.ticker
+                              )
+                            );
+
+                            const currentTickers = new Set(
+                              (entry?.holdings || []).map(
+                                (holding) => holding.ticker
+                              )
+                            );
+
+                            const addedTickers = new Set(
+                              (entry?.holdings || [])
+                                .map((holding) => holding.ticker)
+                                .filter(
+                                  (ticker) =>
+                                    historyIndex > 0 &&
+                                    !previousTickers.has(ticker)
+                                )
+                            );
+
+                            const removedTickers =
+                              historyIndex > 0
+                                ? (previousEntry?.holdings || [])
+                                    .map((holding) => holding.ticker)
+                                    .filter(
+                                      (ticker) =>
+                                        !currentTickers.has(ticker)
+                                    )
+                                : [];
+
+                            const effectiveDate = entry?.effectiveDate
+                              ? new Date(
+                                  `${entry.effectiveDate}T12:00:00`
+                                ).toLocaleDateString("en-US", {
+                                  month: "short",
+                                  day: "numeric",
+                                  year: "numeric",
+                                })
+                              : null;
+
+                            return (
+                              <div
+                                key={`${entry.snapshotDate}-${historyIndex}`}
+                                style={{
+                                  padding: "10px",
+                                  borderRadius: "11px",
+                                  background: "rgba(15,23,42,0.72)",
+                                  border:
+                                    "1px solid rgba(148,163,184,0.14)",
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    gap: "10px",
+                                    alignItems: "baseline",
+                                    marginBottom: "7px",
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      color: "#e2e8f0",
+                                      fontSize: "12px",
+                                      fontWeight: 950,
+                                    }}
+                                  >
+                                    {formatRankingPeriodLabel(entry)}
+                                  </span>
+
+                                  {effectiveDate && (
+                                    <span
+                                      style={{
+                                        color: "#64748b",
+                                        fontSize: "10px",
+                                        fontWeight: 750,
+                                      }}
+                                    >
+                                      Effective {effectiveDate}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: "5px",
+                                  }}
+                                >
+                                  {(entry?.holdings || []).map(
+                                    (holding) => {
+                                      const wasAdded =
+                                        addedTickers.has(
+                                          holding.ticker
+                                        );
+
+                                      return (
+                                        <span
+                                          key={`${
+                                            entry.snapshotDate
+                                          }-${
+                                            holding.cik ||
+                                            holding.ticker
+                                          }`}
+                                          title={
+                                            wasAdded
+                                              ? "Added at this rebalance"
+                                              : "Held from the prior rebalance"
+                                          }
+                                          style={{
+                                            padding: "4px 7px",
+                                            borderRadius: "999px",
+                                            background: wasAdded
+                                              ? "rgba(25,195,125,0.13)"
+                                              : "rgba(255,255,255,0.055)",
+                                            border: wasAdded
+                                              ? "1px solid rgba(25,195,125,0.30)"
+                                              : "1px solid rgba(148,163,184,0.14)",
+                                            color: wasAdded
+                                              ? "#86efac"
+                                              : "#cbd5e1",
+                                            fontSize: "10px",
+                                            fontWeight: 850,
+                                          }}
+                                        >
+                                          #{holding.rank}{" "}
+                                          {holding.ticker}
+                                          {wasAdded ? " +" : ""}
+                                        </span>
+                                      );
+                                    }
+                                  )}
+                                </div>
+
+                                {removedTickers.length > 0 && (
+                                  <div
+                                    style={{
+                                      marginTop: "7px",
+                                      color: "#fca5a5",
+                                      fontSize: "10px",
+                                      fontWeight: 800,
+                                      lineHeight: 1.45,
+                                    }}
+                                  >
+                                    Removed:{" "}
+                                    {removedTickers.join(", ")}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        <div
+                          style={{
+                            marginTop: "8px",
+                            color: "#64748b",
+                            fontSize: "10px",
+                            fontWeight: 700,
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          + marks a company added at that rebalance.
+                          Detailed rebalance history is shown only
+                          when Top N is below 25.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+            </div>
+          )}
+
+          {backtestType === "custom" && positions.map((position, index) => (
             <div
               key={index}
               className="strategies-position-row"
@@ -3129,6 +4180,7 @@ const benchmarkDisplayedReturn =
           <button
             onClick={addPosition}
             style={{
+              display: backtestType === "custom" ? "block" : "none",
               width: "100%",
               marginTop: "8px",
               padding: "10px",
@@ -3142,7 +4194,7 @@ const benchmarkDisplayedReturn =
           >
             + Add Position
           </button>
-{mode === "portfolio" && Math.abs(exposureStats.grossExposure - 100) > 0.01 && (
+{backtestType === "custom" && mode === "portfolio" && Math.abs(exposureStats.grossExposure - 100) > 0.01 && (
   <div
     style={{
       background: "rgba(239, 68, 68, 0.12)",
@@ -3176,11 +4228,16 @@ const benchmarkDisplayedReturn =
               fontSize: "15px",
             }}
           >
-            {loading ? "Running..." : "Run Backtest"}
+            {loading
+              ? "Running..."
+              : backtestType === "sp500_rank"
+              ? "Run Ranking Backtest"
+              : "Run Backtest"}
           </button>
           <button
   onClick={explainCurrentStrategy}
   style={{
+    display: backtestType === "custom" ? "block" : "none",
     width: "100%",
     marginTop: "10px",
     padding: "11px",
@@ -3195,7 +4252,7 @@ const benchmarkDisplayedReturn =
 >
   {strategyExplanation ? "Hide Explanation" : "Explain This Strategy"}
 </button>
-{strategyExplanation && (
+{backtestType === "custom" && strategyExplanation && (
   <div
     style={{
       marginTop: "14px",
@@ -3341,39 +4398,45 @@ const benchmarkDisplayedReturn =
 
               <div
                 style={{
-                  justifySelf: "center",
-                  padding: "18px 32px",
-                  borderRadius: "18px",
-                  background:
-                    outperformance > 0
-                      ? "rgba(25,195,125,0.18)"
-                      : outperformance < 0
-                      ? "rgba(239,68,68,0.18)"
-                      : "rgba(148,163,184,0.14)",
-                  border:
-                    outperformance > 0
-                      ? "1px solid rgba(25,195,125,0.45)"
-                      : outperformance < 0
-                      ? "1px solid rgba(239,68,68,0.45)"
-                      : "1px solid rgba(148,163,184,0.35)",
-                  fontSize: "20px",
-                  fontWeight: 950,
-                  color:
-                    outperformance > 0
-                      ? "#19C37D"
-                      : outperformance < 0
-                      ? "#ef4444"
-                      : "#cbd5f5",
-                  whiteSpace: "nowrap",
+                  justifySelf: "end",
                   minWidth: "200px",
-                  textAlign: "center",
+                  transform: "translateY(-10px)",
                 }}
               >
-                {outperformance > 0
-                  ? "Outperforming"
-                  : outperformance < 0
-                  ? "Underperforming"
-                  : "In Line"}
+                <div
+                  style={{
+                    padding: "16px 32px",
+                    borderRadius: "18px",
+                    background:
+                      outperformance > 0
+                        ? "rgba(25,195,125,0.18)"
+                        : outperformance < 0
+                        ? "rgba(239,68,68,0.18)"
+                        : "rgba(148,163,184,0.14)",
+                    border:
+                      outperformance > 0
+                        ? "1px solid rgba(25,195,125,0.45)"
+                        : outperformance < 0
+                        ? "1px solid rgba(239,68,68,0.45)"
+                        : "1px solid rgba(148,163,184,0.35)",
+                    fontSize: "20px",
+                    fontWeight: 950,
+                    color:
+                      outperformance > 0
+                        ? "#19C37D"
+                        : outperformance < 0
+                        ? "#ef4444"
+                        : "#cbd5f5",
+                    whiteSpace: "nowrap",
+                    textAlign: "center",
+                  }}
+                >
+                  {outperformance > 0
+                    ? "Outperforming"
+                    : outperformance < 0
+                    ? "Underperforming"
+                    : "In Line"}
+                </div>
               </div>
             </div>
 
@@ -3387,23 +4450,58 @@ const benchmarkDisplayedReturn =
                 marginTop: "0px",
               }}
             >
-              {RANGES.map((r) => (
-                <button
-                  key={r}
-                  onClick={() => setRange(r)}
-                  style={{
-                    background: range === r ? "#19C37D" : "rgba(255,255,255,0.06)",
-                    color: range === r ? "#001f3f" : "#e5e7eb",
-                    border: "1px solid rgba(255,255,255,0.12)",
-                    borderRadius: "999px",
-                    padding: "8px 18px",
-                    cursor: "pointer",
-                    fontWeight: 800,
-                  }}
-                >
-                  {r}
-                </button>
-              ))}
+              {RANGES.map((r) => {
+                const isDisabled =
+                  backtestType === "sp500_rank" && !RANKING_RANGES.includes(r);
+
+                return (
+                  <button
+                    key={r}
+                    disabled={isDisabled}
+                    onClick={() => {
+                      if (!isDisabled) setRange(r);
+                    }}
+                    style={{
+                      background: range === r ? "#19C37D" : "rgba(255,255,255,0.06)",
+                      color: range === r ? "#001f3f" : "#e5e7eb",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      borderRadius: "999px",
+                      padding: "8px 18px",
+                      cursor: isDisabled ? "not-allowed" : "pointer",
+                      fontWeight: 800,
+                      opacity: isDisabled ? 0.35 : 1,
+                    }}
+                    title={
+                      isDisabled
+                        ? "S&P 500 ranking backtests support 1M, 6M, 1Y, and 5Y."
+                        : undefined
+                    }
+                  >
+                    {r}
+                  </button>
+                );
+              })}
+
+              <button
+                type="button"
+                onClick={runBacktest}
+                disabled={loading}
+                style={{
+                  marginLeft: "auto",
+                  minWidth: "200px",
+                  padding: "10px 16px",
+                  borderRadius: "12px",
+                  background: loading ? "rgba(25,195,125,0.55)" : "#19C37D",
+                  color: "#001f3f",
+                  border: "none",
+                  cursor: loading ? "wait" : "pointer",
+                  fontWeight: 950,
+                  fontSize: "14px",
+                  boxShadow: "0 8px 22px rgba(25,195,125,0.16)",
+                }}
+              >
+                {loading ? "Running..." : "Run Backtest"}
+              </button>
             </div>
           </div>
 
@@ -3417,9 +4515,9 @@ const benchmarkDisplayedReturn =
             }}
           >
             {[
-              ["Strategy", strategyReturn],
+              [useAfterTaxChart ? "After-Tax Strategy" : "Strategy", strategyReturn],
               [benchmark, benchmarkDisplayedReturn],
-              ["Outperformance", outperformance],
+              [useAfterTaxChart ? "After-Tax Outperformance" : "Outperformance", outperformance],
               ["Max Drawdown", maxDrawdown],
               ["Volatility", volatility],
             ].map(([label, value]) => (
@@ -3448,6 +4546,269 @@ const benchmarkDisplayedReturn =
             ))}
           </div>
 
+          {backtestType === "sp500_rank" && backtest && includeTaxes && showTaxDetails && taxAnalysis && !taxAnalysisMatchesSettings && (
+            <div
+              style={{
+                margin: "-6px 0 22px",
+                padding: "11px 12px",
+                borderRadius: "12px",
+                background: "rgba(245,158,11,0.08)",
+                border: "1px solid rgba(245,158,11,0.22)",
+                color: "#fde68a",
+                fontSize: "11px",
+                fontWeight: 800,
+              }}
+            >
+              Tax settings changed. Run the backtest again to refresh the after-tax analysis.
+            </div>
+          )}
+
+          {backtestType === "sp500_rank" && backtest && includeTaxes && showTaxDetails && taxAnalysis && taxAnalysisMatchesSettings && (
+            <div
+              style={{
+                margin: "-6px 0 22px",
+                padding: "16px",
+                borderRadius: "14px",
+                background: "rgba(15,23,42,0.72)",
+                border: "1px solid rgba(255,255,255,0.08)",
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: "12px",
+                  flexWrap: "wrap",
+                  alignItems: "baseline",
+                  marginBottom: "12px",
+                }}
+              >
+                <div>
+                  <div style={{ color: "#f8fafc", fontSize: "15px", fontWeight: 950 }}>
+                    After-Tax Analysis
+                  </div>
+                  <div style={{ color: "#64748b", fontSize: "10px", fontWeight: 750, marginTop: "3px" }}>
+                    {taxAnalysis.accountType === "taxable"
+                      ? "FIFO tax-lot simulation · taxes removed from capital each year"
+                      : taxAnalysis.accountType === "traditional_ira"
+                      ? "Traditional IRA · current capital-gains tax deferred"
+                      : "Roth IRA · qualified tax-free treatment assumed"}
+                  </div>
+                </div>
+                <div style={{ color: "#94a3b8", fontSize: "10px", fontWeight: 800 }}>
+                  Start: {formatTaxDollar(taxAnalysis.startingPortfolio)}
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))",
+                  gap: "9px",
+                }}
+              >
+                {[
+                  ["Pre-Tax Return", preTaxStrategyReturn, "#60a5fa"],
+                  ["After-Tax Return", afterTaxReturn, afterTaxReturn >= 0 ? "#19C37D" : "#ef4444"],
+                  [estimatedTaxDrag >= 0 ? "Tax Drag" : "Tax Benefit", Math.abs(estimatedTaxDrag), estimatedTaxDrag > 0 ? "#fca5a5" : "#86efac"],
+                ].map(([label, value, color]) => (
+                  <div
+                    key={label}
+                    style={{
+                      padding: "11px",
+                      borderRadius: "11px",
+                      background: "rgba(255,255,255,0.035)",
+                      border: "1px solid rgba(148,163,184,0.12)",
+                    }}
+                  >
+                    <div style={{ color: "#94a3b8", fontSize: "10px", marginBottom: "5px" }}>
+                      {label}
+                    </div>
+                    <div style={{ color, fontSize: "17px", fontWeight: 950 }}>
+                      {label === "Tax Drag" || label === "Tax Benefit"
+                        ? `${Math.abs(Number(value) || 0).toFixed(2)} pts`
+                        : formatPercent(value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
+                  gap: "9px",
+                  marginTop: "10px",
+                }}
+              >
+                {[
+                  ["Pre-Tax Ending Value", taxAnalysis.preTaxEndingValue, "money"],
+                  ["After-Tax Ending Value", taxAnalysis.afterTaxEndingValue, "money"],
+                  ...(taxAnalysis.accountType === "taxable"
+                    ? [
+                        ["Net Federal Tax Impact", taxAnalysis.estimatedFederalTax, "money"],
+                        ["Total Outperformance vs S&P 500", afterTaxOutperformance, "points"],
+                      ]
+                    : []),
+                ].map(([label, value, displayType]) => (
+                  <div
+                    key={label}
+                    style={{
+                      padding: "10px",
+                      borderRadius: "10px",
+                      background: "rgba(2,6,23,0.34)",
+                      border: "1px solid rgba(148,163,184,0.10)",
+                    }}
+                  >
+                    <div style={{ color: "#64748b", fontSize: "9px", fontWeight: 850 }}>
+                      {label}
+                    </div>
+                    <div
+                      style={{
+                        color:
+                          displayType === "points"
+                            ? Number(value) >= 0
+                              ? "#86efac"
+                              : "#fca5a5"
+                            : label.includes("Tax") && Number(value) > 0
+                            ? "#fca5a5"
+                            : "#e2e8f0",
+                        fontSize: "14px",
+                        fontWeight: 950,
+                        marginTop: "4px",
+                      }}
+                    >
+                      {displayType === "points"
+                        ? `${Number(value) >= 0 ? "+" : ""}${Number(value || 0).toFixed(2)} pts`
+                        : formatTaxDollar(value)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {taxAnalysis.accountType === "taxable" && (
+                <>
+                  <div
+                    style={{
+                      marginTop: "12px",
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fit, minmax(135px, 1fr))",
+                      gap: "8px",
+                    }}
+                  >
+                    {[
+                      ["Short-Term Net Realized", taxAnalysis.shortTermNetRealized],
+                      ["Long-Term Net Realized", taxAnalysis.longTermNetRealized],
+                      ["Gross Realized Gains", taxAnalysis.grossRealizedGains],
+                      ["Realized Losses", -Math.abs(Number(taxAnalysis.realizedLosses) || 0)],
+                      ["Unrealized Gain / Loss", taxAnalysis.estimatedUnrealizedGain],
+                      ["NIIT Estimate", taxAnalysis.niitEstimate],
+                    ].map(([label, value]) => (
+                      <div key={label} style={{ padding: "8px 9px" }}>
+                        <div style={{ color: "#64748b", fontSize: "9px", fontWeight: 800 }}>
+                          {label}
+                        </div>
+                        <div
+                          style={{
+                            color: Number(value) < 0 ? "#fca5a5" : "#cbd5e1",
+                            fontSize: "12px",
+                            fontWeight: 900,
+                            marginTop: "3px",
+                          }}
+                        >
+                          {formatTaxDollar(value)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {Array.isArray(taxAnalysis.yearly) && taxAnalysis.yearly.length > 0 && (
+                    <div style={{ marginTop: "14px" }}>
+                      <div
+                        style={{
+                          color: "#94a3b8",
+                          fontSize: "10px",
+                          fontWeight: 950,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.4px",
+                          marginBottom: "7px",
+                        }}
+                      >
+                        Federal Tax Taken From Portfolio By Year
+                      </div>
+                      <div style={{ overflowX: "auto" }}>
+                        <table
+                          style={{
+                            width: "100%",
+                            borderCollapse: "collapse",
+                            minWidth: "620px",
+                            fontSize: "10px",
+                          }}
+                        >
+                          <thead>
+                            <tr style={{ color: "#64748b", textAlign: "right" }}>
+                              <th style={{ textAlign: "left", padding: "6px" }}>Year</th>
+                              <th style={{ padding: "6px" }}>ST Net</th>
+                              <th style={{ padding: "6px" }}>LT Net</th>
+                              <th style={{ padding: "6px" }}>Losses</th>
+                              <th style={{ padding: "6px" }}>NIIT</th>
+                              <th style={{ padding: "6px" }}>Tax Taken Out</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {taxAnalysis.yearly.map((row) => (
+                              <tr
+                                key={row.year}
+                                style={{
+                                  borderTop: "1px solid rgba(148,163,184,0.10)",
+                                  color: "#cbd5e1",
+                                  textAlign: "right",
+                                }}
+                              >
+                                <td style={{ textAlign: "left", padding: "7px 6px", fontWeight: 900 }}>
+                                  {row.year}
+                                </td>
+                                <td style={{ padding: "7px 6px" }}>{formatTaxDollar(row.shortTermNetRealized)}</td>
+                                <td style={{ padding: "7px 6px" }}>{formatTaxDollar(row.longTermNetRealized)}</td>
+                                <td style={{ padding: "7px 6px" }}>{formatTaxDollar(-Math.abs(Number(row.realizedLosses) || 0))}</td>
+                                <td style={{ padding: "7px 6px" }}>{formatTaxDollar(row.niitEstimate)}</td>
+                                <td
+                                  style={{
+                                    padding: "7px 6px",
+                                    fontWeight: 900,
+                                    color: Number(row.estimatedFederalTax) > 0 ? "#fca5a5" : "#86efac",
+                                  }}
+                                >
+                                  {formatTaxDollar(row.estimatedFederalTax)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              <div
+                style={{
+                  marginTop: "12px",
+                  paddingTop: "10px",
+                  borderTop: "1px solid rgba(148,163,184,0.12)",
+                  color: "#64748b",
+                  fontSize: "9px",
+                  fontWeight: 700,
+                  lineHeight: 1.5,
+                }}
+              >
+                {Array.isArray(taxAnalysis.assumptions)
+                  ? taxAnalysis.assumptions.join(" ")
+                  : "Federal tax estimate only."}
+              </div>
+            </div>
+          )}
+
           <div
             className="strategies-chart"
             onMouseMove={handleMouseMove}
@@ -3463,6 +4824,27 @@ const benchmarkDisplayedReturn =
               border: "1px solid rgba(255,255,255,0.06)",
             }}
           >
+            {useAfterTaxChart && !loading && !backtestError && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "10px",
+                  left: "14px",
+                  zIndex: 4,
+                  padding: "5px 8px",
+                  borderRadius: "999px",
+                  background: "rgba(96,165,250,0.12)",
+                  border: "1px solid rgba(96,165,250,0.28)",
+                  color: "#bfdbfe",
+                  fontSize: "10px",
+                  fontWeight: 850,
+                  pointerEvents: "none",
+                }}
+              >
+                After-tax path · federal tax modeled in backend and deducted at each year-end
+              </div>
+            )}
+
             {loading ? (
               <div style={{ color: "#9ca3af" }}>Running backtest...</div>
             ) : backtestError ? (
@@ -3586,7 +4968,7 @@ const benchmarkDisplayedReturn =
 
                     {activePoint.strategy !== undefined && (
                       <div style={{ fontSize: "14px", fontWeight: 900, color: "#60a5fa" }}>
-                        Strategy: {formatChartValue(activePoint.strategy)}
+                        {useAfterTaxChart ? "After-Tax Strategy" : "Strategy"}: {formatChartValue(activePoint.strategy)}
                       </div>
                     )}
 
@@ -3854,6 +5236,7 @@ const benchmarkDisplayedReturn =
             alignItems: "stretch",
           }}
         >
+          {backtestType === "custom" && (
           <div
             className="strategies-stress-card"
             style={{
@@ -3945,6 +5328,7 @@ const benchmarkDisplayedReturn =
               </div>
             )}
           </div>
+          )}
 
           <div
             className="strategies-score-card"

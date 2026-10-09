@@ -35,3 +35,11 @@ prediction_market_terms_test/
 prediction_snapshot_test/
 sec_debug/
 repair_bullionaire_local_v2.py
+.env
+node_modules/
+sp500_rank_cache/
+prediction_market_failed_snapshots/
+prediction_market_terms_test/
+prediction_snapshot_test/
+sec_debug/
+sp500_polygon_pit_reference_cache.json

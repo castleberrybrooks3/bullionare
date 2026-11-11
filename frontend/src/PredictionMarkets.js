@@ -4097,6 +4097,94 @@ function ArbitrageExecutionChart({
   );
 }
 
+// Keep the executable callout on whole matched contracts. Walk the
+// existing positive-edge order-book segments instead of multiplying
+// quantity by the top ask (which understates slippage).
+const buildWholeContractTradePlan = (accepted, requestedContracts) => {
+  if (!Array.isArray(accepted) || !accepted.length) return null;
+
+  const capacity = asNumber(accepted[accepted.length - 1]?.contracts);
+  const requested = asNumber(requestedContracts);
+  if (capacity === null || requested === null) return null;
+
+  // The shared executable lot size is one whole contract for this view.
+  const contracts = Math.floor(Math.min(capacity, requested) + 1e-8);
+  if (contracts < 1) return null;
+
+  let priorContracts = 0;
+  let priorFees = 0;
+  let polymarketSpendUsd = 0;
+  let kalshiSpendUsd = 0;
+  let estimatedFeesUsd = 0;
+  let remaining = contracts;
+
+  for (const segment of accepted) {
+    if (remaining <= 1e-8) break;
+
+    const endContracts = asNumber(segment.contracts);
+    const polyPrice = asNumber(segment.polymarketPrice);
+    const kalshiPrice = asNumber(segment.kalshiPrice);
+    const endFees = asNumber(segment.estimatedFeesUsd);
+
+    // Missing fee or price data must never produce a seemingly certain quote.
+    if (
+      endContracts === null ||
+      polyPrice === null ||
+      kalshiPrice === null ||
+      endFees === null ||
+      endContracts <= priorContracts ||
+      endFees < priorFees ||
+      polyPrice < 0 ||
+      kalshiPrice < 0
+    ) return null;
+
+    const sliceContracts = endContracts - priorContracts;
+    const toBuy = Math.min(remaining, sliceContracts);
+    const fraction = toBuy / sliceContracts;
+
+    polymarketSpendUsd += toBuy * polyPrice;
+    kalshiSpendUsd += toBuy * kalshiPrice;
+    // Fees are estimated proportionally for any partially used final slice;
+    // the actual venue fee schedule may round differently.
+    estimatedFeesUsd += (endFees - priorFees) * fraction;
+
+    remaining -= toBuy;
+    priorContracts = endContracts;
+    priorFees = endFees;
+  }
+
+  if (remaining > 1e-8) return null;
+
+  const totalCapitalUsd =
+    polymarketSpendUsd + kalshiSpendUsd + estimatedFeesUsd;
+  const payoutUsd = contracts; // $1 per matched pair if settlement terms truly match.
+  const profitUsd = payoutUsd - totalCapitalUsd;
+
+  if (!(totalCapitalUsd > 0) || !(profitUsd > 0)) return null;
+
+  return {
+    contracts,
+    polymarketSpendUsd,
+    kalshiSpendUsd,
+    estimatedFeesUsd,
+    totalCapitalUsd,
+    payoutUsd,
+    profitUsd,
+    returnRate: profitUsd / totalCapitalUsd,
+  };
+};
+
+const formatTradeDollars = (amount) => {
+  const number = asNumber(amount);
+  if (number === null) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(number);
+};
+
 function NetArbitrageDetail({
   item,
   nowMs,
@@ -4174,6 +4262,18 @@ function NetArbitrageDetail({
     String(route?.status || "") ===
       "net_opportunity" &&
     routeIsExecutable(route);
+
+  // Never issue a purchase-sized callout from missing/truncated or stale depth.
+  // Contract rule equivalence still needs confirmation from both venues.
+  const tradePlan =
+    stillNet &&
+    liveConnected &&
+    !route?.depthBreakdownTruncated &&
+    polyLeg.side !== kalshiLeg.side &&
+    ["yes", "no"].includes(polyLeg.side) &&
+    ["yes", "no"].includes(kalshiLeg.side)
+      ? buildWholeContractTradePlan(depth.accepted, matchedContracts)
+      : null;
 
   return (
     <section
@@ -4324,6 +4424,72 @@ function NetArbitrageDetail({
               ? "NET ARBITRAGE LIVE"
               : "EDGE NO LONGER LIVE"}
           </div>
+        </div>
+
+
+        {/* Large, depth-aware purchase summary. The chart below stays untouched. */}
+        <div className="pm-trade-plan">
+          <div className="pm-trade-plan-heading">
+            <div>
+              <span className="pm-trade-plan-kicker">PRACTICAL TRADE SUMMARY</span>
+              <h3>What to buy on each exchange</h3>
+            </div>
+            <span className="pm-trade-plan-tag">
+              {tradePlan ? "ESTIMATED · LIVE DEPTH" : "QUOTE UNAVAILABLE"}
+            </span>
+          </div>
+
+          {tradePlan ? (
+            <>
+              <div className="pm-trade-plan-cards">
+                <div className="pm-trade-plan-card polymarket">
+                  <span className="pm-trade-plan-venue">POLYMARKET</span>
+                  <strong className="pm-trade-plan-spend">
+                    {formatTradeDollars(tradePlan.polymarketSpendUsd)}
+                  </strong>
+                  <strong className={`pm-trade-plan-action ${polyLeg.side?.toLowerCase() === "no" ? "pm-trade-plan-action-no" : ""}`}>
+                   BUY {polyLeg.side.toUpperCase()}
+                  </strong>
+                  <span className="pm-trade-plan-quantity">
+                    {formatContracts(tradePlan.contracts)} {polyLeg.label} contracts
+                  </span>
+                  <small>{formatCents(polyLeg.price)} top ask · includes order-book depth</small>
+                </div>
+
+                <div className="pm-trade-plan-card kalshi">
+                  <span className="pm-trade-plan-venue">KALSHI</span>
+                  <strong className="pm-trade-plan-spend">
+                    {formatTradeDollars(tradePlan.kalshiSpendUsd)}
+                  </strong>
+                  <strong className={`pm-trade-plan-action ${kalshiLeg.side?.toLowerCase() === "no" ? "pm-trade-plan-action-no" : ""}`}>
+                    BUY {kalshiLeg.side.toUpperCase()}
+                  </strong>
+                  <span className="pm-trade-plan-quantity">
+                    {formatContracts(tradePlan.contracts)} {kalshiLeg.label} contracts
+                  </span>
+                  <small>{formatCents(kalshiLeg.price)} top ask · includes order-book depth</small>
+                </div>
+              </div>
+
+              <div className="pm-trade-plan-totals">
+                <span>Estimated fees <b>{formatTradeDollars(tradePlan.estimatedFeesUsd)}</b></span>
+                <span>Capital needed <b>{formatTradeDollars(tradePlan.totalCapitalUsd)}</b></span>
+                <span>Est. net profit <b className="pm-trade-profit">+{formatTradeDollars(tradePlan.profitUsd)}</b></span>
+                <span>Est. net return <b>{formatPercent(tradePlan.returnRate)}</b></span>
+              </div>
+              <p className="pm-trade-plan-note">
+                Based on {formatContracts(tradePlan.contracts)} whole matched contracts, rounded down
+                from the model's available capacity. Prices and fees are estimates, not executable
+                orders or a guaranteed profit. Confirm both markets use identical resolution rules;
+                partial fills, changes in depth, fees, and settlement differences can erase the edge.
+              </p>
+            </>
+          ) : (
+            <p className="pm-trade-plan-note">
+              A reliable matched whole-contract quote is not available from the current live depth.
+              Refresh the market and confirm both venues have complete executable order books.
+            </p>
+          )}
         </div>
 
         <div

@@ -13,6 +13,7 @@ import Feedback from "../Feedback";
 import Strategies from "../Strategies";
 import News from "../News";
 import SmartMoney from "./SmartMoney";
+import Account from "./Account";
 import logo from "../assets/logo.png";
 const PredictionMarkets = lazy(() => import("../PredictionMarkets"));
 
@@ -69,6 +70,7 @@ const [sidebarWidth, setSidebarWidth] = useState(220);
     "/dashboard/smart-money": "SmartMoney",
     "/dashboard/news": "News",
     "/dashboard/feedback": "Feedback",
+    "/dashboard/account": "Account",
   };
 
   const clearSavedStockFilters = () => {
@@ -440,6 +442,7 @@ const openStrategyFromIdea = (strategyIdea) => {
 >
   Feedback
 </div>
+
           </nav>
 
           {!collapsed && <div className="resizer" onMouseDown={startResizing} />}
@@ -473,6 +476,8 @@ const openStrategyFromIdea = (strategyIdea) => {
     <News />
   ) : activeMenu === "Feedback" ? (
     <Feedback />
+  ) : activeMenu === "Account" ? (
+    <Account />
   ) : (
     <StockTable
   view={activeMenu}

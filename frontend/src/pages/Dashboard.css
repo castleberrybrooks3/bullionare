@@ -429,3 +429,45 @@
     height: 5px;
   }
 }
+
+/* =========================================================
+   BULLIONAIRE - MOBILE DASHBOARD HEADER / TOP SCROLLBAR
+   Append this block to the very END of src/pages/Dashboard.css.
+   Mobile only; leave Desktop and Dashboard.jsx unchanged.
+   ========================================================= */
+@media (max-width: 768px) {
+  /* Remove the Market Lens title AND the space reserved for it. */
+  .dashboard .sidebar-top {
+    display: none;
+  }
+
+  /* Bring the navigation right under the main Bullionaire navbar. */
+  .dashboard .sidebar {
+    padding: 3px 10px 5px;
+  }
+
+  /* Flip the scrolling surface vertically: its native horizontal scrollbar
+     moves to the TOP, while horizontal swiping still works normally. */
+  .dashboard .sidebar-nav {
+    margin-top: 0;
+    padding: 0 0 5px;
+    transform: scaleY(-1);
+  }
+
+  /* Flip the visible tab contents back so text/icons aren't upside down.
+     This covers Stocks, every regular tab, and the optional sector list. */
+  .dashboard .sidebar-nav > * {
+    transform: scaleY(-1);
+  }
+
+  /* Preserve a slim gray scrollbar/track at its new top position. */
+  .dashboard .sidebar-nav::-webkit-scrollbar {
+    height: 4px;
+    background: #111126;
+  }
+
+  .dashboard .sidebar-nav::-webkit-scrollbar-thumb {
+    background: #2c2c3c;
+    border-radius: 4px;
+  }
+}

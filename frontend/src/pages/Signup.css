@@ -245,3 +245,56 @@
     line-height: 1.4;
   }
 }
+
+/* =========================================
+   FIX SIGNUP CHECKBOX AND MOBILE OVERFLOW
+   ========================================= */
+
+.signup-form .legal-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.signup-form .legal-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  flex: 0 0 18px;
+  padding: 0;
+  margin: 2px 0 0;
+  box-sizing: border-box;
+  accent-color: #22c55e;
+}
+
+.signup-form .legal-checkbox span {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+
+@media (max-width: 768px) {
+  .signup-page {
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .signup-card {
+    width: 100%;
+    max-width: 420px;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .signup-form {
+    width: 100%;
+    min-width: 0;
+  }
+}

@@ -614,29 +614,6 @@
   /* =========================
      REFRESH / CLEAR FILTERS
      ========================= */
-
-  .stock-table-container input.search-input ~ button {
-  flex: 1 1 calc(50% - 5px);
-
-  min-height: 29px;
-
-  padding: 4px 8px;
-
-  border: 1px solid #d1d5db;
-
-  border-radius: 5px;
-
-  background-color: #ffffff;
-
-  color: #000000;
-
-  font-size: 11px;
-
-  cursor: pointer;
-
-  box-sizing: border-box;
-}
-
 .stock-table-container div:has(> input.search-input) {
   gap: 6px !important;
   margin-bottom: 10px !important;
@@ -852,4 +829,665 @@
 
     box-sizing: border-box;
   }
+}
+
+/* =========================================
+   BULLIONAIRE REFRESH & CLEAR BUTTONS
+   Desktop + Mobile
+   ========================================= */
+
+.stock-table-container button.stock-toolbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 10px 16px;
+
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+
+  box-sizing: border-box;
+  cursor: pointer;
+
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.stock-table-container .stock-toolbar-btn span {
+  font-size: 19px;
+  line-height: 1;
+}
+
+/* REFRESH — GREEN */
+
+.stock-table-container button.stock-toolbar-btn--refresh {
+  background: #19c37d;
+  border: 1px solid #19c37d;
+  color: #04291b;
+}
+
+.stock-table-container button.stock-toolbar-btn--refresh:hover {
+  background: #24df92;
+  border-color: #24df92;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(25, 195, 125, 0.25);
+}
+
+/* CLEAR FILTERS — DARK BLUE */
+
+.stock-table-container button.stock-toolbar-btn--clear {
+  background: #172134;
+  border: 1px solid #425167;
+  color: #e2e8f0;
+}
+
+.stock-table-container button.stock-toolbar-btn--clear:hover {
+  background: #23324a;
+  border-color: #718096;
+  transform: translateY(-1px);
+}
+
+/* CLICK + KEYBOARD STATES */
+
+.stock-table-container button.stock-toolbar-btn:active {
+  transform: scale(0.98);
+}
+
+.stock-table-container button.stock-toolbar-btn:focus-visible {
+  outline: 2px solid #19c37d;
+  outline-offset: 3px;
+}
+
+/* MOBILE */
+
+@media (max-width: 768px) {
+  .stock-table-container button.stock-toolbar-btn {
+    flex: 1 1 calc(50% - 6px);
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 10px;
+    font-size: 12px;
+  }
+
+  .stock-table-container .stock-toolbar-btn span {
+    font-size: 17px;
+  }
+
+  /* Preserve the watchlist's stacked mobile layout */
+
+  .stock-table-container .watchlist-search-row button.stock-toolbar-btn {
+    width: 100%;
+    flex: 0 0 auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stock-table-container button.stock-toolbar-btn {
+    transition: none;
+  }
+}
+
+/* =========================================
+   BULLIONAIRE VIEW BUTTONS + ALL TYPES
+   Desktop and Mobile
+   ========================================= */
+
+/* ALL DATA / FUNDAMENTALS / TECHNICALS */
+
+.stock-table-container button.view-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  min-height: 40px;
+  height: auto;
+  padding: 10px 16px;
+
+  background: #172134;
+  color: #e2e8f0;
+  border: 1px solid #425167;
+  border-radius: 10px;
+
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+
+  box-sizing: border-box;
+
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    transform 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+/* Inactive hover */
+
+.stock-table-container button.view-toggle-button:hover {
+  background: #23324a;
+  border-color: #718096;
+  transform: translateY(-1px);
+}
+
+/* Active selected button */
+
+.stock-table-container button.view-toggle-button.is-active {
+  background: #19c37d;
+  color: #04291b;
+  border-color: #19c37d;
+}
+
+/* Active hover */
+
+.stock-table-container button.view-toggle-button.is-active:hover {
+  background: #24df92;
+  border-color: #24df92;
+  box-shadow: 0 4px 14px rgba(25, 195, 125, 0.25);
+}
+
+/* ALL TYPES DROPDOWN */
+
+.stock-table-container select.search-input.stock-type-select {
+  min-height: 40px;
+  height: 40px;
+  padding: 8px 12px;
+
+  background-color: #172134;
+  color: #e2e8f0;
+  border: 1px solid #425167;
+  border-radius: 10px;
+
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.stock-table-container select.stock-type-select:hover {
+  background-color: #23324a;
+  border-color: #718096;
+}
+
+/* Highlight when a specific security type is selected */
+
+.stock-table-container select.stock-type-select--active {
+  background-color: #19c37d;
+  color: #04291b;
+  border-color: #19c37d;
+}
+
+.stock-table-container select.stock-type-select--active:hover {
+  background-color: #24df92;
+  border-color: #24df92;
+}
+
+/* Keep dropdown options readable */
+
+.stock-table-container select.stock-type-select option {
+  background: #172134;
+  color: #e2e8f0;
+}
+
+/* Keyboard focus */
+
+.stock-table-container button.view-toggle-button:focus-visible,
+.stock-table-container select.stock-type-select:focus-visible {
+  outline: 2px solid #19c37d;
+  outline-offset: 3px;
+}
+
+/* MOBILE STYLING */
+
+@media (max-width: 768px) {
+
+  .stock-table-container button.view-toggle-button {
+    flex: 1 1 0;
+    min-width: 0;
+
+    min-height: 36px;
+    height: 36px;
+    padding: 0 6px !important;
+
+    font-size: 11px;
+    border-radius: 9px;
+  }
+
+  .stock-table-container select.search-input.stock-type-select {
+    min-height: 34px;
+    height: 34px;
+    padding: 5px 9px;
+
+    font-size: 12px;
+    border-radius: 9px;
+  }
+
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stock-table-container button.view-toggle-button {
+    transition: none;
+  }
+}
+
+/* =========================================
+   BULLIONAIRE SEARCH BAR
+   Desktop + Mobile
+   ========================================= */
+
+.stock-table-container input.search-input {
+  height: 40px;
+  min-height: 40px;
+  padding: 10px 14px;
+
+  background-color: #172134;
+  color: #e2e8f0;
+
+  border: 1px solid #425167;
+  border-radius: 10px;
+
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+
+  box-sizing: border-box;
+  outline: none;
+
+  transition:
+    background-color 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+/* Placeholder */
+
+.stock-table-container input.search-input::placeholder {
+  color: #94a3b8;
+  opacity: 1;
+}
+
+/* Hover */
+
+.stock-table-container input.search-input:hover {
+  background-color: #1c2940;
+  border-color: #718096;
+}
+
+/* Focus */
+
+.stock-table-container input.search-input:focus {
+  background-color: #172134;
+  border-color: #19c37d;
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(25, 195, 125, 0.12);
+  caret-color: #19c37d;
+}
+
+
+/* =========================================
+   REFRESH BUTTON — GRAY BY DEFAULT
+   GREEN ONLY WHILE PRESSED
+   ========================================= */
+
+.stock-table-container button.stock-toolbar-btn--refresh {
+  background: #172134;
+  border: 1px solid #425167;
+  color: #e2e8f0;
+  box-shadow: none;
+}
+
+/* Hover stays gray */
+
+.stock-table-container button.stock-toolbar-btn--refresh:hover {
+  background: #23324a;
+  border-color: #718096;
+  color: #e2e8f0;
+  box-shadow: none;
+}
+
+/* Turns green while pressing */
+
+.stock-table-container button.stock-toolbar-btn--refresh:active {
+  background: #19c37d;
+  border-color: #19c37d;
+  color: #04291b;
+  transform: scale(0.98);
+  box-shadow: 0 0 12px rgba(25, 195, 125, 0.25);
+}
+
+
+/* MOBILE */
+
+@media (max-width: 768px) {
+  .stock-table-container input.search-input {
+    height: 34px;
+    min-height: 34px;
+    padding: 5px 10px;
+    font-size: 12px;
+    border-radius: 9px;
+  }
+}
+
+/* STOCK NOTES: two independent buttons INSIDE the existing SAVE cell. */
+.stock-table-container .save-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 100%;
+  height: 100%;
+}
+.stock-table-container .ag-cell .save-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  background: transparent;
+  border: 0;
+  color: #fff;
+  padding: 0;
+  width: 22px;
+  height: 28px;
+  cursor: pointer;
+  line-height: 1;
+  transition: transform .15s ease;
+}
+.stock-table-container .ag-cell .save-star-button {
+  font-size: 24px;
+}
+.stock-table-container .ag-cell .save-icon-button:hover {
+  transform: scale(1.13);
+}
+.stock-table-container .ag-cell .save-icon-button:focus-visible {
+  outline: 2px solid #19c37d;
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+
+/* =========================================================
+   WATCHLIST CONTROLS — match the Market Analytics toolbar
+   Only the watchlist selector + New/Rename/Delete/Export.
+   Search, Refresh, Clear Filters, table and filters unchanged.
+   ========================================================= */
+
+.stock-table-container .watchlist-controls-row select.watchlist-list-select,
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn {
+  box-sizing: border-box;
+  min-height: 40px;
+  height: 40px;
+  border: 1px solid #425167;
+  border-radius: 10px;
+  background: #172134;
+  color: #e2e8f0;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease,
+    color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stock-table-container .watchlist-controls-row select.watchlist-list-select {
+  width: 174px;
+  padding: 8px 12px;
+  appearance: auto;
+}
+
+.stock-table-container .watchlist-controls-row select.watchlist-list-select option {
+  background: #172134;
+  color: #e2e8f0;
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px 16px;
+}
+
+/* New = affirmative action; same green as selected All Data. */
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--new {
+  background: #19c37d;
+  border-color: #19c37d;
+  color: #04291b;
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--new:hover {
+  background: #24df92;
+  border-color: #24df92;
+  box-shadow: 0 4px 14px rgba(25, 195, 125, 0.25);
+}
+
+/* Rename and Export = neutral dark buttons. */
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--rename:hover,
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--export:hover,
+.stock-table-container .watchlist-controls-row select.watchlist-list-select:hover {
+  background: #23324a;
+  border-color: #718096;
+}
+
+/* Delete stays distinct without the dated bright-red block. */
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--delete {
+  background: #2c1d2a;
+  border-color: #754453;
+  color: #ffc3c8;
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--delete:hover {
+  background: #482634;
+  border-color: #e57383;
+  color: #ffe2e6;
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn:active {
+  transform: scale(0.98);
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn:focus-visible,
+.stock-table-container .watchlist-controls-row select.watchlist-list-select:focus-visible {
+  outline: 2px solid #19c37d;
+  outline-offset: 3px;
+}
+
+@media (max-width: 700px) {
+  .stock-table-container .watchlist-controls-row button.watchlist-control-btn,
+  .stock-table-container .watchlist-controls-row select.watchlist-list-select {
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    height: 36px;
+    padding: 8px 12px;
+    font-size: 12px;
+    border-radius: 9px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stock-table-container .watchlist-controls-row button.watchlist-control-btn,
+  .stock-table-container .watchlist-controls-row select.watchlist-list-select {
+    transition: none;
+  }
+}
+
+
+/* ================================================================
+   WATCHLIST TOOLBAR — COMPACT TWO-ROW LAYOUT
+   Row 1: Watchlist selector | New | Rename | Delete | Export CSV
+   Row 2: Search | Refresh | Clear Filters
+   Scoped to Watchlist only. No JavaScript/behavior modifications.
+   ================================================================ */
+@media (min-width: 601px) {
+  .stock-table-container .watchlist-controls-left {
+    min-width: 0;
+    gap: 10px;
+  }
+
+  .stock-table-container .watchlist-controls-row {
+    display: grid;
+    grid-template-columns:
+      minmax(106px, 1.3fr)
+      minmax(58px, 0.62fr)
+      minmax(80px, 0.89fr)
+      minmax(70px, 0.78fr)
+      minmax(150px, 1.65fr);
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .stock-table-container .watchlist-controls-row select.watchlist-list-select,
+  .stock-table-container .watchlist-controls-row button.watchlist-control-btn {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    height: 40px;
+    padding: 7px 7px;
+    font-size: 12px;
+    border-radius: 10px;
+  }
+
+  .stock-table-container .watchlist-controls-row select.watchlist-list-select {
+    padding-left: 11px;
+    padding-right: 6px;
+  }
+
+  .stock-table-container .watchlist-search-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content max-content;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    margin-top: 0;
+  }
+
+  .stock-table-container .watchlist-search-row input.search-input {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: 40px;
+    min-height: 40px;
+    flex: initial;
+  }
+
+  .stock-table-container .watchlist-search-row button.stock-toolbar-btn {
+    width: auto;
+    min-width: 0;
+    min-height: 40px;
+    height: 40px;
+    flex: initial;
+    padding: 8px 12px;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+/* Narrow phones: preserve legible controls rather than overflowing.
+   Desktop/tablet widths still use exactly two toolbar rows above. */
+@media (max-width: 600px) {
+  .stock-table-container .watchlist-controls-left {
+    min-width: 0;
+    width: 100%;
+    gap: 8px;
+  }
+
+  .stock-table-container .watchlist-controls-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    width: 100%;
+  }
+
+  .stock-table-container .watchlist-controls-row select.watchlist-list-select,
+  .stock-table-container .watchlist-controls-row button.watchlist-control-btn {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .stock-table-container .watchlist-controls-row select.watchlist-list-select,
+  .stock-table-container .watchlist-controls-row button.watchlist-control-btn--export {
+    grid-column: 1 / -1;
+  }
+
+  .stock-table-container .watchlist-search-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+  }
+
+  .stock-table-container .watchlist-search-row input.search-input {
+    grid-column: 1 / -1;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+
+  .stock-table-container .watchlist-search-row button.stock-toolbar-btn {
+    width: 100%;
+    min-width: 0;
+    font-size: 12px;
+  }
+}
+
+/* ================================================================
+   WATCHLIST ACTION ACCENTS — RENAME BLUE / EXPORT EXCEL GREEN
+   Appearance only. Keeps the existing compact two-row layout.
+   ================================================================ */
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--rename {
+  background: #2563eb;
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--rename:hover {
+  background: #1d4ed8;
+  border-color: #60a5fa;
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.24);
+}
+
+/* Faint mint diagonal pinstripes with Excel-green lettering and border. */
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--export {
+  background: repeating-linear-gradient(
+    135deg,
+    #f7fcf9 0px,
+    #f7fcf9 9px,
+    #eaf6ee 9px,
+    #eaf6ee 18px
+  );
+  border-color: #107c41;
+  color: #107c41;
+}
+
+.stock-table-container .watchlist-controls-row button.watchlist-control-btn--export:hover {
+  background: repeating-linear-gradient(
+    135deg,
+    #eaf7ef 0px,
+    #eaf7ef 9px,
+    #d9efdf 9px,
+    #d9efdf 18px
+  );
+  border-color: #0b6333;
+  color: #0b6333;
+  box-shadow: 0 4px 14px rgba(16, 124, 65, 0.16);
 }

@@ -1,0 +1,108 @@
+/* Supplemental, strictly scoped to Smart Money Insider Transactions. */
+.insider-terminal-page .insider-event-controls {
+  margin: 18px 0 22px;
+  padding: 16px 18px;
+  border: 1px solid #29364a;
+  border-radius: 12px;
+  background: #111a2b;
+  color: #e5eef6;
+}
+.insider-terminal-page .insider-event-controls-heading {
+  display: flex;
+  gap: 10px;
+  flex-direction: column;
+  margin-bottom: 12px;
+}
+.insider-terminal-page .insider-event-controls-heading strong {
+  font-size: 15px;
+}
+.insider-terminal-page .insider-event-controls-heading span,
+.insider-terminal-page .insider-event-context,
+.insider-terminal-page .insider-event-footnote {
+  font-size: 12px;
+  color: #9aa9bc;
+  line-height: 1.55;
+}
+.insider-terminal-page .insider-event-controls-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.insider-terminal-page .insider-event-toggle {
+  display: inline-flex;
+  gap: 5px;
+  background: #0b1222;
+  border: 1px solid #2c4055;
+  border-radius: 9px;
+  padding: 4px;
+  max-width: 100%;
+}
+.insider-terminal-page .insider-event-toggle button {
+  border: 0;
+  background: transparent;
+  color: #c0ccda;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+  font-size: 13px;
+  border-radius: 7px;
+  padding: 9px 13px;
+}
+.insider-terminal-page .insider-event-toggle button.active {
+  background: #19c37d;
+  color: #08251b;
+}
+.insider-terminal-page .insider-event-toggle button:disabled,
+.insider-terminal-page .insider-event-days select:disabled {
+  cursor: wait;
+  opacity: .7;
+}
+.insider-terminal-page .insider-event-days {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: #b7c4d5;
+  font-size: 13px;
+}
+.insider-terminal-page .insider-event-days select {
+  background: #0b1222;
+  color: #f3f7fc;
+  border: 1px solid #36445a;
+  border-radius: 7px;
+  padding: 9px;
+  font: inherit;
+  max-width: 170px;
+}
+.insider-terminal-page .insider-event-updating {
+  font-size: 12px;
+  color: #64e6ac;
+}
+.insider-terminal-page .insider-event-context { margin: 14px 0 0; }
+.insider-terminal-page .insider-event-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 18px 10px 8px;
+  color: #c0ccda;
+  font-size: 13px;
+}
+.insider-terminal-page .insider-event-pagination button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+.insider-terminal-page .insider-event-footnote { margin: 12px 0 0; }
+@media (max-width: 600px) {
+  .insider-terminal-page .insider-event-controls { padding: 12px; }
+  .insider-terminal-page .insider-event-toggle { width: 100%; }
+  .insider-terminal-page .insider-event-toggle button { flex: 1; padding: 9px 5px; font-size: 12px; }
+  .insider-terminal-page .insider-event-pagination { gap: 8px; }
+}
+
+/* Verified SEC filing-level context. These tags describe disclosed information,
+   NOT the reason or motive for every individual transaction in the filing. */
+.insider-audit-context { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 100px; }
+.insider-audit-context span { color: #a5b4c9; font-size: 11px; white-space: nowrap; }
+.insider-audit-context .insider-audit-review { color: #fbbf24; }

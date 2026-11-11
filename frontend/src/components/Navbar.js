@@ -1,7 +1,7 @@
 import "./Navbar.css";
 import logo from "../assets/logo.png";
 import { supabase } from "../lib/supabaseClient";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useEffect, useState } from "react";
 
 const CURRENT_TERMS_VERSION = "2026-08-08";
@@ -106,6 +106,7 @@ export default function Navbar() {
         <a href="/">Home</a>
         <a href="/dashboard">Dashboard</a>
         <a href="/about">About</a>
+        <Link to="/dashboard/account">Profile</Link>
 
         {!authLoading && (
           <button

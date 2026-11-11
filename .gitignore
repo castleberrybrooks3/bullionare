@@ -43,3 +43,6 @@ prediction_market_terms_test/
 prediction_snapshot_test/
 sec_debug/
 sp500_polygon_pit_reference_cache.json
+
+# Bullionaire MCP (managed in separate GitHub repository)
+bullionaire-mcp/

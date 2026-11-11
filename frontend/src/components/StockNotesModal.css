@@ -1,0 +1,91 @@
+/* Isolated Bullionaire stock notes modal. No AG Grid styles are changed. */
+.stock-notes-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 11000;
+  background: rgba(3, 8, 20, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  box-sizing: border-box;
+}
+.stock-notes-dialog {
+  width: min(640px, 100%);
+  max-height: min(85vh, 850px);
+  background: #111b30;
+  color: #f8fafc;
+  border: 1px solid #35445f;
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+.stock-notes-header, .stock-notes-footer {
+  flex: 0 0 auto;
+  padding: 18px 22px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.stock-notes-header { border-bottom: 1px solid #2d3b54; }
+.stock-notes-footer { border-top: 1px solid #2d3b54; }
+.stock-notes-header h2 { color: white; margin: 0 0 5px; font-size: 22px; }
+.stock-notes-header p { margin: 0; color: #a6b4ca; font-size: 12px; }
+.stock-notes-close { background: none; border: none; color: #e2e8f0; font-size: 30px; line-height: 1; cursor: pointer; }
+.stock-notes-content { padding: 18px 22px; overflow-y: auto; min-height: 90px; }
+.stock-notes-muted { color: #a6b4ca; font-size: 14px; }
+.stock-notes-error { background: #4b202b; border: 1px solid #e46c7e; color: #ffe0e5; padding: 11px; border-radius: 8px; margin-bottom: 14px; font-size: 13px; }
+.stock-notes-card { background: #19263d; border: 1px solid #394a64; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+.stock-notes-card-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 10px; }
+.stock-notes-card-heading strong { font-size: 14px; color: #fff; }
+.stock-notes-entry { margin: 12px 0; padding: 0 0 9px; border-bottom: 1px solid #344158; }
+.stock-notes-entry:last-of-type { border-bottom: 0; }
+.stock-notes-entry time { color: #8fb5f7; font-size: 12px; font-weight: 700; }
+.stock-notes-entry p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; margin: 6px 0 0; font-size: 14px; }
+.stock-notes-link, .stock-notes-add { border: 0; background: none; color: #7ed7ad; font-weight: 650; cursor: pointer; }
+.stock-notes-delete { color: #f7a7a7; font-size: 12px; }
+.stock-notes-add { padding: 5px 0; }
+.stock-notes-compose { border: 1px solid #3a6a59; border-radius: 10px; padding: 16px; background: #152b2d; }
+.stock-notes-compose label { display: block; margin-bottom: 9px; font-weight: 700; }
+.stock-notes-compose textarea { width: 100%; box-sizing: border-box; resize: vertical; background: #0e1729; color: #fff; border: 1px solid #688378; border-radius: 8px; padding: 10px; font: inherit; font-size: 14px; }
+.stock-notes-compose textarea:focus { outline: 2px solid #19c37d; outline-offset: 1px; }
+.stock-notes-compose p { color: #afc6c4; font-size: 12px; margin: 8px 0 14px; }
+.stock-notes-composer-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.stock-notes-primary, .stock-notes-secondary { border: none; cursor: pointer; padding: 10px 14px; border-radius: 8px; font-weight: 700; font-size: 13px; }
+.stock-notes-primary { background: #19c37d; color: #04291b; }
+.stock-notes-secondary { background: #2b3a53; color: white; }
+.stock-notes-dialog button:disabled { opacity: .55; cursor: not-allowed; }
+.stock-notes-dialog button:focus-visible { outline: 2px solid #19c37d; outline-offset: 3px; }
+@media (max-width: 640px) {
+  .stock-notes-backdrop { padding: 8px; }
+  .stock-notes-dialog { max-height: 92vh; }
+  .stock-notes-header, .stock-notes-footer { padding: 14px; }
+  .stock-notes-content { padding: 14px; }
+  .stock-notes-header h2 { font-size: 19px; }
+}
+
+/* Date and edit action for each original note or dated addition. */
+.stock-notes-entry-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.stock-notes-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.stock-notes-edited-date {
+  font-size: 12px;
+  color: #acb9d0;
+}
+.stock-notes-edit {
+  font-size: 12px;
+  padding: 3px 0;
+}

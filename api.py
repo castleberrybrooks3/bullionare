@@ -21,11 +21,16 @@ from prediction_markets_routes import (
     prediction_market_lifespan,
     router as prediction_markets_router,
 )
+from smart_money_event_routes import (
+    router as smart_money_event_router,
+    INSIDER_PUBLIC_SIGNAL_WHERE,
+)
 
 app = FastAPI(lifespan=prediction_market_lifespan)
 
 app.include_router(board_leadership_router)
 app.include_router(prediction_markets_router)
+app.include_router(smart_money_event_router)
 
 DEFAULT_CORS_ORIGINS = {
     "http://localhost:3000",
@@ -878,7 +883,7 @@ def _merge_filing_xbrl_into_companyfacts(companyfacts, parsed):
 
     freshness = merged.setdefault("_bullionaire_sec_freshness", [])
     freshness.append({
-        "mode": "direct_filing_xbrl_fallback",
+        "mode": parsed.get("source_mode") or "direct_filing_xbrl_fallback",
         "form": parsed.get("filing", {}).get("form"),
         "report_date": parsed.get("filing", {}).get("report_date"),
         "filing_date": parsed.get("filing", {}).get("filing_date"),
@@ -940,6 +945,373 @@ def _merge_companyfacts_history(primary, historical, history_cik=None):
 
     return merged
 
+def _load_sap_h1_6k_statement_facts(cik, submissions):
+    """
+    Extract SAP Q2/H1 IFRS facts from an SEC 6-K financial exhibit.
+    Never use non-IFRS or constant-currency columns.
+    """
+    from bs4 import BeautifulSoup
+
+    recent = ((submissions or {}).get("filings") or {}).get("recent") or {}
+    filings = []
+
+    for i, form in enumerate(recent.get("form") or []):
+        if str(form).upper() not in {"6-K", "6-K/A"}:
+            continue
+        try:
+            accession = recent["accessionNumber"][i]
+            filed = recent["filingDate"][i]
+        except (IndexError, KeyError):
+            continue
+        if accession and filed and filed >= "2026-01-01":
+            filings.append((filed, accession))
+
+    def parse_number(cell):
+        raw = (str(cell or "").strip().replace(",", "")
+               .replace("\u200b", "").translate(str.maketrans({
+                   "–": "-", "—": "-", "−": "-",
+               })))
+        if not re.fullmatch(r"\(?[+-]?\d+(?:\.\d+)?\)?", raw):
+            return None
+        try:
+            value = float(raw.strip("()"))
+            return -value if raw.startswith("(") else value
+        except ValueError:
+            return None
+
+    concepts = {
+        "total revenue": "Revenue",
+        "gross profit": "GrossProfit",
+        "operating profit (loss)": "ProfitLossFromOperatingActivities",
+        "profit (loss) after tax": "ProfitLoss",
+        "net cash flows from operating activities":
+            "CashFlowsFromUsedInOperatingActivities",
+    }
+
+    for filed, accession in sorted(filings, reverse=True)[:8]:
+        clean_accession = accession.replace("-", "")
+        base = (
+            f"{SEC_WWW_URL}/Archives/edgar/data/"
+            f"{int(cik)}/{clean_accession}/"
+        )
+
+        index = get_sec_json(
+            base + "index.json",
+            headers=SEC_WWW_HEADERS,
+        )
+
+        items = ((index or {}).get("directory") or {}).get("item") or []
+
+        names = sorted(
+            (str(item.get("name") or "") for item in items),
+            key=lambda name: ("ex99-1" not in name.lower(), name),
+        )
+
+        names = [
+            name for name in names
+            if re.search(r"ex99[-_.]?\d+", name, re.I)
+            and name.lower().endswith((".htm", ".html"))
+        ][:8]
+
+        for name in names:
+            url = base + name
+
+            try:
+                response = requests.get(
+                    url,
+                    headers=SEC_WWW_HEADERS,
+                    timeout=35,
+                )
+                response.raise_for_status()
+                soup = BeautifulSoup(response.text, "lxml")
+            except Exception as exc:
+                print(
+                    f"[SAP 6-K] Exhibit unavailable: "
+                    f"{type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                continue
+
+            datasets = {}
+
+            for table in soup.find_all("table"):
+                rows = []
+
+                for tr in table.find_all("tr"):
+                    cells = [
+                        cell.get_text(" ", strip=True)
+                        for cell in tr.find_all(
+                            ["td", "th"], recursive=False
+                        )
+                    ]
+                    cells = [
+                        cell for cell in cells
+                        if cell and cell != "\u200b"
+                    ]
+                    if cells:
+                        rows.append(cells)
+
+                if not rows:
+                    continue
+
+                header = " ".join(
+                    " ".join(row) for row in rows[:4]
+                ).lower()
+
+                header = re.sub(r"[‐‑‒–—−]", "-", header)
+
+                # Require the IFRS/non-IFRS statement table,
+                # not a constant-currency reconciliation table.
+                header = re.sub(r"\s+", " ", header).strip()
+
+                if not (
+                        header.startswith("ifrs non-ifrs")
+                        and "€" in header
+                        and "million" in header
+                ):
+                    continue
+
+                # Recognize Q1-Q2 even when the SEC filing
+                # uses a Unicode dash instead of a hyphen.
+                is_h1 = bool(
+                    re.search(r"\bq1.{0,5}q2\s*2026\b", header)
+                )
+                is_q2 = (
+                        not is_h1
+                        and bool(re.search(r"\bq2\s*2026\b", header))
+                )
+
+                if not (is_h1 or is_q2):
+                    continue
+
+                period = "H1" if is_h1 else "Q2"
+                values = {}
+
+                for row in rows:
+                    label = re.sub(
+                        r"\s+", " ", str(row[0])
+                    ).lower().strip()
+
+                    concept = concepts.get(label)
+                    if concept is None:
+                        continue
+
+                    numbers = [
+                        parse_number(cell) for cell in row[1:]
+                    ]
+                    numbers = [
+                        number for number in numbers
+                        if number is not None
+                    ]
+
+                    if len(numbers) >= 2:
+                        values[concept] = (
+                            numbers[0] * 1_000_000,
+                            numbers[1] * 1_000_000,
+                        )
+
+                required = {
+                    "Revenue",
+                    "ProfitLossFromOperatingActivities",
+                }
+
+                if required.issubset(values):
+                    datasets[period] = values
+
+            if not {"Q2", "H1"}.issubset(datasets):
+                continue
+
+            q2 = datasets["Q2"]
+            h1 = datasets["H1"]
+
+            # Reconcile the current and comparative periods.
+            valid = all(
+                key in h1
+                and h1[key][i] >= q2[key][i] > 0
+                for key in (
+                    "Revenue",
+                    "ProfitLossFromOperatingActivities",
+                )
+                for i in (0, 1)
+            )
+
+            if not valid:
+                continue
+
+            parsed = {
+                "facts": {"ifrs-full": {}},
+                "filing": {
+                    "form": "6-K",
+                    "filing_date": filed,
+                    "report_date": "2026-06-30",
+                    "accession": accession,
+                },
+                "instance_url": url,
+                "source_mode": "validated_6k_ifrs_html",
+            }
+
+            output = parsed["facts"]["ifrs-full"]
+
+            for period, values in datasets.items():
+                for concept, (current, prior) in values.items():
+                    fact = output.setdefault(
+                        concept, {"units": {"EUR": []}}
+                    )
+
+                    for year, amount in (
+                        (2026, current),
+                        (2025, prior),
+                    ):
+                        start = (
+                            f"{year}-01-01"
+                            if period == "H1"
+                            else f"{year}-04-01"
+                        )
+
+                        fact["units"]["EUR"].append({
+                            "start": start,
+                            "end": f"{year}-06-30",
+                            "val": amount,
+                            "form": "6-K",
+                            "filed": filed,
+                            "accn": accession,
+                            "fy": year,
+                            "fp": "Q2",
+                            "frame": None,
+                        })
+
+            # Balance-sheet values are instants, not Q2/H1 flow totals.
+            # Inject only the complete, reconciled June 2026 statement.
+            balance_labels = {
+                "cash and cash equivalents": "CashAndCashEquivalents",
+                "total current assets": "CurrentAssets",
+                "property, plant, and equipment": "PropertyPlantAndEquipment",
+                "total assets": "Assets",
+                "total current liabilities": "CurrentLiabilities",
+                "total liabilities": "Liabilities",
+                "total equity": "Equity",
+            }
+            balance = {}
+
+            for table in soup.find_all("table"):
+                statement_rows = []
+                for tr in table.find_all("tr"):
+                    cells = [
+                        cell.get_text(" ", strip=True)
+                        for cell in tr.find_all(["td", "th"], recursive=False)
+                    ]
+                    cells = [cell for cell in cells if cell and cell != "\u200b"]
+                    if cells:
+                        statement_rows.append(cells)
+
+                header = " ".join(
+                    " ".join(row) for row in statement_rows[:3]
+                ).lower()
+                if not (
+                    "as at 6/30/2026" in header
+                    and "12/31/2025" in header
+                ):
+                    continue
+
+                for row in statement_rows:
+                    label = re.sub(r"\s+", " ", row[0]).lower().strip()
+                    concept = balance_labels.get(label)
+                    if concept:
+                        values = [parse_number(c) for c in row[1:]]
+                        values = [v for v in values if v is not None]
+                        if len(values) >= 2:
+                            balance[concept] = values[0] * 1_000_000
+                break
+
+            # SAP defines 'financial debt' separately from all IFRS
+            # financial liabilities. Read its liquidity reconciliation,
+            # not the financial-liabilities carrying-value note.
+            half_year_name = next(
+                (n for n in names if re.search(r"ex99[-_.]?2\.html?$", n, re.I)),
+                None,
+            )
+            if half_year_name and balance:
+                try:
+                    half_url = base + half_year_name
+                    half_resp = requests.get(
+                        half_url, headers=SEC_WWW_HEADERS, timeout=35
+                    )
+                    half_resp.raise_for_status()
+                    half_soup = BeautifulSoup(half_resp.text, "lxml")
+                    for table in half_soup.find_all("table"):
+                        # The correct reconciliation can appear beyond the first
+                        # 260 characters; normalize SEC HTML whitespace too.
+                        table_text = re.sub(
+                            r"\s+", " ", table.get_text(" ", strip=True)
+                        ).lower()
+                        if not (
+                            "6/30/2026" in table_text
+                            and "12/31/2025" in table_text
+                        ):
+                            continue
+                        for tr in table.find_all("tr"):
+                            cells = [
+                                c.get_text(" ", strip=True)
+                                for c in tr.find_all(["td", "th"], recursive=False)
+                            ]
+                            cells = [c for c in cells if c and c != "\u200b"]
+                            if not cells:
+                                continue
+                            debt_label = re.sub(r"\s+", " ", cells[0]).strip().lower()
+                            if debt_label != "financial debt":
+                                continue
+                            values = [parse_number(c) for c in cells[1:]]
+                            values = [v for v in values if v is not None]
+                            if len(values) >= 2 and values[0] < 0 and values[1] < 0:
+                                debt = abs(values[0]) * 1_000_000
+                                prior_debt = abs(values[1]) * 1_000_000
+                                if prior_debt == 6_150_000_000:
+                                    balance["Borrowings"] = debt
+                                    parsed["balance_sheet_debt_source_url"] = half_url
+                            break
+                        if "Borrowings" in balance:
+                            break
+                except Exception as exc:
+                    print(f"[SAP 6-K] Balance debt unavailable: {exc}", flush=True)
+
+            required_balance = set(balance_labels.values()) | {"Borrowings"}
+            if required_balance.issubset(balance):
+                assets = balance["Assets"]
+                liabilities = balance["Liabilities"]
+                equity = balance["Equity"]
+                valid_balance = (
+                    assets > 0
+                    and abs(assets - liabilities - equity) <= 2_000_000
+                    and 0 < balance["CashAndCashEquivalents"] <= assets
+                    and 0 < balance["Borrowings"] <= liabilities
+                    and 0 < balance["CurrentAssets"] <= assets
+                    and 0 < balance["CurrentLiabilities"] <= liabilities
+                )
+                if valid_balance:
+                    for concept, value in balance.items():
+                        output.setdefault(concept, {"units": {"EUR": []}})["units"]["EUR"].append({
+                            "end": "2026-06-30",
+                            "val": value,
+                            "form": "6-K",
+                            "filed": filed,
+                            "accn": accession,
+                            "fy": 2026,
+                            "fp": "Q2",
+                            "frame": None,
+                        })
+                    print("[SAP 6-K] Reconciled June 2026 balance sheet", flush=True)
+                else:
+                    print("[SAP 6-K] Balance sheet did not reconcile", flush=True)
+            else:
+                print("[SAP 6-K] Skipped incomplete June 2026 balance sheet", flush=True)
+
+            print(
+                f"[SAP 6-K] Validated Q2/H1 IFRS facts: {url}",
+                flush=True,
+            )
+            return parsed
+
+    return None
 
 def get_fresh_companyfacts_for_cik(cik: str):
     """
@@ -1055,6 +1427,17 @@ def get_fresh_companyfacts_for_cik(cik: str):
                 f"only reached {latest_companyfacts_period}.",
                 flush=True,
             )
+
+        # SAP's interim IFRS statements are disclosed through Form 6-K
+        # exhibits rather than ordinary quarterly Companyfacts.
+        if str(cik).zfill(10) == "0001000184":
+            sap_interim = _load_sap_h1_6k_statement_facts(
+                cik, submissions
+            )
+            if sap_interim:
+                merged = _merge_filing_xbrl_into_companyfacts(
+                    merged, sap_interim
+                )
 
         with SEC_CACHE_LOCK:
             _store_sec_cache_locked(cache_key, merged, time.time())
@@ -1619,7 +2002,7 @@ def latest_instant_facts(fact_rows, max_periods=8):
         fp = row.get("fp")
         if form not in SEC_QUARTERLY_FORMS:
             continue
-        if val is None or not end:
+        if val is None or not end or row.get("start") is not None:
             continue
         clean.append({
             "period": end,
@@ -1648,10 +2031,17 @@ def get_monetary_rows(companyfacts, concept, preferred_currency=None):
     if not concept_data:
         return [], None, namespace
     units = concept_data.get("units", {}) or {}
-    candidates = []
     if preferred_currency:
-        candidates.extend([preferred_currency, preferred_currency.lower()])
-    candidates.extend(_currency_unit_candidates(units))
+        for unit, rows in units.items():
+            if (
+                    str(unit).upper() == str(preferred_currency).upper()
+                    and rows
+            ):
+                return rows, str(unit).upper(), namespace
+
+        return [], None, namespace
+
+    candidates = _currency_unit_candidates(units)
     seen = set()
     for currency in candidates:
         if currency in seen:
@@ -1689,6 +2079,14 @@ def get_per_share_rows(companyfacts, concept, preferred_currency=None):
     for unit, rows in units.items():
         normalized = str(unit or "").lower().replace(" ", "")
         if "/" not in normalized or "share" not in normalized:
+            continue
+
+            # Never substitute EPS denominated in another currency.
+        unit_currency = normalized.split("/", 1)[0].upper()
+        if (
+                preferred_currency
+                and unit_currency != str(preferred_currency).upper()
+        ):
             continue
 
         score = 0
@@ -3177,6 +3575,120 @@ def build_financial_health_score(latest, growth):
         "warnings": warnings[:5],
     }
 
+def resolve_sec_borrowings(row, taxonomy="us-gaap"):
+    """Determine full borrowings only from nonoverlapping SEC concepts."""
+
+    def amount(key):
+        try:
+            raw = row.get(key)
+            result = float(raw) if raw is not None else None
+            return result if result is not None and math.isfinite(result) and result >= 0 else None
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+    reported = amount("debt")
+    current = amount("current_debt")
+    noncurrent = amount("long_term_debt")
+    paper = amount("commercial_paper")
+
+    reported_tag = row.get("debt_concept")
+    current_tag = row.get("current_debt_concept")
+    noncurrent_tag = row.get("long_term_debt_concept")
+
+    total_tags = {
+        "LongTermDebt",
+        "LongTermDebtAndFinanceLeaseObligations",
+        "LongTermDebtAndFinanceLeaseObligationsCurrentAndNoncurrent",
+    }
+    current_tags = {
+        "LongTermDebtCurrent",
+        "LongTermDebtAndFinanceLeaseObligationsCurrent",
+    }
+    noncurrent_tags = {
+        "LongTermDebtNoncurrent",
+        "LongTermDebtAndFinanceLeaseObligationsNoncurrent",
+    }
+
+    if taxonomy == "ifrs-full":
+        if reported is not None and reported_tag == "Borrowings":
+            return {
+                "debt": reported,
+                "term_debt": None,
+                "source": "reported_ifrs_total_borrowings",
+            }
+
+        if current is not None and noncurrent is not None and noncurrent_tag == "NoncurrentBorrowings":
+            return {
+                "debt": current + noncurrent,
+                "term_debt": None,
+                "source": "ifrs_current_plus_noncurrent_borrowings",
+            }
+
+        if reported is not None and reported_tag == "NoncurrentBorrowings" and current is not None:
+            return {
+                "debt": reported + current,
+                "term_debt": None,
+                "source": "ifrs_current_plus_noncurrent_borrowings",
+            }
+
+        return {
+            "debt": None,
+            "term_debt": None,
+            "source": "insufficient_ifrs_borrowings",
+        }
+
+    complete_split = (
+        current is not None
+        and noncurrent is not None
+        and current_tag in current_tags
+        and noncurrent_tag in noncurrent_tags
+    )
+
+    if complete_split:
+        term = current + noncurrent
+        source = "current_plus_noncurrent_term_debt"
+
+        if reported is not None and reported_tag in total_tags:
+            tolerance = max(1.0, 0.001 * max(reported, term))
+            if abs(reported - term) > tolerance:
+                return {
+                    "debt": None,
+                    "term_debt": None,
+                    "source": "unreconciled_reported_vs_split_term_debt",
+                }
+
+    elif reported is not None and reported_tag in total_tags:
+        term = reported
+        source = "reported_total_term_debt"
+
+    elif noncurrent is not None and noncurrent_tag in total_tags:
+        term = noncurrent
+        source = "reported_total_term_debt"
+
+    else:
+        return {
+            "debt": None,
+            "term_debt": None,
+            "source": "incomplete_debt_components",
+        }
+
+    # Generic short-term borrowings can already contain commercial paper.
+    if current is not None and current_tag in {"ShortTermBorrowings", "ShortTermDebt"}:
+        return {
+            "debt": None,
+            "term_debt": term,
+            "source": "ambiguous_short_term_borrowings_overlap",
+        }
+
+    if paper is not None:
+        source += "+commercial_paper"
+
+    return {
+        "debt": term + (paper or 0),
+        "term_debt": term,
+        "source": source,
+    }
+
 def build_sec_financials_payload(ticker, cik, companyfacts):
     taxonomy = get_reporting_taxonomy(companyfacts)
     analysis_profile = get_financial_analysis_profile(companyfacts, ticker=ticker)
@@ -3246,7 +3758,9 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
             "cash": ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
             "debt": ["LongTermDebtAndFinanceLeaseObligations", "LongTermDebtAndFinanceLeaseObligationsCurrentAndNoncurrent", "LongTermDebt"],
             "current_debt": ["LongTermDebtAndFinanceLeaseObligationsCurrent", "LongTermDebtCurrent", "ShortTermBorrowings", "ShortTermDebt"],
-            "long_term_debt": ["LongTermDebtAndFinanceLeaseObligationsNoncurrent", "LongTermDebtNoncurrent", "LongTermDebt"],
+            "long_term_debt": ["LongTermDebtAndFinanceLeaseObligationsNoncurrent", "LongTermDebtNoncurrent",
+                               "LongTermDebt"],
+            "commercial_paper": ["CommercialPaper"],
             # Prefer annual weighted-average shares for per-share calculations.
             # EntityCommonStockSharesOutstanding is a point-in-time cover-page fact
             # and can be dated after the fiscal year end.
@@ -3356,7 +3870,7 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
     picked_sets = defaultdict(set)
     instant_annual_keys = {
         "assets", "liabilities", "equity", "temporary_equity", "cash", "debt",
-        "current_debt", "long_term_debt", "current_assets", "current_liabilities",
+        "current_debt", "long_term_debt", "commercial_paper", "current_assets", "current_liabilities",
         "accounts_receivable", "inventory", "ppe", "goodwill", "intangibles",
         "accounts_payable", "retained_earnings", "deferred_revenue",
         "policyholder_reserves", "deferred_policy_acquisition_costs",
@@ -3534,17 +4048,11 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
         elif revenue is not None and not item.get("revenue_source"):
             item["revenue_source"] = "reported_total_candidate"
 
-        reported_debt = item.get("debt")
-        current_debt = item.get("current_debt")
-        long_term_debt = item.get("long_term_debt")
-        debt_parts = [float(x) for x in [current_debt, long_term_debt] if x is not None]
-        debt = sum(debt_parts) if debt_parts else reported_debt
+        resolved_debt = resolve_sec_borrowings(item, taxonomy)
+        debt = resolved_debt["debt"]
         item["debt"] = debt
-        item["debt_source"] = (
-            "current_debt_plus_long_term_debt"
-            if debt_parts
-            else "reported_debt_or_long_term_debt" if reported_debt is not None else None
-        )
+        item["term_debt"] = resolved_debt["term_debt"]
+        item["debt_source"] = resolved_debt["source"]
 
         # Traditional industrial FCF/cash-conversion logic is not a primary
         # quality measure for banks, insurers, or REIT-style real-estate firms.
@@ -3564,10 +4072,14 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
 
         item["cash_to_debt"] = None if (bank_profile or insurance_profile) else safe_ratio(item.get("cash"), debt)
         item["net_debt"] = None if (bank_profile or insurance_profile) else (
-            debt - item.get("cash") if debt is not None and item.get("cash") is not None else None
+            max(debt - item["cash"], 0)
+            if debt is not None and item.get("cash") is not None
+            else None
         )
         item["net_cash"] = None if (bank_profile or insurance_profile) else (
-            item.get("cash") - debt if item.get("cash") is not None and debt is not None else None
+            max(item["cash"] - debt, 0)
+            if debt is not None and item.get("cash") is not None
+            else None
         )
         item["debt_to_equity"] = None if (bank_profile or insurance_profile) else safe_ratio(debt, equity)
         item["debt_to_assets"] = None if (bank_profile or insurance_profile) else safe_pct(debt, assets)
@@ -3601,7 +4113,10 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
     picked = {key: sorted(values) for key, values in picked_sets.items()}
 
     latest = yearly[0] if yearly else {}
-    previous = yearly[1] if len(yearly) > 1 else {}
+    previous = next(
+        (row for row in yearly if row.get("year") == latest.get("year", 0) - 1),
+        {},
+    )
     growth = {
         "revenue_yoy": pct_growth(latest.get("revenue"), previous.get("revenue")),
         "gross_profit_yoy": None if nonindustrial_profile else pct_growth(latest.get("gross_profit"), previous.get("gross_profit")),
@@ -3611,10 +4126,32 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
         "free_cash_flow_yoy": None if nonindustrial_profile else pct_growth(latest.get("free_cash_flow"), previous.get("free_cash_flow")),
     }
 
-    latest_revenue, revenue_3y_ago, revenue_5y_history = get_year_value(yearly,0,"revenue"), get_year_value(yearly,3,"revenue"), get_year_value(yearly,5,"revenue")
-    latest_net_income, net_income_3y_ago, net_income_5y_history = get_year_value(yearly,0,"net_income"), get_year_value(yearly,3,"net_income"), get_year_value(yearly,5,"net_income")
-    latest_fcf, fcf_3y_ago, fcf_5y_history = get_year_value(yearly,0,"free_cash_flow"), get_year_value(yearly,3,"free_cash_flow"), get_year_value(yearly,5,"free_cash_flow")
-    latest_ocf, ocf_3y_ago, ocf_5y_history = get_year_value(yearly,0,"operating_cash_flow"), get_year_value(yearly,3,"operating_cash_flow"), get_year_value(yearly,5,"operating_cash_flow")
+    def year_ago_value(field, years_back):
+        if latest.get("year") is None:
+            return None
+        target_year = latest["year"] - years_back
+        previous_row = next(
+            (row for row in yearly if row.get("year") == target_year),
+            None,
+        )
+        return previous_row.get(field) if previous_row else None
+
+    latest_revenue = latest.get("revenue")
+    latest_net_income = latest.get("net_income")
+    latest_fcf = latest.get("free_cash_flow")
+    latest_ocf = latest.get("operating_cash_flow")
+
+    revenue_3y_ago = year_ago_value("revenue", 3)
+    revenue_5y_history = year_ago_value("revenue", 5)
+
+    net_income_3y_ago = year_ago_value("net_income", 3)
+    net_income_5y_history = year_ago_value("net_income", 5)
+
+    fcf_3y_ago = year_ago_value("free_cash_flow", 3)
+    fcf_5y_history = year_ago_value("free_cash_flow", 5)
+
+    ocf_3y_ago = year_ago_value("operating_cash_flow", 3)
+    ocf_5y_history = year_ago_value("operating_cash_flow", 5)
     growth.update({
         "revenue_3y_cagr": cagr(latest_revenue, revenue_3y_ago, 3),
         "revenue_5y_cagr": cagr(latest_revenue, revenue_5y_history, 5),
@@ -3639,7 +4176,52 @@ def build_sec_financials_payload(ticker, cik, companyfacts):
     else:
         financial_health = build_financial_health_score(latest, growth)
     coverage_fields = ["revenue", "net_income", "assets", "liabilities", "equity"]
-    available_core = sum(1 for field in coverage_fields if latest.get(field) is not None)
+    available_core = sum(
+        1 for field in coverage_fields
+        if latest.get(field) is not None
+    )
+
+    score_growth_fields = (
+        "revenue_yoy",
+        "revenue_3y_cagr",
+        "net_income_yoy",
+        "free_cash_flow_yoy",
+    )
+
+    score_latest_fields = (
+        "gross_margin",
+        "operating_margin",
+        "net_margin",
+        "fcf_margin",
+        "fcf_conversion",
+        "debt_to_assets",
+        "cash_to_debt",
+        "liabilities_to_assets",
+        "return_on_assets",
+        "return_on_equity",
+        "equity_ratio",
+        "loans_to_deposits",
+    )
+
+    signal_count = sum(
+        growth.get(key) is not None
+        for key in score_growth_fields
+    )
+
+    signal_count += sum(
+        latest.get(key) is not None
+        for key in score_latest_fields
+    )
+
+    if signal_count < 3:
+        financial_health = {
+            "score": None,
+            "label": "Insufficient Data",
+            "positives": [],
+            "warnings": [
+                "Not enough reported financial metrics to calculate a reliable score."
+            ],
+        }
 
     clean_ticker = str(ticker or "").upper().strip()
     if available_core >= 4 and len(yearly) >= 3:
@@ -4439,7 +5021,6 @@ max_dividend: Optional[float] = None,
     return where_sql, params
 
 
-# =========================================================
 # COLUMN LISTS
 # =========================================================
 
@@ -5112,6 +5693,7 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
             "LongTermDebtNoncurrent",
             "LongTermDebt",
         ],
+        "commercial_paper": ["CommercialPaper"],
         "net_interest_income": BANK_CONCEPT_MAP["net_interest_income"],
         "noninterest_income": BANK_CONCEPT_MAP["noninterest_income"],
         "provision_for_credit_losses": BANK_CONCEPT_MAP["provision_for_credit_losses"],
@@ -5140,6 +5722,67 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
             "acquisitions": ["CashFlowsUsedInObtainingControlOfSubsidiariesOrOtherBusinesses"],
             "eps_basic": ["BasicEarningsLossPerShare"],
             "eps_diluted": ["DilutedEarningsLossPerShare"],
+        })
+
+        # Core IFRS mappings must override inherited US-GAAP mappings.
+        concept_map.update({
+            "revenue": ["Revenue", "RevenueFromContractsWithCustomers"],
+            "gross_profit": ["GrossProfit"],
+            "cost_of_revenue": ["CostOfSales"],
+            "operating_income": [
+                "ProfitLossFromOperatingActivities",
+                "OperatingProfitLoss",
+            ],
+            "net_income": [
+                "ProfitLoss",
+                "ProfitLossAttributableToOwnersOfParent",
+            ],
+            "operating_cash_flow": ["CashFlowsFromUsedInOperatingActivities"],
+            "capex": [
+                "PurchaseOfPropertyPlantAndEquipment",
+                "PaymentsToAcquirePropertyPlantAndEquipment",
+            ],
+            "assets": ["Assets"],
+            "liabilities": ["Liabilities"],
+            "equity": ["Equity", "EquityAttributableToOwnersOfParent"],
+            "cash": ["CashAndCashEquivalents"],
+            "current_assets": ["CurrentAssets"],
+            "current_liabilities": ["CurrentLiabilities"],
+            "inventory": ["Inventories"],
+            "temporary_equity": [],
+            "debt": ["Borrowings", "NoncurrentBorrowings"],
+            "current_debt": ["CurrentBorrowings"],
+            "long_term_debt": ["NoncurrentBorrowings"],
+            "commercial_paper": [],
+            "r_and_d": ["ResearchAndDevelopmentExpense"],
+            "sga": ["AdministrativeExpense", "SellingAndDistributionExpense"],
+            "stock_based_comp": ["ShareBasedPaymentExpense"],
+            "buybacks": ["PaymentsToAcquireOrRedeemEntitysShares"],
+            "dividends_paid": ["DividendsPaid"],
+            "shares": [
+                "WeightedAverageNumberOfSharesOutstanding",
+                "WeightedAverageNumberOfDilutedSharesOutstanding",
+            ],
+            "contract_liabilities": ["ContractLiabilities"],
+            "deferred_revenue_current": [],
+            "deferred_revenue_noncurrent": [],
+            "remaining_performance_obligations": [],
+            "current_remaining_performance_obligations": [],
+            "noncurrent_remaining_performance_obligations": [],
+            "deposits": [],
+            "loans": [],
+            "allowance_for_credit_losses": [],
+            "net_interest_income": [],
+            "noninterest_income": [],
+            "provision_for_credit_losses": [],
+            "insurance_premiums": [],
+            "net_investment_income": [],
+            "insurance_claims_benefits": [],
+            "policyholder_reserves": [],
+            "deferred_policy_acquisition_costs": [],
+            "real_estate_investments": [],
+            "rental_revenue": [],
+            "gain_loss_real_estate_sales": [],
         })
     else:
         concept_map.update({
@@ -5244,6 +5887,7 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
         "debt",
         "current_debt",
         "long_term_debt",
+        "commercial_paper",
         "remaining_performance_obligations",
         "current_remaining_performance_obligations",
         "noncurrent_remaining_performance_obligations",
@@ -5398,6 +6042,7 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
         )
         latest_quarter[key] = match.get("value") if match else None
         latest_quarter[f"{key}_period"] = latest_instant_period if match else None
+        latest_quarter[f"{key}_concept"] = match.get("concept") if match else None
 
     if (
         latest_quarter.get("liabilities") is None
@@ -5463,36 +6108,10 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
         except Exception:
             pass
 
-    current_debt = latest_quarter.get("current_debt")
-    long_term_debt = latest_quarter.get("long_term_debt")
-    reported_debt = latest_quarter.get("debt")
-
-    if current_debt is not None and long_term_debt is not None:
-        latest_quarter["debt"] = float(current_debt) + float(long_term_debt)
-        latest_quarter["debt_source"] = "current_debt_plus_long_term_debt_same_period"
-    elif reported_debt is not None:
-        latest_quarter["debt"] = reported_debt
-        latest_quarter["debt_source"] = "reported_debt_same_period"
-    elif not bank_profile:
-        # Preserve useful operating-company coverage when only one debt component
-        # is reported at the current balance-sheet date.
-        same_period_parts = [
-            float(x)
-            for x in (current_debt, long_term_debt)
-            if x is not None
-        ]
-        latest_quarter["debt"] = sum(same_period_parts) if same_period_parts else None
-        latest_quarter["debt_source"] = (
-            "single_reported_debt_component_same_period"
-            if same_period_parts
-            else None
-        )
-    else:
-        # For banks/broker-dealers, an incomplete debt total is more misleading
-        # than a missing value, and traditional debt ratios are not core metrics.
-        latest_quarter["debt"] = None
-        latest_quarter["debt_source"] = None
-
+    resolved_debt = resolve_sec_borrowings(latest_quarter, taxonomy)
+    latest_quarter["debt"] = resolved_debt["debt"]
+    latest_quarter["term_debt"] = resolved_debt["term_debt"]
+    latest_quarter["debt_source"] = resolved_debt["source"]
     # TTM values.
     ttm = {}
     ttm_methods = {}
@@ -5539,15 +6158,28 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
                 "prior_ytd_end": result.get("prior_ytd_end"),
             }
         else:
-            ttm[key] = sum_latest_values(quarterly.get(key, []), 4)
+            ttm[key] = _sum_four_consecutive_quarter_values(
+                quarterly.get(key, [])
+            )
             ttm_methods[key] = {
-                "method": "legacy_four_rows_fallback" if ttm[key] is not None else None,
+                "method": "four_consecutive_discrete_quarters" if ttm[key] is not None else None,
                 "concept": None,
                 "annual_end": None,
                 "current_ytd_end": None,
                 "prior_ytd_end": None,
             }
 
+        # Do not present an older fiscal-year total as TTM
+        # when newer quarterly earnings are available.
+    for key, details in ttm_methods.items():
+        if (
+                latest_period
+                and details.get("method") == "latest_annual"
+                and details.get("annual_end")
+                and str(details["annual_end"]) < str(latest_period)
+        ):
+            ttm[key] = None
+            details["method"] = "stale_annual_not_ttm"
     # Cross-statement semantic guardrail for operating companies. SEC standard
     # concepts can represent either consolidated totals or component lines. When
     # the first valid TTM bridge yields an impossible sign/margin, prefer four
@@ -5897,14 +6529,18 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
         "equity": equity,
         "cash": cash,
         "debt": debt,
+        "term_debt": latest_quarter.get("term_debt"),
+        "commercial_paper": latest_quarter.get("commercial_paper"),
         "net_debt": (
-            debt - cash
-            if debt is not None and cash is not None
+            max(debt - cash, 0)
+            if not (bank_profile or insurance_profile)
+               and debt is not None and cash is not None
             else None
         ),
         "net_cash": (
-            cash - debt
-            if debt is not None and cash is not None
+            max(cash - debt, 0)
+            if not (bank_profile or insurance_profile)
+               and debt is not None and cash is not None
             else None
         ),
         "current_ratio": (
@@ -5918,14 +6554,12 @@ def build_sec_deep_dive_payload(ticker, cik, companyfacts):
             else None
         ),
         "cash_to_debt": (
-            safe_ratio(cash, debt)
-            if safe_ratio(cash, debt) is not None
-            else None
+            None if (bank_profile or insurance_profile)
+            else safe_ratio(cash, debt)
         ),
         "debt_to_assets": (
-            safe_ratio(debt, assets) * 100
-            if safe_ratio(debt, assets) is not None
-            else None
+            None if (bank_profile or insurance_profile)
+            else safe_pct(debt, assets)
         ),
         "liabilities_to_assets": (
             safe_ratio(liabilities, assets) * 100
@@ -6065,6 +6699,51 @@ def get_filing_intelligence(ticker: str):
                     "summary": [],
                 },
             }
+        parser_status = (row.get("raw_payload") or {}).get("parser_status") or {}
+
+        if str(parser_status.get("quality") or "").upper() == "FAIL":
+            return {
+                "ticker": row.get("ticker"),
+                "entity_name": row.get("entity_name"),
+                "source": row.get("source"),
+                "status": "validation_failed",
+                "latest_10k": row.get("latest_10k") or {},
+                "latest_10q": row.get("latest_10q") or {},
+                "parser_status": parser_status,
+                "reportable_segments": [],
+                "end_markets": [],
+                "geography": [],
+                "quarterly_breakdown": {},
+                "revenue_visibility": {},
+                "customer_concentration": {},
+                "insights": {"summary": []},
+            }
+        parser_status = dict(
+            (row.get("raw_payload") or {}).get("parser_status") or {}
+        )
+
+        has_revenue_breakdown = any(
+            row.get(field)
+            for field in (
+                "reportable_segments",
+                "end_markets",
+                "geography",
+            )
+        )
+
+        if (
+                not has_revenue_breakdown
+                and str(parser_status.get("quality") or "").upper() == "PASS"
+        ):
+            parser_status["quality"] = "WARN"
+
+            warnings = list(parser_status.get("warnings") or [])
+            message = "No segment, end-market, or geographic revenue breakdown was extracted."
+
+            if message not in warnings:
+                warnings.append(message)
+
+            parser_status["warnings"] = warnings
 
         return {
             "ticker": row.get("ticker"),
@@ -6079,7 +6758,7 @@ def get_filing_intelligence(ticker: str):
             "geography": row.get("geography") or [],
             "quarterly_breakdown": row.get("quarterly_breakdown") or {},
             "customer_concentration": row.get("customer_concentration") or {},
-            "parser_status": (row.get("raw_payload") or {}).get("parser_status") or {},
+            "parser_status": parser_status,
             "insights": row.get("insights") or {"summary": []},
             "updated_at": str(row.get("updated_at")) if row.get("updated_at") else None,
         }
@@ -9434,17 +10113,18 @@ def get_smart_money_market_leaders(
 
         def fetch_leaders(transaction_code):
             cur.execute(
-                """
+                f"""
                 select
                     upper(ticker) as ticker,
                     max(company) as company,
                     count(*) as transaction_count,
                     sum(coalesce(value, 0)) as total_value,
                     max(transaction_date) as latest_date
-                from insider_transactions
-                where transaction_code = %s
-                  and transaction_date is not null
-                  and transaction_date >= current_date - (%s * interval '1 day')
+                from public.insider_transactions AS t
+                where t.transaction_code = %s
+                  and {INSIDER_PUBLIC_SIGNAL_WHERE}
+                  and t.transaction_date is not null
+                  and t.transaction_date >= current_date - (%s * interval '1 day')
                 group by upper(ticker)
                 having sum(coalesce(value, 0)) > 0
                 order by total_value desc nulls last, transaction_count desc
@@ -9497,8 +10177,8 @@ def get_smart_money_from_database(
         cursor = conn.cursor()
 
         where_clauses = [
-            "upper(ticker) = %s",
-            "transaction_code in ('P', 'S')"
+            "upper(t.ticker) = %s",
+            INSIDER_PUBLIC_SIGNAL_WHERE,
         ]
         params = [clean_ticker]
 
@@ -9534,7 +10214,7 @@ def get_smart_money_from_database(
                 is_derivative,
                 source,
                 created_at
-            from insider_transactions
+            from public.insider_transactions AS t
             where {" and ".join(where_clauses)}
             order by transaction_date desc nulls last, filing_date desc nulls last, created_at desc
             limit %s
@@ -9586,14 +10266,7 @@ def get_smart_money_from_database(
 
     except Exception as e:
         print(f"[ERROR] /smart-money/{ticker} database route -> {type(e).__name__}: {e}", flush=True)
-        return {
-            "ticker": clean_ticker,
-            "source": "Supabase insider_transactions",
-            "summary": build_smart_money_summary([]),
-            "transactions": [],
-            "count": 0,
-            "error": str(e),
-        }
+        raise HTTPException(status_code=500, detail="Could not load insider transactions") from e
 
     finally:
         if conn:

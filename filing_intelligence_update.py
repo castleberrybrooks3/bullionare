@@ -3,6 +3,7 @@ import re
 import json
 import time
 import ctypes
+from functools import lru_cache
 import requests
 import psycopg2
 from html import unescape
@@ -1179,22 +1180,35 @@ def get_company_tickers():
     return _COMPANY_TICKERS_CACHE
 
 
+@lru_cache(maxsize=1)
+def _company_cik_index():
+    """Build the SEC ticker index once; avoid scanning it for every company."""
+    return {
+        str(row.get("ticker") or "").strip().upper(): str(row["cik_str"]).zfill(10)
+        for row in get_company_tickers().values()
+        if row.get("ticker") and row.get("cik_str") is not None
+    }
+
+
 def get_cik_for_ticker(ticker):
-    company_tickers = get_company_tickers()
-    clean_ticker = ticker.strip().upper()
-
-    for _, row in company_tickers.items():
-        if str(row.get("ticker", "")).upper() == clean_ticker:
-            return str(row.get("cik_str", "")).zfill(10)
-
-    return CIK_TICKER_FALLBACKS.get(clean_ticker)
+    clean_ticker = str(ticker or "").strip().upper()
+    return _company_cik_index().get(clean_ticker) or CIK_TICKER_FALLBACKS.get(clean_ticker)
 
 
-def get_latest_filing(cik, form_type):
-    submissions = get_json(
+@lru_cache(maxsize=32)
+def _get_cached_sec_submissions(cik):
+    """Fetch SEC submissions once per CIK; pace bulk previews for SEC fair access."""
+    # Metadata-only checks may otherwise make thousands of back-to-back
+    # HTTP requests. A small delay on cache misses avoids hammering the SEC.
+    time.sleep(0.16)
+    return get_json(
         f"{SEC_BASE_URL}/submissions/CIK{cik}.json",
         headers=SEC_HEADERS,
     )
+
+
+def get_latest_filing(cik, form_type):
+    submissions = _get_cached_sec_submissions(cik)
 
     recent = submissions.get("filings", {}).get("recent", {})
     forms = recent.get("form", [])
@@ -1427,10 +1441,15 @@ def _table_context(table_tag):
     parts.reverse()
     return " ".join(parts[-8:])
 
-
-
 def extract_html_tables(filing):
-    raw_html = (filing or {}).get("raw_html") or ""
+    if not filing:
+        return []
+
+    cached = filing.get("_parsed_html_tables")
+    if cached is not None:
+        return cached
+
+    raw_html = filing.get("raw_html") or ""
     if not raw_html:
         return []
 
@@ -1468,7 +1487,9 @@ def extract_html_tables(filing):
             "scale": table_scale or context_scale or 1_000_000,
         })
 
+    filing["_parsed_html_tables"] = records
     return records
+
 
 CATEGORY_CUES = {
     "segments": [
@@ -4264,7 +4285,120 @@ def _discover_rows_from_table(record, category, total_revenue=None, mode="annual
 
     return rows
 
+def _recover_reconciled_segment_revenue_table(
+    record, total_revenue, mode="annual"
+):
+    """Recover nested segments from a reconciled revenue-only table."""
+    if not total_revenue:
+        return []
 
+    context = record.get("semantic_text") or ""
+    if not any(
+        cue in context
+        for cue in ("by segment", "segment reporting", "reportable segment")
+    ):
+        return []
+
+    rows = record.get("rows") or []
+    start = next(
+        (
+            i for i, row in enumerate(rows)
+            if row and _semantic_label(row[0]) in {
+                "net revenue", "net revenues",
+                "segment revenue", "segment revenues",
+            }
+        ),
+        None,
+    )
+    if start is None:
+        return []
+
+    selected = []
+    group_name = None
+    group_start = None
+    scale = record.get("scale") or 1_000_000
+
+    for row in rows[start + 1:]:
+        if not row:
+            continue
+
+        name = normalize_spaces(row[0]).strip(" :")
+        label = _semantic_label(name)
+
+        if label.startswith((
+            "total net revenue", "total segment revenue",
+            "cost of ", "operating income",
+            "operating profit", "gross profit",
+        )):
+            break
+
+        values = [_numeric_from_cell(cell, scale) for cell in row[1:]]
+        values = [value for value in values if value is not None]
+
+        if not values:
+            if name and not _generic_row_is_heading_metric_or_total(
+                name, "segments"
+            ):
+                group_name, group_start = name, len(selected)
+            continue
+
+        current, prior = _select_current_prior(values, record, mode)
+        if current is None or current <= 0:
+            continue
+
+        if label.startswith("total "):
+            if group_name and label[6:] == _semantic_label(group_name):
+                children = selected[group_start:]
+                children_total = sum(r["revenue"] for r in children)
+
+                if (
+                    len(children) >= 2
+                    and abs(children_total - current) <= current * 0.005
+                ):
+                    selected[group_start:] = []
+                    name = group_name
+                    group_name = None
+                    group_start = None
+                else:
+                    return []
+            else:
+                continue
+
+        elif (
+            _generic_row_is_heading_metric_or_total(name, "segments")
+            or _row_name_is_bad_for_category(name, "segments")
+        ):
+            continue
+
+        if current > total_revenue * 1.01:
+            return []
+
+        selected.append({
+            "name": name,
+            "revenue": current,
+            "prior_period_revenue": prior,
+            "yoy_growth": pct_growth(current, prior),
+            "mix_pct": current / total_revenue * 100,
+            "mode": mode,
+            "source": "sec_html_table_reconciled_segments",
+            "table_index": record.get("index"),
+        })
+
+    if group_name or not 2 <= len(selected) <= 12:
+        return []
+
+    total = sum(row["revenue"] for row in selected)
+    if abs(total - total_revenue) > total_revenue * 0.01:
+        return []
+
+    geographic_count = sum(
+        _generic_name_looks_geographic(row["name"])
+        for row in selected
+    )
+    if geographic_count / len(selected) >= 0.50:
+        return []
+
+    return selected
 
 def _rows_sum_ratio(rows, total_revenue):
     if not total_revenue:
@@ -4569,6 +4703,16 @@ def extract_category_rows_from_filing(
                 reverse=True,
             )
             return generic_candidates[0]["rows"]
+
+    # A reconciled table can have no textual cue, so this fallback must run
+    # even when the earlier generic table scoring found no candidates.
+    if allow_discovery and category == "segments":
+        for record in tables:
+            recovered = _recover_reconciled_segment_revenue_table(
+                record, total_revenue, mode=mode
+            )
+            if recovered:
+                return recovered
 
     return []
 
@@ -4917,6 +5061,12 @@ def validate_filing_payload(payload, parser_config):
                 f"segments: complete configured set covers only {total_mix:.1f}% "
                 f"of inferred consolidated revenue; denominator may be wrong."
             )
+
+    if not any(categories.values()):
+        warnings.append(
+            "No reportable segment, end-market, or geographic "
+            "revenue breakdown was extracted. Coverage is incomplete."
+        )
 
     quality = "FAIL" if failures else "WARN" if warnings else "PASS"
     return {
@@ -6360,6 +6510,124 @@ def build_payload(ticker):
             )
         )
 
+        # SAP-specific 20-F extraction:
+        # Use Actual currency, never the adjacent Constant Currency column.
+        # Only publish the two segment measures if they reconcile to the
+        # disclosed total segment revenue.
+
+        if clean_ticker == "SAP" and latest_10k:
+            sap_segment_candidates = {}
+            sap_reconciled_total = None
+
+            for record in extract_html_tables(latest_10k):
+                context = _semantic_label(record.get("context") or "")
+                table_text = _semantic_label(record.get("text") or "")
+
+                if "total segment revenue" not in table_text:
+                    continue
+
+                for cells in record.get("rows") or []:
+                    metric_index = next(
+                        (
+                            i for i, cell in enumerate(cells)
+                            if _semantic_label(cell) == "total segment revenue"
+                        ),
+                        None,
+                    )
+
+                    if metric_index is None:
+                        continue
+
+                    scale = record.get("scale") or 1_000_000
+
+                    values = [
+                        _explicit_data_numeric_from_cell(cell, scale)
+                        for cell in cells[metric_index + 1:]
+                    ]
+                    values = [
+                        value for value in values if value is not None
+                    ]
+
+                    if not values:
+                        continue
+
+                    # The reconciliation table has the reported total
+                    # in its first Actual currency column.
+                    if "reconciliation of segment measures" in context:
+                        sap_reconciled_total = values[0]
+                        continue
+
+                    # Only accept tables explicitly distinguishing
+                    # Actual from Constant Currency values.
+                    if not (
+                            "non ifrs" in table_text
+                            and "actual" in table_text
+                            and "constant" in table_text
+                            and len(values) >= 3
+                    ):
+                        continue
+
+                    label = None
+
+                    if (
+                            context.endswith(" ats")
+                            or context.endswith(
+                        "applications technology and support"
+                    )
+                    ):
+                        label = "Applications, Technology & Support"
+
+                    elif context.endswith(" core services"):
+                        label = "Core Services"
+
+                    if label and label not in sap_segment_candidates:
+                        sap_segment_candidates[label] = {
+                            "name": label,
+                            "revenue": values[0],
+                            "prior_period_revenue": values[2],
+                            "yoy_growth": pct_growth(
+                                values[0], values[2]
+                            ),
+                            "mix_pct": None,
+                            "mode": "annual",
+                            "source": "sap_20f_actual_currency_segment_measure",
+                            "scope": (
+                                "SAP non-IFRS segment measures, reconciled "
+                                "to reported consolidated revenue."
+                            ),
+                            "table_index": record.get("index"),
+                        }
+
+            sap_names = (
+                "Applications, Technology & Support",
+                "Core Services",
+            )
+
+            if sap_reconciled_total and all(
+                    name in sap_segment_candidates for name in sap_names
+            ):
+                sap_segment_sum = sum(
+                    sap_segment_candidates[name]["revenue"]
+                    for name in sap_names
+                )
+
+                # Never publish unreconciled segment results.
+                if abs(sap_segment_sum - sap_reconciled_total) <= max(
+                        1_000_000,
+                        0.001 * sap_reconciled_total,
+                ):
+                    annual_total_revenue = sap_reconciled_total
+                    annual_segments = [
+                        sap_segment_candidates[name]
+                        for name in sap_names
+                    ]
+
+                else:
+                    print(
+                        "[SAP PARSER] Segment totals did not reconcile; "
+                        "leaving existing breakdown unchanged."
+                    )
+
     segment_row_metric = parser_config.get("segment_row_metric")
     if segment_row_metric:
         row_metric_annual = extract_configured_segment_row_metric_from_filing(
@@ -6905,6 +7173,9 @@ def build_payload(ticker):
     ):
         payload["parser_status"]["warnings"].append("Reportable segments not detected.")
 
+    if payload["parser_status"]["warnings"] and payload["parser_status"]["quality"] == "PASS":
+        payload["parser_status"]["quality"] = "WARN"
+
     payload.pop("_validation_total_revenue", None)
     payload["insights"] = build_insights(payload)
     return payload
@@ -6916,6 +7187,17 @@ def save_payload(payload):
     stay on this ticker and keep retrying instead of recording a false parser
     failure and moving on.
     """
+    quality = str(
+        (payload.get("parser_status") or {}).get("quality") or ""
+    ).upper()
+
+    if quality not in {"PASS", "WARN"}:
+        print(
+            f"[FILING] Skipping {payload.get('ticker')}: "
+            f"untrusted quality {quality or 'MISSING'}"
+        )
+        return False
+
     attempt = 0
 
     while True:
@@ -6924,6 +7206,48 @@ def save_payload(payload):
         try:
             conn = get_db_connection_dict()
             cursor = conn.cursor()
+
+            # Serialize updates per ticker; preserve verified data when a
+            # newly parsed filing has worse coverage or downgraded quality.
+            cursor.execute(
+                """
+                SELECT raw_payload #>> '{parser_status,quality}' AS quality,
+                       CASE WHEN jsonb_typeof(reportable_segments) = 'array'
+                            THEN jsonb_array_length(reportable_segments) ELSE 0 END AS segments,
+                       CASE WHEN jsonb_typeof(end_markets) = 'array'
+                            THEN jsonb_array_length(end_markets) ELSE 0 END AS products,
+                       CASE WHEN jsonb_typeof(geography) = 'array'
+                            THEN jsonb_array_length(geography) ELSE 0 END AS geography
+                FROM filing_intelligence
+                WHERE ticker = %s
+                FOR UPDATE
+                """,
+                (payload.get("ticker"),),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                previous_quality = str(existing.get("quality") or "").upper()
+                if previous_quality == "PASS" and quality == "WARN":
+                    print(
+                        f"[PRESERVED] {payload.get('ticker')}: new WARN cannot "
+                        "overwrite an existing PASS record."
+                    )
+                    conn.rollback()
+                    return False
+
+                # An unchanged or newly filed report must not silently erase
+                # all previously published revenue breakdown categories.
+                old_counts = [int(existing.get(field) or 0) for field in
+                              ("segments", "products", "geography")]
+                new_counts = [len(payload.get(field) or []) for field in
+                              ("reportable_segments", "end_markets", "geography")]
+                if any(old_counts) and not any(new_counts):
+                    print(
+                        f"[PRESERVED] {payload.get('ticker')}: "
+                        "new extraction contains no revenue breakdowns."
+                    )
+                    conn.rollback()
+                    return False
 
             cursor.execute(
                 """
@@ -6987,7 +7311,7 @@ def save_payload(payload):
 
             conn.commit()
             print(f"Saved filing intelligence for {payload.get('ticker')}")
-            return
+            return True
 
         except Exception as exc:
             if not _is_db_connection_error(exc):
@@ -7131,6 +7455,75 @@ def get_cs_adr_tickers_from_db():
                     pass
 
 
+
+# =========================================================
+# INCREMENTAL REFRESH / METADATA-ONLY CHECKS
+# =========================================================
+
+def _flag(name, default="0"):
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def get_saved_filing_versions():
+    """Fetch only lightweight, persisted filing versions and quality statuses."""
+    conn = get_db_connection_dict()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT UPPER(TRIM(ticker)) AS ticker,
+                   cik,
+                   latest_10k->>'accession' AS annual_accession,
+                   latest_10q->>'accession' AS quarterly_accession,
+                   raw_payload #>> '{parser_status,quality}' AS quality
+            FROM filing_intelligence
+            """
+        )
+        return {str(row["ticker"]).upper(): row for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+
+def _preferred_accession(submissions, forms_in_priority_order):
+    """Use the same form priority/order as get_latest_filing()."""
+    recent = (submissions or {}).get("filings", {}).get("recent", {}) or {}
+    forms = recent.get("form") or []
+    accessions = recent.get("accessionNumber") or []
+    for target in forms_in_priority_order:
+        for index, form in enumerate(forms):
+            if str(form).upper() == target and index < len(accessions):
+                return accessions[index]
+    return None
+
+
+def _unchanged_verified_filing(ticker, saved, allow_warn=False):
+    """Conservative skip: same issuer, unchanged SEC accessions, known quality."""
+    if not saved:
+        return False
+
+    quality = str(saved.get("quality") or "").upper()
+    if quality != "PASS" and not (allow_warn and quality == "WARN"):
+        return False
+
+    cik = get_cik_for_ticker(ticker)
+    if not cik or str(cik).zfill(10) != str(saved.get("cik") or "").zfill(10):
+        return False
+
+    submissions = _get_cached_sec_submissions(cik)
+    annual = _preferred_accession(submissions, ("10-K", "20-F", "40-F"))
+    if not annual and str(ticker).upper() in PREDECESSOR_CIK_FALLBACKS:
+        predecessor = PREDECESSOR_CIK_FALLBACKS[str(ticker).upper()]
+        predecessor_submissions = _get_cached_sec_submissions(predecessor)
+        annual = _preferred_accession(predecessor_submissions, ("10-K", "20-F", "40-F"))
+
+    quarterly = _preferred_accession(submissions, ("10-Q", "6-K"))
+    if not annual and not quarterly:
+        return False
+    return (
+        annual == saved.get("annual_accession")
+        and quarterly == saved.get("quarterly_accession")
+    )
+
 def main():
     use_database_universe = (
         os.getenv("FILING_INTELLIGENCE_DB_CS_ADR", "0").strip().lower()
@@ -7150,16 +7543,68 @@ def main():
     if not tickers:
         raise RuntimeError("No tickers were selected for filing intelligence.")
 
-    dry_run = os.getenv("FILING_INTELLIGENCE_DRY_RUN", "0").strip().lower() in {
-        "1", "true", "yes"
-    }
+    dry_run = _flag("FILING_INTELLIGENCE_DRY_RUN")
+    check_only = _flag("FILING_INTELLIGENCE_CHECK_ONLY")
+    incremental = _flag("FILING_INTELLIGENCE_INCREMENTAL", "1")
+    force_refresh = _flag("FILING_INTELLIGENCE_FORCE_REFRESH")
+    # For routine refreshes, unchanged WARN rows can optionally be skipped.
+    # Keep this OFF by default to prioritize improving incomplete coverage.
+    skip_unchanged_warn = _flag("FILING_INTELLIGENCE_SKIP_UNCHANGED_WARN")
 
+    limit_text = os.getenv("FILING_INTELLIGENCE_LIMIT", "").strip()
+    if limit_text:
+        limit = int(limit_text)
+        if limit <= 0:
+            raise ValueError("FILING_INTELLIGENCE_LIMIT must be positive")
+        tickers = tickers[:limit]
+
+    if check_only:
+        # Preview must be non-mutating regardless of DRY_RUN setting.
+        dry_run = True
+
+    saved_versions = (
+        get_saved_filing_versions()
+        if incremental and (check_only or not dry_run) and not force_refresh
+        else {}
+    )
+
+    def can_skip(ticker):
+        if not (incremental and not force_refresh):
+            return False
+        return _unchanged_verified_filing(
+            ticker, saved_versions.get(ticker),
+            allow_warn=skip_unchanged_warn,
+        )
+
+    if check_only:
+        skipped = 0
+        for ticker in tickers:
+            try:
+                if can_skip(ticker):
+                    print(f"[SKIP]      {ticker}: saved filing accessions unchanged")
+                    skipped += 1
+                else:
+                    print(f"[REPROCESS] {ticker}: new/incomplete/changed/forced")
+            except Exception as exc:
+                print(f"[CHECK ERROR] {ticker}: {type(exc).__name__}: {exc}")
+        print(
+            f"[CHECK ONLY] {skipped}/{len(tickers)} eligible for skipping; "
+            "no filing HTML downloaded; no database writes."
+        )
+        return
+
+    skipped = 0
     run_results = []
 
     for ticker in tickers:
         try:
             print("=" * 80)
             print(f"Starting {ticker}")
+            if not dry_run and can_skip(ticker):
+                skipped += 1
+                print(f"[SKIP] {ticker}: validated filing accessions unchanged")
+                continue
+
             payload = build_payload(ticker)
 
             if not payload:
@@ -7182,7 +7627,9 @@ def main():
             print(json.dumps(payload.get("parser_status"), indent=2))
 
             if not dry_run:
-                save_payload(payload)
+                saved = save_payload(payload)
+                if not saved:
+                    print(f"[NO WRITE] Preserved existing record for {ticker}.")
             else:
                 print(f"[DRY RUN] Not saving {ticker} to filing_intelligence.")
 
@@ -7233,7 +7680,7 @@ def main():
 
     print(
         f"SUMMARY: PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']} "
-        f"| MODE={'DRY RUN' if dry_run else 'SAVE'}"
+        f"| SKIPPED={skipped} | MODE={'DRY RUN' if dry_run else 'SAVE'}"
     )
     print("=" * 96)
 
@@ -7242,6 +7689,7 @@ def main():
             {
                 "generated_at": datetime.now().isoformat(),
                 "dry_run": dry_run,
+                "skipped": skipped,
                 "counts": counts,
                 "results": run_results,
             },

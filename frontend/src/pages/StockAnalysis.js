@@ -2158,11 +2158,13 @@ function SecFinancialsPanel({ data, loading, error }) {
             ? latest.equity_ratio !== null && latest.equity_ratio !== undefined
               ? `Equity / Assets ${formatPercent(latest.equity_ratio)}`
               : null
-            : latest.net_cash !== null && latest.net_cash !== undefined
-            ? `Net Cash ${formatLargeMoney(latest.net_cash, reportingCurrency)}`
-            : latest.cash !== null && latest.cash !== undefined
-            ? `Cash ${formatLargeMoney(latest.cash, reportingCurrency)}`
-            : null
+            : latest.net_debt != null && Number(latest.net_debt) > 0
+? `Net Debt ${formatLargeMoney(latest.net_debt, reportingCurrency)}`
+: latest.net_cash != null && Number(latest.net_cash) > 0
+? `Net Cash ${formatLargeMoney(latest.net_cash, reportingCurrency)}`
+: latest.cash != null
+? `Cash ${formatLargeMoney(latest.cash, reportingCurrency)}`
+: null
         }
         icon="balance"
       >
@@ -2276,6 +2278,7 @@ function SecFinancialsPanel({ data, loading, error }) {
                 <th>ROE</th>
                 <th>Cash / Debt</th>
                 <th>Debt / Assets</th>
+                <th>Net Debt</th>
                 <th>Net Cash</th>
               </tr>
             </thead>
@@ -2298,6 +2301,7 @@ function SecFinancialsPanel({ data, loading, error }) {
                   <td>{formatPercent(row.return_on_equity)}</td>
                   <td>{formatRatio(row.cash_to_debt)}</td>
                   <td>{formatPercent(row.debt_to_assets)}</td>
+                  <td>{formatLargeMoney(row.net_debt, reportingCurrency)}</td>
                   <td>{formatLargeMoney(row.net_cash, reportingCurrency)}</td>
                 </tr>
               ))}
@@ -2361,6 +2365,25 @@ function BreakdownTable({
           </tbody>
         </table>
       </div>
+
+      {rows.some(
+        (row) =>
+          row.source === "sap_20f_actual_currency_segment_measure"
+      ) && (
+        <p
+          style={{
+            margin: "10px 0 0",
+            fontSize: "12px",
+            color: "#94a3b8",
+            lineHeight: 1.5,
+          }}
+        >
+          Note: SAP segment revenue represents non-IFRS segment
+          measures disclosed in its annual filing. These figures
+          use actual currency rates, not constant currency rates,
+          and reconcile to reported annual revenue.
+        </p>
+      )}
     </CollapsibleSection>
   );
 }
@@ -2383,6 +2406,21 @@ function FilingIntelligencePanel({ data, loading, error, reportingCurrency = "US
     );
   }
 
+    if (
+    data?.status === "validation_failed" ||
+    data?.parser_status?.quality === "FAIL"
+  ) {
+    return (
+      <div className="stock-analysis-sec-empty">
+        <h3>Filing Breakdown Under Review</h3>
+        <p>
+          Bullionaire detected a validation problem with this filing
+          extraction. The breakdown is temporarily hidden to avoid
+          displaying potentially inaccurate financial information.
+        </p>
+      </div>
+    );
+  }
   const customerConcentration = data.customer_concentration || {};
   const insights = data.insights || {};
   const summary = Array.isArray(insights.summary) ? insights.summary : [];
@@ -2561,12 +2599,12 @@ function SecDeepDivePanel({ data, loading, error }) {
   const isFinancialInstitution = data.analysis_profile === "financial_institution";
 
   const latestQuarterFcf =
-    latestQuarter.operating_cash_flow !== null &&
-    latestQuarter.operating_cash_flow !== undefined &&
-    latestQuarter.capex !== null &&
-    latestQuarter.capex !== undefined
-      ? Number(latestQuarter.operating_cash_flow) - Number(latestQuarter.capex)
-      : null;
+  data.analysis_profile === "operating_company" &&
+  latestQuarter.operating_cash_flow != null &&
+  latestQuarter.capex != null
+    ? Number(latestQuarter.operating_cash_flow) -
+      Number(latestQuarter.capex)
+    : null;
 
   const hasTtm = hasPresentValue(ttm, [
     "revenue",
@@ -2812,8 +2850,14 @@ function SecDeepDivePanel({ data, loading, error }) {
               balanceSheet.loans_to_deposits !== undefined
               ? `Loans / Deposits ${formatPercent(balanceSheet.loans_to_deposits)}`
               : null
-            : balanceSheet.net_cash !== null && balanceSheet.net_cash !== undefined
+            : balanceSheet.net_debt != null &&
+              Number(balanceSheet.net_debt) > 0
+            ? `Net Debt ${formatLargeMoney(balanceSheet.net_debt, reportingCurrency)}`
+            : balanceSheet.net_cash != null &&
+              Number(balanceSheet.net_cash) > 0
             ? `Net Cash ${formatLargeMoney(balanceSheet.net_cash, reportingCurrency)}`
+            : balanceSheet.cash != null
+            ? `Cash ${formatLargeMoney(balanceSheet.cash, reportingCurrency)}`
             : null
         }
         icon="balance"
@@ -4644,7 +4688,11 @@ const thesis = buildThesis({
 
             <section className="stock-analysis-section">
               <SecFinancialsPanel
-                data={secFinancials}
+  data={
+    String(secFinancials?.ticker || "").toUpperCase() === cleanTicker
+      ? secFinancials
+      : null
+  }
                 loading={secFinancialsLoading}
                 error={secFinancialsError}
               />

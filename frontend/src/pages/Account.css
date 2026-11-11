@@ -1,0 +1,59 @@
+/* All styles are scoped to the Account view so the screener and other tabs are unchanged. */
+.bullionaire-account {
+  width: 100%;
+  max-width: 1120px;
+  margin: 0 auto;
+  color: #f8fafc;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.bullionaire-account *, .bullionaire-account *::before, .bullionaire-account *::after { box-sizing: border-box; }
+.ba-heading { margin-bottom: 26px; }
+.ba-eyebrow { color: #19c37d; font-size: 11px; font-weight: 800; letter-spacing: 0.17em; margin: 0 0 12px; }
+.ba-heading h1 { margin: 0 0 10px; font-size: clamp(26px, 3vw, 34px); font-weight: 800; letter-spacing: -0.025em; }
+.ba-muted { color: #94a3b8; font-size: 14px; line-height: 1.55; margin: 0; }
+.ba-overview { display: flex; align-items: center; gap: 17px; margin-bottom: 22px; border: 1px solid #263349; border-radius: 16px; padding: 23px; background: linear-gradient(120deg, #122238 0%, #101929 100%); }
+.ba-overview > div { flex: 1; min-width: 0; }
+.ba-overview h2 { font-size: 20px; margin: 0 0 5px; overflow-wrap: anywhere; }
+.ba-overview p { overflow-wrap: anywhere; }
+.ba-avatar { flex: 0 0 56px; width: 56px; height: 56px; border-radius: 14px; display: grid; place-items: center; font-size: 24px; font-weight: 800; color: #08251b; background: #19c37d; }
+.ba-chip { flex-shrink: 0; color: #64e6ac; border: 1px solid #256a54; border-radius: 99px; padding: 7px 10px; font-size: 12px; font-weight: 700; }
+.ba-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.ba-panel { min-width: 0; background: #111827; border: 1px solid #273244; border-radius: 16px; padding: 26px; }
+.ba-panel h2 { font-size: 19px; margin: 0 0 9px; font-weight: 700; }
+.ba-panel > .ba-muted { margin-bottom: 19px; }
+.ba-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 24px; }
+.ba-form label { font-size: 13px; color: #e2e8f0; font-weight: 600; }
+.ba-form input { display: block; min-width: 0; width: 100%; padding: 12px 14px; background: #0b1222; color: #fff; border: 1px solid #3a495f; border-radius: 9px; font: inherit; font-size: 16px; }
+.ba-form input:focus { outline: 2px solid rgba(25, 195, 125, 0.55); outline-offset: 1px; border-color: #19c37d; }
+.ba-primary, .ba-secondary { align-self: flex-start; border: 0; border-radius: 9px; min-height: 42px; padding: 11px 19px; font-size: 14px; font-weight: 700; cursor: pointer; }
+.ba-primary { background: #19c37d; color: #08251b; }
+.ba-primary:hover:not(:disabled) { background: #33d894; }
+.ba-secondary { background: #1f2937; color: #e5e7eb; border: 1px solid #4b5563; }
+.ba-secondary:hover:not(:disabled) { background: #344053; }
+.ba-primary:disabled, .ba-secondary:disabled { cursor: wait; opacity: 0.6; }
+.ba-facts { border-top: 1px solid #29374c; padding-top: 14px; }
+.ba-facts > div { display: flex; justify-content: space-between; gap: 16px; padding: 10px 0; border-bottom: 1px solid #1c283c; font-size: 13px; }
+.ba-facts span { color: #94a3b8; }
+.ba-facts strong { text-align: right; font-weight: 600; color: #e2e8f0; overflow-wrap: anywhere; }
+.ba-billing-pending { border: 1px solid #355041; background: #10271e; border-radius: 11px; padding: 18px; margin-bottom: 17px; }
+.ba-billing-label { display: block; color: #9db8a8; font-size: 12px; margin-bottom: 6px; }
+.ba-billing-pending strong { display: block; font-size: 21px; color: #f8fafc; margin-bottom: 10px; }
+.ba-billing-pending p { color: #a7b5ac; font-size: 13px; line-height: 1.5; margin: 0; }
+.ba-note { color: #aebbcf; font-size: 13px; line-height: 1.6; }
+.ba-error { color: #fca5a5; font-size: 13px; line-height: 1.5; }
+.ba-success { color: #6ee7b7; font-size: 13px; line-height: 1.5; }
+.ba-session-panel button { margin-top: 2px; }
+@media (max-width: 900px) {
+  .ba-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .bullionaire-account { width: 100%; max-width: 100%; }
+  .ba-overview { padding: 17px; gap: 12px; flex-wrap: wrap; }
+  .ba-avatar { width: 46px; height: 46px; flex-basis: 46px; }
+  .ba-overview h2 { font-size: 17px; }
+  .ba-panel { padding: 19px; }
+  .ba-chip { margin-left: 58px; }
+  .ba-facts > div { flex-direction: column; gap: 4px; }
+  .ba-facts strong { text-align: left; }
+}

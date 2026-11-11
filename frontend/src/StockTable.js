@@ -9,6 +9,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import WatchlistAnalytics from "./components/WatchlistAnalytics";
 import { supabase } from "./lib/supabaseClient";
 import StockChartModal from "./components/charts/StockChartModal";
+import StockNotesModal from "./components/StockNotesModal";
 
 const saveWatchlists = async (updated) => {
   const {
@@ -49,6 +50,52 @@ if (!user) return;
 };
 
 ModuleRegistry.registerModules([AllCommunityModule]);
+
+// The paper icon is intentionally rendered inside the existing SAVE column.
+const StockNoteIcon = ({ filled }) => (
+  <svg width="19" height="20" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <path
+      d="M6 2.5h8l4.5 4.5V21H6a2 2 0 0 1-2-2V4.5a2 2 0 0 1 2-2Z"
+      stroke={filled ? "#19c37d" : "#f8fafc"}
+      fill={filled ? "#19c37d" : "none"}
+      strokeWidth="1.75"
+      strokeLinejoin="round"
+    />
+    <path d="M14 2.5V7h4.5" fill="none" stroke={filled ? "#0e1424" : "#f8fafc"} strokeWidth="1.5" />
+    <path d="M8 11h7M8 14.5h7M8 18h5" fill="none" stroke={filled ? "#0e1424" : "#f8fafc"} strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
+
+// Remembers the current screener while a user views a stock detail page.
+// Saved only on ticker navigation and consumed on return to this same page.
+const STOCK_TABLE_RETURN_KEY = "bullionaire_stock_table_return_v1";
+const STOCK_TABLE_RETURN_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+const readStockTableReturnState = (view) => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(STOCK_TABLE_RETURN_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    const here = `${window.location.pathname}${window.location.search}`;
+    if (
+      !saved ||
+      saved.view !== view ||
+      saved.from !== here ||
+      !Number.isFinite(saved.savedAt) ||
+      Date.now() - saved.savedAt > STOCK_TABLE_RETURN_MAX_AGE_MS
+    ) {
+      if (!saved || !Number.isFinite(saved.savedAt) || Date.now() - saved.savedAt > STOCK_TABLE_RETURN_MAX_AGE_MS) {
+        window.sessionStorage.removeItem(STOCK_TABLE_RETURN_KEY);
+      }
+      return null;
+    }
+    return saved;
+  } catch (err) {
+    console.warn("Could not restore screener state", err);
+    return null;
+  }
+};
 
 const SPARKLINE_STORAGE_KEY = "bullionaire_sparkline_cache_v1";
 const SPARKLINE_REFRESH_MS = 2 * 60 * 1000;
@@ -139,13 +186,30 @@ const StockTable = ({
   showControls = true,
   showTable = true,
 }) => {
+  const [returnState] = useState(() => readStockTableReturnState(view));
+  const restoringGridRef = useRef(Boolean(returnState));
+  const restoringScrollRef = useRef(Boolean(returnState));
+  const skipFirstPageResetRef = useRef(Boolean(returnState));
+  const returnScrollRestoreStartedRef = useRef(false);
+  const returnScrollRestoreTimersRef = useRef([]);
+
+  useEffect(() => {
+    if (returnState && typeof window !== "undefined") {
+      window.sessionStorage.removeItem(STOCK_TABLE_RETURN_KEY);
+    }
+  }, [returnState]);
+
+  useEffect(() => () => {
+    returnScrollRestoreTimersRef.current.forEach(clearTimeout);
+  }, []);
+
   const [stocks, setStocks] = useState([]);
   const [processedStocks, setProcessedStocks] = useState([]);
 
-  const [typedQuery, setTypedQuery] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [typedQuery, setTypedQuery] = useState(returnState?.typedQuery ?? "");
+  const [searchQuery, setSearchQuery] = useState(returnState?.searchQuery ?? "");
 
-  const [selectedType, setSelectedType] = useState("");
+  const [selectedType, setSelectedType] = useState(returnState?.selectedType ?? "");
   const [securityTypes, setSecurityTypes] = useState([]);
 
   const [displayedCount, setDisplayedCount] = useState(0);
@@ -156,17 +220,16 @@ const StockTable = ({
   const [loading, setLoading] = useState(true);
 
   const [pageSize] = useState(50);
-const [currentPage, setCurrentPage] = useState(1);
-const currentPageRef = useRef(1);
+const [currentPage, setCurrentPage] = useState(returnState?.currentPage ?? 1);
+const currentPageRef = useRef(returnState?.currentPage ?? 1);
 const [totalPages, setTotalPages] = useState(1);
-const [backendFilterModel, setBackendFilterModel] = useState({});
-const [gridFilterModel, setGridFilterModel] = useState({});
+const [backendFilterModel, setBackendFilterModel] = useState(returnState?.backendFilterModel ?? {});
+const [gridFilterModel, setGridFilterModel] = useState(returnState?.gridFilterModel ?? {});
 const [isBackgroundLoading, setIsBackgroundLoading] = useState(false);
 const [pageCache, setPageCache] = useState({});
 const activeRequestRef = useRef(0);
 const stocksAbortRef = useRef(null);
-const isRestoringFilterModelRef = useRef(false);
-const [viewMode, setViewMode] = useState("all data");
+const [viewMode, setViewMode] = useState(returnState?.viewMode ?? "all data");
 const [isMobileTableViewport, setIsMobileTableViewport] = useState(() =>
   typeof window !== "undefined"
     ? window.matchMedia("(max-width: 768px)").matches
@@ -204,14 +267,19 @@ const [chartModalOpen, setChartModalOpen] = useState(false);
 const [chartTicker, setChartTicker] = useState(null);
 const [chartStockContext, setChartStockContext] = useState(null);
 
+  const [notesModalTicker, setNotesModalTicker] = useState(null);
+  const [notesRefreshVersion, setNotesRefreshVersion] = useState(0);
+  const notesStatusRef = useRef({});
+  const notesStatusErrorRef = useRef(false);
   const [watchlists, setWatchlists] = useState({});
 const [watchlistAllocations, setWatchlistAllocations] = useState({});
 
-const [activeList, setActiveList] = useState("Default");
+const [activeList, setActiveList] = useState(returnState?.activeList ?? "Default");
 
   const gridRef = useRef(null);
-const savedHorizontalScrollRef = useRef(0);
-const savedTopScrollRef = useRef(0);
+
+const savedHorizontalScrollRef = useRef(returnState?.horizontalScroll ?? 0);
+const savedTopScrollRef = useRef(returnState?.topScroll ?? 0);
 
 const [allocationFloatingStyle, setAllocationFloatingStyle] = useState({
   left: 0,
@@ -226,6 +294,21 @@ const [allocationFloatingStyle, setAllocationFloatingStyle] = useState({
   const tickersParam = params.get("tickers");
   const sectorFromUrl = params.get("sector");
   const selectedTickers = tickersParam ? tickersParam.split(",") : null;
+
+  // Column renderers are memoized. Read the latest filter values through a ref
+  // when a ticker is clicked, rather than capturing obsolete values.
+  const latestScreenerStateRef = useRef(null);
+  latestScreenerStateRef.current = {
+    from: `${location.pathname}${location.search}`,
+    view,
+    typedQuery,
+    searchQuery,
+    selectedType,
+    activeList,
+    viewMode,
+    backendFilterModel,
+    gridFilterModel,
+  };
 
   const API_BASE =
   process.env.NODE_ENV === "development"
@@ -378,6 +461,58 @@ const rowData = useMemo(() => {
 
   return processedStocks;
 }, [processedStocks, watchlists, view, activeList]);
+
+  // One batched Supabase query per set of visible/current tickers, not a query
+  // for each paper icon. This is kept out of columnDefs to avoid resetting
+  // filters, column positions, or saved screener state when notes load.
+  useEffect(() => {
+    let cancelled = false;
+    const tickers = [...new Set(rowData.map((stock) => String(stock.Ticker || "").trim().toUpperCase()))]
+      .filter(Boolean);
+
+    const refreshPaperIcons = () => {
+      gridRef.current?.api?.refreshCells({ columns: ["star"], force: true });
+    };
+
+    const loadStatus = async () => {
+      notesStatusRef.current = {};
+      notesStatusErrorRef.current = false;
+      refreshPaperIcons();
+      if (!tickers.length) return;
+
+      try {
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError) throw authError;
+        if (!user || cancelled) return;
+
+        const found = {};
+        for (let i = 0; i < tickers.length; i += 100) {
+          const { data, error } = await supabase
+            .from("stock_notes")
+            .select("ticker")
+            .eq("user_id", user.id)
+            .in("ticker", tickers.slice(i, i + 100));
+          if (error) throw error;
+          (data || []).forEach(({ ticker }) => { found[ticker] = true; });
+          if (cancelled) return;
+        }
+
+        if (!cancelled) {
+          notesStatusRef.current = found;
+          refreshPaperIcons();
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Could not check stock note indicators", err);
+          notesStatusErrorRef.current = true;
+          refreshPaperIcons();
+        }
+      }
+    };
+
+    loadStatus();
+    return () => { cancelled = true; };
+  }, [rowData, notesRefreshVersion]);
 
 const activeWatchlistTickers = useMemo(() => {
   return watchlists[activeList] ?? [];
@@ -790,10 +925,11 @@ case "EBITDA":
   if (model.filterType !== "number") return;
 
   const normalizeFilterValue = (value) => {
-    if (value == null || value === "") return value;
-    if (col === "Dividend Yield") return normalizeDividendYield(value);
-    return value;
-  };
+  if (value == null || value === "") return null;
+  if (col === "Market Cap") return parseLargeNumber(value);
+  if (col === "Dividend Yield") return normalizeDividendYield(value);
+  return value;
+};
 
   if (model.type === "greaterThan" || model.type === "greaterThanOrEqual") {
     queryParams[names.min] = normalizeFilterValue(model.filter);
@@ -873,6 +1009,8 @@ const getPreloadedDashboardRows = () => {
 };
 
 const saveScrollPosition = () => {
+  // Don't overwrite the position being restored with an empty grid's scroll.
+  if (restoringScrollRef.current) return;
   const topScroll = document.querySelector(".top-scrollbar");
   const gridViewport = document.querySelector(".ag-body-horizontal-scroll-viewport");
 
@@ -888,10 +1026,87 @@ const restoreScrollPosition = () => {
       if (gridViewport) {
         gridViewport.scrollLeft = savedHorizontalScrollRef.current;
       }
-
       if (topScroll) {
         topScroll.scrollLeft = savedTopScrollRef.current;
       }
+    });
+  });
+};
+
+// Returning from a stock is different from a normal data refresh. Wait for
+// actual rows and AG Grid's column layout before restoring the scroll. AG Grid
+// maintains its own body/header position; changing the custom scrollbar alone
+// can leave the thumb in the middle while the columns stay at the far left.
+const restoreReturnScrollAfterRows = () => {
+  if (!restoringScrollRef.current || !returnState) return;
+
+  const api = gridRef.current?.api;
+  if (!api || api.getDisplayedRowCount() === 0 || returnScrollRestoreStartedRef.current) {
+    return;
+  }
+  returnScrollRestoreStartedRef.current = true;
+
+  const targetLeft = Math.max(0, Number(returnState.horizontalScroll) || 0);
+
+  // First ask AG Grid to navigate to the original area via its own API.
+  // This initializes the grid's internal horizontal scroll/header positions.
+  const centerColumns = (api.getAllDisplayedColumns?.() || []).filter(
+    (col) => !col.getPinned?.()
+  );
+  const anchorColumn = centerColumns.find(
+    (col) => col.getLeft() + col.getActualWidth() > targetLeft
+  );
+  if (anchorColumn && targetLeft > 0) {
+    api.ensureColumnVisible(anchorColumn.getColId(), "start");
+  }
+
+  const applySavedPosition = (finish = false) => {
+    const fakeScroll = document.querySelector(".ag-body-horizontal-scroll-viewport");
+    const bodyScroll = document.querySelector(".ag-center-cols-viewport");
+    const topScroll = document.querySelector(".top-scrollbar");
+
+    // The body is the visible columns, and the fake scrollbar is the AG Grid
+    // scroll control. Sync both rather than only moving the scrollbar thumb.
+    const scrollable = [fakeScroll, bodyScroll].filter(
+      (element) => element && element.scrollWidth > element.clientWidth
+    );
+    const maxGrid = scrollable.length
+      ? Math.max(...scrollable.map((element) => element.scrollWidth - element.clientWidth))
+      : 0;
+    const actualLeft = Math.min(targetLeft, maxGrid);
+
+    for (const element of scrollable) {
+      element.scrollLeft = Math.min(
+        actualLeft,
+        element.scrollWidth - element.clientWidth
+      );
+    }
+
+    if (topScroll) {
+      const maxTop = Math.max(0, topScroll.scrollWidth - topScroll.clientWidth);
+      topScroll.scrollLeft = maxGrid > 0
+        ? (actualLeft / maxGrid) * maxTop
+        : 0;
+    }
+
+    if (finish) {
+      // Do not let fetch/render callbacks capture an old zero scroll position
+      // while we're still restoring the saved one.
+      savedHorizontalScrollRef.current = actualLeft;
+      savedTopScrollRef.current = topScroll?.scrollLeft ?? actualLeft;
+      restoringScrollRef.current = false;
+    }
+  };
+
+  // Wait for the initial layout and for asynchronous row render to settle.
+  // These timers are one-shot and are cleaned up on unmount.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      applySavedPosition();
+      returnScrollRestoreTimersRef.current.push(
+        setTimeout(() => applySavedPosition(), 100),
+        setTimeout(() => applySavedPosition(true), 300)
+      );
     });
   });
 };
@@ -1045,6 +1260,7 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
 
     const baseParams = buildBaseQueryParams();
 
+    const initialPage = Math.max(1, Number(currentPageRef.current) || 1);
     const isDefaultDashboardRequest =
       view !== "Watchlist" &&
       !searchQuery?.trim() &&
@@ -1055,7 +1271,7 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
       !tickersParam &&
       Object.keys(backendFilterModel || {}).length === 0;
 
-    if (isDefaultDashboardRequest) {
+    if (isDefaultDashboardRequest && initialPage === 1) {
       const preloaded = getPreloadedDashboardRows();
 
       if (preloaded?.rows?.length) {
@@ -1077,9 +1293,9 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
       }
     }
 
-    // Load page 1 immediately
+    // Load the saved page when returning from a stock; otherwise load page 1.
     const firstParams = new URLSearchParams(baseParams);
-    firstParams.set("page", "1");
+    firstParams.set("page", String(initialPage));
 
     const firstRes = await fetch(`${API_BASE}/stocks?${firstParams.toString()}`, {
       signal: controller.signal,
@@ -1092,19 +1308,19 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
     const total = typeof firstData?.total === "number" ? firstData.total : 0;
     const pages = typeof firstData?.total_pages === "number" ? firstData.total_pages : 1;
 
-    const initialCache = { 1: firstRows };
+    const initialCache = { [initialPage]: firstRows };
 
 setPageCache(initialCache);
-showRowsForPage(firstRows, 1);
+showRowsForPage(firstRows, initialPage);
 setDisplayedCount(total);
 setTotalPages(pages);
-setCurrentPageTracked(1);
+setCurrentPageTracked(initialPage);
 localStorage.setItem("stocks", JSON.stringify(firstRows));
 setLoading(false);
 
 mergeLivePricesIntoRows(firstRows).then((rowsWithLivePrices) => {
-  setPageCache((prev) => ({ ...prev, 1: rowsWithLivePrices }));
-  showRowsForPage(rowsWithLivePrices, 1);
+  setPageCache((prev) => ({ ...prev, [initialPage]: rowsWithLivePrices }));
+  showRowsForPage(rowsWithLivePrices, initialPage);
   localStorage.setItem("stocks", JSON.stringify(rowsWithLivePrices));
 });
 
@@ -1181,6 +1397,11 @@ mergeLivePricesIntoRows(rows).then((rowsWithLivePrices) => {
 ]);
 
 useEffect(() => {
+  // The first render is restoration, not a user changing filters.
+  if (skipFirstPageResetRef.current) {
+    skipFirstPageResetRef.current = false;
+    return;
+  }
   setCurrentPageTracked(1);
 }, [searchQuery, selectedSector, selectedType, tickerFilter, tickersParam, backendFilterModel, view]);
 
@@ -1562,28 +1783,44 @@ const technicalsColumns = [
           );
 
           return (
-            <span
-              style={{ cursor: "pointer" }}
-              onClick={async () => {
-                const isInActiveList = watchlists[activeList]?.includes(ticker);
+            <div className="save-actions">
+              <button
+                type="button"
+                className="save-icon-button save-star-button"
+                aria-label={`${inAnyWatchlist ? "Edit watchlists for" : "Save"} ${ticker}`}
+                title={inAnyWatchlist ? "Edit watchlists" : "Save to watchlist"}
+                onClick={async (event) => {
+                  event.stopPropagation();
+                  const isInActiveList = watchlists[activeList]?.includes(ticker);
 
-                if (view === "Watchlist" && isInActiveList) {
-  const updated = { ...watchlists };
-  updated[activeList] = updated[activeList].filter((t) => t !== ticker);
-  setWatchlists(updated);
+                  if (view === "Watchlist" && isInActiveList) {
+                    const updated = { ...watchlists };
+                    updated[activeList] = updated[activeList].filter((t) => t !== ticker);
+                    setWatchlists(updated);
+                    await saveWatchlists(updated);
+                    setNotification(`${ticker} removed from watchlist`);
+                    setTimeout(() => setNotification(null), 1500);
+                    return;
+                  }
 
-  await saveWatchlists(updated);
-
-  setNotification(`${ticker} removed from watchlist`);
-  setTimeout(() => setNotification(null), 1500);
-  return;
-}
-
-                openStarModal(ticker);
-              }}
-            >
-              {inAnyWatchlist ? "★" : "☆"}
-            </span>
+                  openStarModal(ticker);
+                }}
+              >
+                {inAnyWatchlist ? "★" : "☆"}
+              </button>
+              <button
+                type="button"
+                className="save-icon-button save-note-button"
+                title={notesStatusErrorRef.current ? "Open notes (status unavailable)" : "Open stock notes"}
+                aria-label={`Open ${ticker} stock notes`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setNotesModalTicker(ticker);
+                }}
+              >
+                <StockNoteIcon filled={!!notesStatusRef.current[ticker]} />
+              </button>
+            </div>
           );
         },
       },
@@ -1622,6 +1859,19 @@ const technicalsColumns = [
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          saveScrollPosition();
+          try {
+            window.sessionStorage.setItem(STOCK_TABLE_RETURN_KEY, JSON.stringify({
+              ...latestScreenerStateRef.current,
+              savedAt: Date.now(),
+              gridFilterModel: gridRef.current?.api?.getFilterModel() ?? latestScreenerStateRef.current.gridFilterModel,
+              currentPage: currentPageRef.current,
+              horizontalScroll: savedHorizontalScrollRef.current,
+              topScroll: savedTopScrollRef.current,
+            }));
+          } catch (err) {
+            console.warn("Could not save screener state", err);
+          }
           navigate(`/stocks/${String(ticker).toUpperCase()}`, { state: { stock: params?.data || null } });
         }}
       >
@@ -1969,16 +2219,35 @@ cellClass: "column-border numeric",
 
       if (["Market Cap", "Day Volume", "EBITDA", "Gross Profit"].includes(col)) {
   columnDef.filter = "agNumberColumnFilter";
+
   columnDef.filterParams = {
-    filterOptions: ["greaterThan", "lessThan", "inRange"],
-    buttons: ["apply", "reset"],
+    filterOptions: [
+      "greaterThan",
+      "greaterThanOrEqual",
+      "lessThan",
+      "lessThanOrEqual",
+      "equals",
+      "inRange",
+    ],
+    buttons: ["reset"],
+    closeOnApply: true,
+    debounceMs: 300,
     suppressAndOrCondition: true,
-    allowedCharPattern: "\\d\\.KMBTkmbt",
+    allowedCharPattern: "0-9.,kKmMbBtT",
     numberParser: (text) => {
-      if (!text) return null;
-      return parseLargeNumber(text);
-    },
+  const parsed = parseLargeNumber(text);
+
+  if (col === "Market Cap") {
+    console.log("[Market Cap Parser]", { text, parsed });
+  }
+
+  return parsed;
+},
+    numberFormatter: (value) =>
+      value == null ? "" : String(value),
+    maxNumConditions: 1,
   };
+
   columnDef.cellClass = "numeric";
 } else if (
         [
@@ -2092,21 +2361,6 @@ useEffect(() => {
   showTable,
 ]);
 
-
-  useEffect(() => {
-  if (view === "Watchlist") return;
-  if (loading) return;
-  if (!gridRef.current?.api) return;
-
-  const currentModel = gridRef.current.api.getFilterModel() || {};
-  const savedModel = gridFilterModel || {};
-
-  if (JSON.stringify(currentModel) !== JSON.stringify(savedModel)) {
-    isRestoringFilterModelRef.current = true;
-    gridRef.current.api.setFilterModel(savedModel);
-  }
-}, [loading, gridFilterModel, view, processedStocks]);
-
 useEffect(() => {
   const loadWatchlists = async () => {
     if (loadingWatchlistsRef.current) return;
@@ -2157,6 +2411,7 @@ if (!user) return;
        * no hiding through the UI, and no pin/unpin changes.
        */
       resizable: !isMobileTableViewport,
+      cellDataType: false,
       sortable: true,
       minWidth: 100,
       suppressMovable: isMobileTableViewport,
@@ -2260,9 +2515,10 @@ if (!user) return;
               <div className="watchlist-controls-left">
                 <div className="watchlist-controls-row">
                   <select
+                    className="watchlist-list-select"
                     value={activeList}
                     onChange={(e) => setActiveList(e.target.value)}
-                    style={{ padding: "4px 8px" }}
+                    aria-label="Select watchlist"
                   >
                     {Object.keys(watchlists).map((listName) => (
                       <option key={listName} value={listName}>
@@ -2272,13 +2528,8 @@ if (!user) return;
                   </select>
 
                   <button
-                    style={{
-                      padding: "4px 8px",
-                      backgroundColor: "#19C37D",
-                      color: "#fff",
-                      border: "none",
-                      cursor: "pointer"
-                    }}
+                    type="button"
+                    className="watchlist-control-btn watchlist-control-btn--new"
                     onClick={async () => {
                       const name = prompt("Enter new watchlist name:");
                       if (!name || watchlists[name]) return;
@@ -2293,13 +2544,8 @@ setActiveList(name);
                   </button>
 
                   <button
-                    style={{
-                      padding: "4px 8px",
-                      backgroundColor: "#3b82f6",
-                      color: "#fff",
-                      border: "none",
-                      cursor: "pointer"
-                    }}
+                    type="button"
+                    className="watchlist-control-btn watchlist-control-btn--rename"
                     onClick={async () => {
                       if (activeList === "Default") {
                         alert("Default watchlist cannot be renamed.");
@@ -2323,13 +2569,8 @@ setActiveList(newName);
                   </button>
 
                   <button
-                    style={{
-                      padding: "4px 8px",
-                      backgroundColor: "#ff4d4f",
-                      color: "#fff",
-                      border: "none",
-                      cursor: "pointer"
-                    }}
+                    type="button"
+                    className="watchlist-control-btn watchlist-control-btn--delete"
                     onClick={async () => {
                       if (activeList === "Default") {
                         alert("Cannot delete the Default watchlist.");
@@ -2350,7 +2591,11 @@ setActiveList("Default");
                     Delete
                   </button>
 
-                  <button onClick={exportToCsv}>
+                  <button
+                    type="button"
+                    className="watchlist-control-btn watchlist-control-btn--export"
+                    onClick={exportToCsv}
+                  >
                     Export Watchlist CSV
                   </button>
                 </div>
@@ -2368,8 +2613,23 @@ setActiveList("Default");
                     }}
                     className="search-input"
                   />
-                  <button onClick={fetchStocks}>Refresh</button>
-                  <button onClick={clearAllFilters}>Clear Filters</button>
+                  <button
+  type="button"
+  className="stock-toolbar-btn stock-toolbar-btn--refresh"
+  onClick={fetchStocks}
+>
+  <span aria-hidden="true">↻</span>
+  Refresh
+</button>
+
+<button
+  type="button"
+  className="stock-toolbar-btn stock-toolbar-btn--clear"
+  onClick={clearAllFilters}
+>
+  <span aria-hidden="true">×</span>
+  Clear Filters
+</button>
                 </div>
               </div>
 
@@ -2406,10 +2666,12 @@ setActiveList("Default");
     />
 
     <select
-      className="search-input"
-      value={selectedType}
-      onChange={(e) => setSelectedType(e.target.value)}
-    >
+  className={`search-input stock-type-select ${
+    selectedType ? "stock-type-select--active" : ""
+  }`}
+  value={selectedType}
+  onChange={(e) => setSelectedType(e.target.value)}
+>
       <option value="">All Types</option>
       {securityTypes.map((type) => (
         <option key={type} value={type}>
@@ -2420,53 +2682,56 @@ setActiveList("Default");
 
     <div style={{ display: "flex", gap: "6px" }}>
   <button
-    className="view-toggle-button"
+    type="button"
+    className={`view-toggle-button ${
+      viewMode === "all data" ? "is-active" : ""
+    }`}
     onClick={() => setViewMode("all data")}
-    style={{
-      padding: "6px 10px",
-      borderRadius: "6px",
-      border: "1px solid #d1d5db",
-      cursor: "pointer",
-      background: viewMode === "all data" ? "#19C37D" : "#ffffff",
-      color: viewMode === "all data" ? "#ffffff" : "#000000"
-    }}
+    aria-pressed={viewMode === "all data"}
   >
     All Data
   </button>
 
   <button
-    className="view-toggle-button"
+    type="button"
+    className={`view-toggle-button ${
+      viewMode === "fundamentals" ? "is-active" : ""
+    }`}
     onClick={() => setViewMode("fundamentals")}
-    style={{
-      padding: "6px 10px",
-      borderRadius: "6px",
-      border: "1px solid #d1d5db",
-      cursor: "pointer",
-      background: viewMode === "fundamentals" ? "#19C37D" : "#ffffff",
-      color: viewMode === "fundamentals" ? "#ffffff" : "#000000"
-    }}
+    aria-pressed={viewMode === "fundamentals"}
   >
     Fundamentals
   </button>
 
   <button
-    className="view-toggle-button"
+    type="button"
+    className={`view-toggle-button ${
+      viewMode === "technicals" ? "is-active" : ""
+    }`}
     onClick={() => setViewMode("technicals")}
-    style={{
-      padding: "6px 10px",
-      borderRadius: "6px",
-      border: "1px solid #d1d5db",
-      cursor: "pointer",
-      background: viewMode === "technicals" ? "#19C37D" : "#ffffff",
-      color: viewMode === "technicals" ? "#ffffff" : "#000000"
-    }}
+    aria-pressed={viewMode === "technicals"}
   >
     Technicals
   </button>
 </div>
 
-    <button onClick={fetchStocks}>Refresh</button>
-    <button onClick={clearAllFilters}>Clear Filters</button>
+    <button
+  type="button"
+  className="stock-toolbar-btn stock-toolbar-btn--refresh"
+  onClick={fetchStocks}
+>
+  <span aria-hidden="true">↻</span>
+  Refresh
+</button>
+
+<button
+  type="button"
+  className="stock-toolbar-btn stock-toolbar-btn--clear"
+  onClick={clearAllFilters}
+>
+  <span aria-hidden="true">×</span>
+  Clear Filters
+</button>
   </div>
 )}
         </>
@@ -2571,9 +2836,40 @@ setActiveList("Default");
   suppressRowClickSelection={true}
   rowHeight={30}
   tooltipShowDelay={0}
-  tooltipHideDelay={25000}
+tooltipHideDelay={25000}
+
+onFilterOpened={(event) => {
+  if (event.column?.getColId() !== "Market Cap") return;
+
+  requestAnimationFrame(() => {
+    const body = event.eGui?.querySelector(".ag-filter-body");
+
+    if (!body || body.querySelector(".market-cap-hint")) return;
+
+    const hint = document.createElement("div");
+    hint.className = "market-cap-hint";
+    hint.textContent =
+      "Example: 1M = million • 1B = billion • 1T = trillion";
+
+    hint.style.cssText = `
+      margin-top: 8px;
+      font-size: 11px;
+      color: #94a3b8;
+      line-height: 1.5;
+    `;
+
+    body.appendChild(hint);
+  });
+}}
   onGridReady={(params) => {
   gridRef.current = params;
+
+  if (returnState) {
+    params.api.setFilterModel(returnState.gridFilterModel || null);
+    if (view === "Watchlist" && returnState.typedQuery) {
+      params.api.setGridOption("quickFilterText", returnState.typedQuery);
+    }
+  }
 
   if (view === "Watchlist") {
     setDisplayedCount(params.api.getDisplayedRowCount());
@@ -2586,22 +2882,48 @@ setActiveList("Default");
   }
 }}
         onFirstDataRendered={(params) => {
+  if (restoringScrollRef.current) {
+    restoreReturnScrollAfterRows();
+  }
+  restoringGridRef.current = false;
   if (view === "Watchlist") {
     setDisplayedCount(params.api.getDisplayedRowCount());
   } else {
     scheduleVisibleSparklineLoad();
   }
 }}
+        onModelUpdated={() => {
+  // First data-rendered may fire before the initial /stocks request finishes.
+  // Restore again only once real rows exist, without resetting saved filters.
+  if (restoringScrollRef.current) restoreReturnScrollAfterRows();
+}}
         onFilterChanged={(params) => {
-  if (isRestoringFilterModelRef.current) {
-    isRestoringFilterModelRef.current = false;
-    return;
-  }
 
   saveScrollPosition();
 
   const model = params.api.getFilterModel();
-  setGridFilterModel(model);
+
+  // AG Grid can report the same model again as it initializes or rerenders.
+  // That is not a user change and must not reset the saved page.
+  if (JSON.stringify(model) === JSON.stringify(latestScreenerStateRef.current?.gridFilterModel || {})) {
+    restoreScrollPosition();
+    return;
+  }
+
+  if (restoringGridRef.current) {
+    // Grid initialization can emit filter events; don't reset the saved page
+    // or replace saved backend filters while restoring AG Grid's filter model.
+    setGridFilterModel(model);
+    restoreScrollPosition();
+    return;
+  }
+
+console.log("[Filter Debug]", {
+  marketCapModel: model?.["Market Cap"],
+  backendParams: buildBackendFilterParams(model),
+});
+
+setGridFilterModel(model);
 
   if (view === "Watchlist") {
     setDisplayedCount(params.api.getDisplayedRowCount());
@@ -2719,6 +3041,13 @@ onDisplayedColumnsChanged={updateAllocationFloatingPosition}
         </button>
       </div>
     )}
+
+    <StockNotesModal
+      isOpen={Boolean(notesModalTicker)}
+      ticker={notesModalTicker}
+      onClose={() => setNotesModalTicker(null)}
+      onNotesChanged={() => setNotesRefreshVersion((version) => version + 1)}
+    />
 
     {starModalOpen && (
       <div

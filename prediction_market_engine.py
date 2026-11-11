@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import copy
 import hashlib
 import io
@@ -1108,8 +1109,9 @@ def as_float(value: Any) -> Optional[float]:
     try:
         if value in (None, ""):
             return None
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 def first_non_empty(
@@ -10315,11 +10317,29 @@ def positive_net_depth_capacity(
     next_price: Optional[Dict[str, Any]] = None
     stop_reason: Optional[str] = None
     epsilon = 1e-12
+    max_depth_steps = len(poly) + len(kalshi) + 1
+    depth_steps = 0
 
     while i < len(poly) and j < len(kalshi):
+        depth_steps += 1
+
+        if depth_steps > max_depth_steps:
+            stop_reason = "order_book_depth_did_not_advance"
+            break
+
         poly_price = float(poly[i][0])
         kalshi_price = float(kalshi[j][0])
         quantity = min(poly_remaining, kalshi_remaining)
+
+        if not all(math.isfinite(v) for v in (
+                poly_price,
+                kalshi_price,
+                poly_remaining,
+                kalshi_remaining,
+                quantity,
+        )):
+            stop_reason = "invalid_order_book_depth"
+            break
 
         if quantity <= epsilon:
             if poly_remaining <= epsilon:
@@ -11573,7 +11593,7 @@ def price_pair(
         "polymarket": {
             "marketId": poly_market.external_market_id,
             "eventId": poly_market.external_event_id,
-            "url": market_url(poly_market),
+            "url": polymarket_international_url(poly_market),
             "yesLabel": poly_contract.yes_label,
             "noLabel": poly_contract.no_label,
             "yesAsk": rounded_or_none(poly_yes),
@@ -13250,6 +13270,14 @@ def price_live_pair_snapshot(
         pricing_context.kalshi_fee_configuration,
         route_health=route_health,
         source_snapshot=snapshot,
+    )
+
+    priced.update(
+        event_timing_payload(
+            str(priced.get("marketGroup") or ""),
+            priced.get("scheduledTime"),
+            datetime.now(timezone.utc),
+        )
     )
 
     priced["liveComplete"] = bool(priced.get("readyRouteCount") == 2)

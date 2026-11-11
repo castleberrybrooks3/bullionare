@@ -3276,6 +3276,12 @@ async def terminal_websocket(websocket: WebSocket):
                 last_revision,
                 timeout=15.0,
             )
+            # The first browser may connect before the singleton publisher has
+            # completed pricing. Keep the socket alive instead of requesting a
+            # snapshot that does not exist yet (and failing with HTTP 503).
+            if _terminal_state is None:
+                await asyncio.sleep(1.0)
+                continue
             current_catalog_epoch = _terminal_catalog_epoch
             if current_revision == last_revision:
                 await websocket.send_text(
